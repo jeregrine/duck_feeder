@@ -5,7 +5,7 @@ defmodule DuckFeeder.Ingest do
 
   use GenServer
 
-  alias DuckFeeder.CDC.Router
+  alias DuckFeeder.CDC.{ChangelogRow, Router}
   alias DuckFeeder.TablePipeline
 
   defmodule State do
@@ -154,15 +154,8 @@ defmodule DuckFeeder.Ingest do
 
   defp enrich_change(change, transaction) do
     change
-    |> Map.put(:_commit_lsn, transaction.end_lsn)
-    |> Map.put(:_xid, transaction.xid)
-    |> Map.put(:_op, op_code(change[:op]))
-    |> Map.put(:_ingest_ts, DateTime.utc_now())
+    |> ChangelogRow.from_change(transaction)
+    |> Map.put(:designated_table_id, change[:designated_table_id])
+    |> Map.put(:target_relation, change[:target_relation])
   end
-
-  defp op_code(:insert), do: "I"
-  defp op_code(:update), do: "U"
-  defp op_code(:delete), do: "D"
-  defp op_code(:truncate), do: "T"
-  defp op_code(other), do: to_string(other)
 end
