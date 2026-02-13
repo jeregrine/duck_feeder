@@ -37,6 +37,18 @@ defmodule DuckFeeder do
   defdelegate stream_worker_info(server), to: DuckFeeder.Runtime.StreamWorker, as: :stream_info
   defdelegate start_runtime_supervisor(opts), to: DuckFeeder.Runtime.Supervisor, as: :start_link
 
+  defdelegate start_runtime_manager(opts), to: DuckFeeder.Runtime.Manager, as: :start_link
+
+  defdelegate start_source_runtime(manager, source_name, opts \\ []),
+    to: DuckFeeder.Runtime.Manager,
+    as: :start_source
+
+  defdelegate stop_source_runtime(manager, source_name),
+    to: DuckFeeder.Runtime.Manager,
+    as: :stop_source
+
+  defdelegate list_source_runtimes(manager), to: DuckFeeder.Runtime.Manager, as: :list_sources
+
   defdelegate start_cdc_connection(opts), to: DuckFeeder.CDC.Connection, as: :start_link
 
   defdelegate reconcile(context, opts \\ []), to: DuckFeeder.Reconciler

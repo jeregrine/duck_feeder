@@ -61,6 +61,7 @@ This tracks progress against `docs/plan_compact.md`.
   - [x] `DuckFeeder.Runtime.start_stream/4` service + CDC stream startup wiring
   - [x] `DuckFeeder.Runtime.StreamWorker` managed stream lifecycle wrapper
   - [x] `DuckFeeder.Runtime.Supervisor` stream+reconciler lifecycle wrapper
+  - [x] `DuckFeeder.Runtime.Manager` dynamic multi-source runtime manager
   - [x] existing-app supervision integration runbook (`docs/existing_app_supervision.md`)
   - [x] existing-app runtime child-spec helpers (`DuckFeeder.Integration`)
 

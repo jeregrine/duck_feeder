@@ -56,12 +56,32 @@ end
 
 ## Multi-source pattern
 
-For multiple sources, start one `DuckFeeder.Runtime.Supervisor` child per source name.
-Use explicit names for observability and control:
+Two options:
+
+1. Static source set: one `DuckFeeder.Runtime.Supervisor` child per source name.
+2. Dynamic source set: run `DuckFeeder.Runtime.Manager` and start/stop sources at runtime.
+
+Static example:
 
 ```elixir
 {DuckFeeder.Runtime.Supervisor, name: MyApp.DuckFeeder.SourceA, source_name: "source_a", ...}
 {DuckFeeder.Runtime.Supervisor, name: MyApp.DuckFeeder.SourceB, source_name: "source_b", ...}
+```
+
+Dynamic example:
+
+```elixir
+{DuckFeeder.Runtime.Manager,
+ [
+   name: MyApp.DuckFeeder.Manager,
+   meta_conn: MyApp.DuckFeederMetaConn,
+   storage_config: storage_config,
+   base_opts: [start_reconciler?: true]
+ ]}
+
+# later
+DuckFeeder.start_source_runtime(MyApp.DuckFeeder.Manager, "source_a")
+DuckFeeder.stop_source_runtime(MyApp.DuckFeeder.Manager, "source_a")
 ```
 
 ## Common pitfalls

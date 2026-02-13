@@ -91,6 +91,17 @@ Runtime/service startup accepts `committer_module` and `committer_opts` passthro
     storage_config: storage_config,
     start_reconciler?: true
   )
+
+# Dynamic multi-source manager
+{:ok, mgr} =
+  DuckFeeder.start_runtime_manager(
+    meta_conn: meta_conn,
+    storage_config: storage_config
+  )
+
+{:ok, _pid} = DuckFeeder.start_source_runtime(mgr, "source-a")
+%{"source-a" => _pid} = DuckFeeder.list_source_runtimes(mgr)
+:ok = DuckFeeder.stop_source_runtime(mgr, "source-a")
 ```
 
 Optional snapshot-before-stream mode is available via:
@@ -251,6 +262,8 @@ scripts/test_integration.sh --down
 
 Core events currently emitted:
 - `[:duck_feeder, :cdc, :event]`
+- `[:duck_feeder, :cdc, :connection]`
+- `[:duck_feeder, :cdc, :frame]`
 - `[:duck_feeder, :batch, :flushed]`
 - `[:duck_feeder, :batch, :processed]`
 - `[:duck_feeder, :reconciler, :run]`
