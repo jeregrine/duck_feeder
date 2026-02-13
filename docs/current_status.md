@@ -33,6 +33,7 @@ This tracks progress against `docs/plan_compact.md`.
   - [x] `DuckFeeder.CDC.MessageMapper` (generic message->event mapping)
   - [x] `DuckFeeder.CDC.SnapshotBoundary`
   - [x] `DuckFeeder.CDC.InitialSnapshot` (snapshot tx + copy SQL helpers)
+  - [x] `DuckFeeder.CDC.InitialSnapshot.Runner` (table copy + row dispatch orchestration)
   - [x] `DuckFeeder.CDC.Connection` (`Postgrex.ReplicationConnection` stream client)
   - [x] runtime bootstrap integration (`DuckFeeder.Runtime.start_stream/4` + `DuckFeeder.CDC.Bootstrap`)
   - [x] `DuckFeeder.CDC.Pipeline`

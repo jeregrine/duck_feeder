@@ -129,6 +129,7 @@ Added normalized CDC event and routing modules:
 - `DuckFeeder.CDC.MessageMapper`
 - `DuckFeeder.CDC.SnapshotBoundary`
 - `DuckFeeder.CDC.InitialSnapshot`
+- `DuckFeeder.CDC.InitialSnapshot.Runner`
 - `DuckFeeder.CDC.Connection`
 - `DuckFeeder.CDC.Pipeline`
 - `DuckFeeder.Service`
