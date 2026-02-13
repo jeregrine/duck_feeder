@@ -66,6 +66,15 @@ running DuckLake SQL statements + checkpoint commit in one transaction.
   )
 
 {:ok, _info} = DuckFeeder.stream_worker_info(worker)
+
+# Optional higher-level supervisor wrapper
+{:ok, runtime_sup} =
+  DuckFeeder.start_runtime_supervisor(
+    meta_conn: meta_conn,
+    source_name: "source-a",
+    storage_config: storage_config,
+    start_reconciler?: true
+  )
 ```
 
 Optional snapshot-before-stream mode is available via:

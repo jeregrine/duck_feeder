@@ -56,6 +56,7 @@ This tracks progress against `docs/plan_compact.md`.
   - [x] `DuckFeeder.Runtime` metadata-driven service boot wiring
   - [x] `DuckFeeder.Runtime.start_stream/4` service + CDC stream startup wiring
   - [x] `DuckFeeder.Runtime.StreamWorker` managed stream lifecycle wrapper
+  - [x] `DuckFeeder.Runtime.Supervisor` stream+reconciler lifecycle wrapper
 
 - [x] **Observability foundations**
   - [x] telemetry helper module (`DuckFeeder.Telemetry`)

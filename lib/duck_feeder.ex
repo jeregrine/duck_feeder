@@ -28,6 +28,7 @@ defmodule DuckFeeder do
 
   defdelegate start_stream_worker(opts), to: DuckFeeder.Runtime.StreamWorker, as: :start_link
   defdelegate stream_worker_info(server), to: DuckFeeder.Runtime.StreamWorker, as: :stream_info
+  defdelegate start_runtime_supervisor(opts), to: DuckFeeder.Runtime.Supervisor, as: :start_link
 
   defdelegate start_cdc_connection(opts), to: DuckFeeder.CDC.Connection, as: :start_link
 
