@@ -124,6 +124,9 @@ defmodule DuckFeeder.DuckLake.Committer.PostgresTest do
     assert_received {:query, stats_sql, ["batch-1"]}
     assert stats_sql =~ "INSERT INTO ducklake_metadata.ducklake_table_stats"
 
+    assert_received {:query, history_sql, ["batch-1", "raw/users/file-1.parquet", 10, 99]}
+    assert history_sql =~ "INSERT INTO duckfeeder_meta.schema_history"
+
     assert_received {:query, log_sql, ["batch-1", "raw/users/file-1.parquet", 10, 99]}
     assert log_sql =~ "INSERT INTO duckfeeder_meta.ducklake_commits"
 

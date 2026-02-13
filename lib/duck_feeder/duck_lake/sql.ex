@@ -54,6 +54,33 @@ defmodule DuckFeeder.DuckLake.SQL do
     updated_at = now()
   """
 
+  @default_schema_history_sql """
+  INSERT INTO duckfeeder_meta.schema_history
+    (
+      designated_table_id,
+      relation_oid,
+      schema_version,
+      event_type,
+      payload,
+      seen_lsn,
+      inserted_at
+    )
+  SELECT
+    batches.designated_table_id,
+    NULL,
+    1,
+    'ducklake_commit_append',
+    jsonb_build_object(
+      'object_key', $2,
+      'row_count', $3,
+      'file_size', $4
+    ),
+    batches.lsn_end,
+    now()
+  FROM duckfeeder_meta.batches batches
+  WHERE batches.batch_id = $1
+  """
+
   @default_commit_log_sql """
   INSERT INTO duckfeeder_meta.ducklake_commits
     (
@@ -119,7 +146,8 @@ defmodule DuckFeeder.DuckLake.SQL do
 
       [
         {@default_spec_snapshot_file_sql, params},
-        {@default_spec_table_stats_sql, [batch_id]}
+        {@default_spec_table_stats_sql, [batch_id]},
+        {@default_schema_history_sql, params}
         | maybe_commit_log_statement(include_commit_log?, params)
       ]
     else
