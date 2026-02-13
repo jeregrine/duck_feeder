@@ -8,6 +8,12 @@ defmodule DuckFeeder do
   defdelegate validate_config(config), to: DuckFeeder.Config, as: :validate
   defdelegate validate_config!(config), to: DuckFeeder.Config, as: :validate!
 
+  defdelegate write_batch(writer_config, batch, opts \\ []), to: DuckFeeder.Writer
+
+  defdelegate cleanup_written_batch(writer_config, write_result),
+    to: DuckFeeder.Writer,
+    as: :cleanup
+
   defdelegate put_file(storage_config, local_path, relative_key, opts \\ []),
     to: DuckFeeder.Storage
 

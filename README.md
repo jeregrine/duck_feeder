@@ -12,6 +12,16 @@ HTTP stack is **Req-only** (no hackney dependency in this project).
 
 `DuckFeeder.Config` validates runtime config (source/storage/metadata/ingest) with NimbleOptions.
 
+## Writer API (temporary adapter)
+
+`DuckFeeder.Writer` currently defaults to `DuckFeeder.Writer.Jsonl` as a placeholder.
+This will be swapped for the Parquet/Rust writer adapter.
+
+```elixir
+{:ok, write_result} = DuckFeeder.write_batch(%{}, %{rows: [%{"id" => 1}]})
+:ok = DuckFeeder.cleanup_written_batch(%{}, write_result)
+```
+
 ## Storage API
 
 ```elixir
