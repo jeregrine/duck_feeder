@@ -84,6 +84,10 @@ Typical bootstrap/use flow:
   })
 
 {:ok, "0/0"} = DuckFeeder.Meta.fetch_checkpoint(conn, designated_table_id)
+
+# after files are uploaded and batch state is :uploaded
+{:ok, %{checkpoint_lsn: _lsn, committed?: true}} =
+  DuckFeeder.Meta.commit_uploaded_batch(conn, batch_id)
 ```
 
 ## Notes

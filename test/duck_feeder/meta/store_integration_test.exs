@@ -103,6 +103,80 @@ defmodule DuckFeeder.Meta.StoreIntegrationTest do
              )
   end
 
+  test "commit_uploaded_batch advances checkpoint and is idempotent", %{
+    conn: conn,
+    designated_table_id: designated_table_id,
+    unique: unique
+  } do
+    batch_id = "batch_commit_#{unique}"
+
+    assert {:ok, _} =
+             Meta.insert_batch(conn, %{
+               batch_id: batch_id,
+               designated_table_id: designated_table_id,
+               lsn_start: "0/16B6C10",
+               lsn_end: "0/16B6D00",
+               state: :uploaded
+             })
+
+    assert {:ok, "0/0"} = Meta.fetch_checkpoint(conn, designated_table_id)
+
+    assert {:ok,
+            %{
+              batch_id: ^batch_id,
+              checkpoint_lsn: "0/16B6D00",
+              committed?: true,
+              already_committed?: false
+            }} = Meta.commit_uploaded_batch(conn, batch_id)
+
+    assert {:ok,
+            %{
+              batch_id: ^batch_id,
+              checkpoint_lsn: "0/16B6D00",
+              committed?: true,
+              already_committed?: true
+            }} = Meta.commit_uploaded_batch(conn, batch_id)
+
+    assert {:ok, :committed} = Meta.get_batch_state(conn, batch_id)
+    assert {:ok, "0/16B6D00"} = Meta.fetch_checkpoint(conn, designated_table_id)
+
+    low_batch_id = "batch_commit_low_#{unique}"
+
+    assert {:ok, _} =
+             Meta.insert_batch(conn, %{
+               batch_id: low_batch_id,
+               designated_table_id: designated_table_id,
+               lsn_start: "0/16B6A10",
+               lsn_end: "0/16B6B00",
+               state: :uploaded
+             })
+
+    assert {:ok, %{checkpoint_lsn: "0/16B6D00"}} =
+             Meta.commit_uploaded_batch(conn, low_batch_id)
+
+    assert {:ok, "0/16B6D00"} = Meta.fetch_checkpoint(conn, designated_table_id)
+  end
+
+  test "commit_uploaded_batch rejects non-uploaded states", %{
+    conn: conn,
+    designated_table_id: designated_table_id,
+    unique: unique
+  } do
+    batch_id = "batch_commit_invalid_#{unique}"
+
+    assert {:ok, _} =
+             Meta.insert_batch(conn, %{
+               batch_id: batch_id,
+               designated_table_id: designated_table_id,
+               lsn_start: "0/16B6C10",
+               lsn_end: "0/16B6C40",
+               state: :pending
+             })
+
+    assert {:error, {:invalid_batch_commit_state, :pending}} =
+             Meta.commit_uploaded_batch(conn, batch_id)
+  end
+
   test "put_batch_file upserts existing object key", %{
     conn: conn,
     designated_table_id: designated_table_id,

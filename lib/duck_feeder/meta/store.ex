@@ -84,6 +84,22 @@ defmodule DuckFeeder.Meta.Store do
   FOR UPDATE
   """
 
+  @lock_batch_for_commit_sql """
+  SELECT designated_table_id, lsn_end::text, state
+  FROM duckfeeder_meta.batches
+  WHERE batch_id = $1
+  FOR UPDATE
+  """
+
+  @upsert_checkpoint_max_sql """
+  INSERT INTO duckfeeder_meta.checkpoints (designated_table_id, last_committed_lsn, updated_at)
+  VALUES ($1, $2::pg_lsn, now())
+  ON CONFLICT (designated_table_id) DO UPDATE SET
+    last_committed_lsn = GREATEST(duckfeeder_meta.checkpoints.last_committed_lsn, EXCLUDED.last_committed_lsn),
+    updated_at = now()
+  RETURNING last_committed_lsn::text
+  """
+
   @transition_batch_sql """
   UPDATE duckfeeder_meta.batches
   SET
@@ -254,6 +270,40 @@ defmodule DuckFeeder.Meta.Store do
     end
   end
 
+  @spec commit_uploaded_batch(conn(), String.t()) ::
+          {:ok,
+           %{
+             batch_id: String.t(),
+             designated_table_id: pos_integer(),
+             batch_lsn_end: String.t(),
+             checkpoint_lsn: String.t(),
+             committed?: true,
+             already_committed?: boolean()
+           }}
+          | {:error, term()}
+  def commit_uploaded_batch(conn, batch_id) when is_binary(batch_id) do
+    conn
+    |> Postgrex.transaction(fn tx_conn ->
+      with {:ok, batch} <- lock_batch_for_commit(tx_conn, batch_id),
+           {:ok, to_state} <- commit_target_state(batch.state),
+           {:ok, checkpoint_lsn} <-
+             upsert_checkpoint_max(tx_conn, batch.designated_table_id, batch.lsn_end),
+           {:ok, _} <- maybe_transition_for_commit(tx_conn, batch_id, batch.state, to_state) do
+        %{
+          batch_id: batch_id,
+          designated_table_id: batch.designated_table_id,
+          batch_lsn_end: batch.lsn_end,
+          checkpoint_lsn: checkpoint_lsn,
+          committed?: true,
+          already_committed?: batch.state == :committed
+        }
+      else
+        {:error, reason} -> Postgrex.rollback(tx_conn, reason)
+      end
+    end)
+    |> normalize_transaction_result()
+  end
+
   @spec put_batch_file(conn(), map()) :: {:ok, pos_integer()} | {:error, term()}
   def put_batch_file(conn, attrs) when is_map(attrs) do
     with {:ok, batch_id} <- fetch_required(attrs, :batch_id),
@@ -273,6 +323,41 @@ defmodule DuckFeeder.Meta.Store do
            ),
          {:ok, id} <- single_value(result) do
       {:ok, id}
+    end
+  end
+
+  defp lock_batch_for_commit(conn, batch_id) do
+    with {:ok, result} <- query(conn, @lock_batch_for_commit_sql, [batch_id]) do
+      case result.rows do
+        [[designated_table_id, lsn_end, state]] ->
+          with {:ok, state} <- BatchState.from_db(state) do
+            {:ok, %{designated_table_id: designated_table_id, lsn_end: lsn_end, state: state}}
+          end
+
+        [] ->
+          {:error, {:batch_not_found, batch_id}}
+      end
+    end
+  end
+
+  defp commit_target_state(:uploaded), do: {:ok, :committed}
+  defp commit_target_state(:committed), do: {:ok, :committed}
+  defp commit_target_state(state), do: {:error, {:invalid_batch_commit_state, state}}
+
+  defp upsert_checkpoint_max(conn, designated_table_id, lsn_end) do
+    with {:ok, result} <- query(conn, @upsert_checkpoint_max_sql, [designated_table_id, lsn_end]),
+         {:ok, checkpoint_lsn} <- single_value(result) do
+      {:ok, checkpoint_lsn}
+    end
+  end
+
+  defp maybe_transition_for_commit(_conn, _batch_id, :committed, :committed),
+    do: {:ok, :committed}
+
+  defp maybe_transition_for_commit(conn, batch_id, from_state, to_state) do
+    with :ok <- BatchState.validate_transition(from_state, to_state),
+         {:ok, _} <- update_batch_state(conn, batch_id, to_state, nil) do
+      {:ok, to_state}
     end
   end
 
