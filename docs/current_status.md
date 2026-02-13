@@ -27,6 +27,9 @@ This tracks progress against `docs/plan_compact.md`.
   - [x] `DuckFeeder.CDC.Setup` (publication/slot SQL helpers)
   - [x] `DuckFeeder.CDC.Bootstrap` (startup orchestration for publication/slot/LSN)
   - [x] `DuckFeeder.CDC.ReplicationProtocol` (replication SQL + status message encoding)
+  - [x] `DuckFeeder.CDC.LogicalReplication.Messages` (pgoutput wire message structs)
+  - [x] `DuckFeeder.CDC.LogicalReplication.Decoder` (pgoutput wire decoding)
+  - [x] `DuckFeeder.CDC.LogicalReplication.Converter` (wire message -> normalized event conversion)
   - [x] `DuckFeeder.CDC.MessageMapper` (generic message->event mapping)
   - [x] `DuckFeeder.CDC.SnapshotBoundary`
   - [x] `DuckFeeder.CDC.Pipeline`
@@ -62,7 +65,7 @@ This tracks progress against `docs/plan_compact.md`.
 ## Remaining to reach target architecture
 
 - [ ] **Real Postgres logical replication client** (`Postgrex.ReplicationConnection`)
-- [ ] **pgoutput wire decoding** into `DuckFeeder.CDC.Event`
+- [ ] **pgoutput wire decoding integration** into live replication stream (`Postgrex.ReplicationConnection`)
 - [ ] **Initial snapshot + WAL handoff**
 - [ ] **Parquet writer adapter** (Rustler/NIF path)
 - [ ] **DuckLake metadata SQL commit implementation** (spec-aligned)
