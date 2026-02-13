@@ -10,9 +10,14 @@ Started with a **semi-generic storage interface** supporting:
 
 HTTP stack is **Req-only** (no hackney dependency in this project).
 
+`DuckFeeder.Config` validates runtime config (source/storage/metadata/ingest) with NimbleOptions.
+
 ## Storage API
 
 ```elixir
+{:ok, config} = DuckFeeder.validate_config(runtime_config)
+storage_config = DuckFeeder.Config.storage_config(config)
+
 DuckFeeder.put_file(storage_config, "/tmp/batch.parquet", "events/table=users/part-0001.parquet")
 DuckFeeder.head_object(storage_config, "events/table=users/part-0001.parquet")
 DuckFeeder.delete_object(storage_config, "events/table=users/part-0001.parquet")

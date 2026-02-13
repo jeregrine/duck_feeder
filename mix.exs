@@ -22,7 +22,8 @@ defmodule DuckFeeder.MixProject do
   defp deps do
     [
       {:req, "~> 0.5"},
-      {:postgrex, "~> 0.20"}
+      {:postgrex, "~> 0.20"},
+      {:nimble_options, "~> 1.1"}
     ]
   end
 end

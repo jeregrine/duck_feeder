@@ -5,6 +5,9 @@ defmodule DuckFeeder do
   Currently exposes storage writes through a semi-generic interface.
   """
 
+  defdelegate validate_config(config), to: DuckFeeder.Config, as: :validate
+  defdelegate validate_config!(config), to: DuckFeeder.Config, as: :validate!
+
   defdelegate put_file(storage_config, local_path, relative_key, opts \\ []),
     to: DuckFeeder.Storage
 
