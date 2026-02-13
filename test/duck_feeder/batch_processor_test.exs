@@ -33,6 +33,8 @@ defmodule DuckFeeder.BatchProcessorTest do
        }}
     end
 
+    def get_source_id_for_batch(batch_id), do: Process.get({:designated_table_id, batch_id})
+
     defp notify(message) do
       if pid = Process.get(:test_pid), do: send(pid, message)
     end
@@ -99,6 +101,22 @@ defmodule DuckFeeder.BatchProcessorTest do
     def delete_object(_config, _object_ref), do: :ok
   end
 
+  defmodule FakeCommitter do
+    @behaviour DuckFeeder.DuckLake.Committer
+
+    @impl true
+    def commit_batch(_meta_conn, batch_id, opts) do
+      if pid = Process.get(:test_pid), do: send(pid, {:committer_commit_batch, batch_id, opts})
+
+      {:ok,
+       %{
+         batch_id: batch_id,
+         designated_table_id: opts[:meta_module] |> apply(:get_source_id_for_batch, [batch_id]),
+         checkpoint_lsn: "0/11"
+       }}
+    end
+  end
+
   setup do
     Process.put(:test_pid, self())
     :ok
@@ -130,6 +148,28 @@ defmodule DuckFeeder.BatchProcessorTest do
     assert_received {:meta_transition_batch, "batch-test", :uploaded, []}
     assert_received {:meta_commit_uploaded_batch, "batch-test"}
     assert_received {:writer_cleanup, _path}
+  end
+
+  test "supports custom committer module" do
+    context = %{
+      meta_module: FakeMeta,
+      meta_conn: :fake_conn,
+      designated_table_by_target: %{{"raw", "users"} => 7},
+      writer: %{adapter: FakeWriter},
+      storage: %{provider: :s3, bucket: "bucket", adapter: FakeStorage},
+      committer_module: FakeCommitter,
+      object_prefix: "cdc"
+    }
+
+    batch = %{rows: [%{"id" => 1}], lsn_start: "0/10", lsn_end: "0/11", row_count: 1}
+
+    assert {:ok, result} = BatchProcessor.process_batch(context, {"raw", "users"}, batch)
+    assert result.status == :committed
+
+    assert_received {:committer_commit_batch, "batch-test", opts}
+    assert opts[:meta_module] == FakeMeta
+
+    refute_received {:meta_commit_uploaded_batch, "batch-test"}
   end
 
   test "marks batch failed when upload fails" do

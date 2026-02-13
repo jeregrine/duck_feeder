@@ -4,6 +4,7 @@ defmodule DuckFeeder.BatchProcessor do
   """
 
   alias DuckFeeder.{Meta, Storage, Writer}
+  alias DuckFeeder.DuckLake.Committer.Noop, as: NoopCommitter
 
   @type context :: %{
           required(:meta_conn) => term(),
@@ -13,7 +14,8 @@ defmodule DuckFeeder.BatchProcessor do
           required(:writer) => map(),
           required(:storage) => map(),
           optional(:object_prefix) => String.t(),
-          optional(:meta_module) => module()
+          optional(:meta_module) => module(),
+          optional(:committer_module) => module()
         }
 
   @type batch :: %{
@@ -92,6 +94,8 @@ defmodule DuckFeeder.BatchProcessor do
   end
 
   defp finalize_written_batch(context, meta, conn, table, batch, batch_id, write_result) do
+    committer_module = Map.get(context, :committer_module, NoopCommitter)
+
     with {:ok, object_key} <- object_key(context, table, batch, batch_id, write_result.format),
          {:ok, upload_result} <-
            Storage.put_file(context.storage, write_result.local_path, object_key),
@@ -105,7 +109,14 @@ defmodule DuckFeeder.BatchProcessor do
              checksum: nil
            }),
          {:ok, :uploaded} <- advance_to(meta, conn, batch_id, :encoded, :uploaded),
-         {:ok, commit_result} <- meta.commit_uploaded_batch(conn, batch_id) do
+         {:ok, commit_result} <-
+           committer_module.commit_batch(conn, batch_id,
+             meta_module: meta,
+             table: table,
+             batch: batch,
+             object_key: object_key,
+             write_result: write_result
+           ) do
       {:ok,
        %{
          status: :committed,

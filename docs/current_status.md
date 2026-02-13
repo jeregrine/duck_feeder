@@ -41,6 +41,7 @@ This tracks progress against `docs/plan_compact.md`.
   - [x] temporary `DuckFeeder.Writer.Jsonl` adapter
   - [x] placeholder `DuckFeeder.Writer.ParquetNif` adapter
   - [x] `DuckFeeder.BatchProcessor`
+  - [x] `DuckFeeder.DuckLake.Committer` interface + no-op committer
   - [x] `DuckFeeder.Service` end-to-end wiring module
   - [x] `DuckFeeder.Runtime` metadata-driven service boot wiring
 
