@@ -17,8 +17,20 @@ defmodule DuckFeeder.WriterTest do
     refute File.exists?(result.local_path)
   end
 
-  test "returns error for invalid adapter" do
+  test "supports format-based adapter selection" do
+    assert {:error, :parquet_nif_not_implemented} =
+             Writer.write_batch(%{format: :parquet}, %{rows: []})
+
+    assert {:ok, result} = Writer.write_batch(%{format: :jsonl}, %{rows: [%{"id" => 1}]})
+    assert result.format == :jsonl
+    assert :ok = Writer.cleanup(%{format: :jsonl}, result)
+  end
+
+  test "returns error for invalid adapter and format" do
     assert {:error, {:invalid_writer_adapter, "bad"}} =
              Writer.write_batch(%{adapter: "bad"}, %{rows: []})
+
+    assert {:error, {:invalid_writer_format, :csv}} =
+             Writer.write_batch(%{format: :csv}, %{rows: []})
   end
 end

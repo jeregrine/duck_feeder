@@ -28,6 +28,8 @@ You can seed `duckfeeder_meta` source + designated table rows from runtime confi
 `DuckFeeder.Writer.ParquetNif` exists as the not-yet-implemented adapter target for
 Parquet/Rust integration.
 
+You can select by format (`:jsonl | :parquet`) or explicit adapter module.
+
 ```elixir
 {:ok, write_result} = DuckFeeder.write_batch(%{}, %{rows: [%{"id" => 1}]})
 :ok = DuckFeeder.cleanup_written_batch(%{}, write_result)

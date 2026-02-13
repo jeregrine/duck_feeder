@@ -6,10 +6,11 @@ defmodule DuckFeeder.Writer do
   Parquet/Rust writer integration is wired in.
   """
 
-  alias DuckFeeder.Writer.{Adapter, Jsonl}
+  alias DuckFeeder.Writer.{Adapter, Jsonl, ParquetNif}
 
   @type t :: %{
           optional(:adapter) => module(),
+          optional(:format) => :jsonl | :parquet | :parquet_nif,
           optional(:adapter_opts) => map()
         }
 
@@ -31,9 +32,19 @@ defmodule DuckFeeder.Writer do
   @spec adapter_module(t()) :: {:ok, module()} | {:error, term()}
   def adapter_module(config) when is_map(config) do
     case Map.get(config, :adapter) do
-      adapter when is_atom(adapter) and not is_nil(adapter) -> {:ok, adapter}
-      nil -> {:ok, Jsonl}
-      other -> {:error, {:invalid_writer_adapter, other}}
+      adapter when is_atom(adapter) and not is_nil(adapter) ->
+        {:ok, adapter}
+
+      nil ->
+        adapter_from_format(Map.get(config, :format, :jsonl))
+
+      other ->
+        {:error, {:invalid_writer_adapter, other}}
     end
   end
+
+  defp adapter_from_format(:jsonl), do: {:ok, Jsonl}
+  defp adapter_from_format(:parquet), do: {:ok, ParquetNif}
+  defp adapter_from_format(:parquet_nif), do: {:ok, ParquetNif}
+  defp adapter_from_format(other), do: {:error, {:invalid_writer_format, other}}
 end
