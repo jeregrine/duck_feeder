@@ -130,6 +130,19 @@ Typical bootstrap/use flow:
   DuckFeeder.Meta.commit_uploaded_batch(conn, batch_id)
 ```
 
+## Integration testing
+
+- Compose stack: `dev/docker-compose.integration.yml`
+- Helper script: `scripts/test_integration.sh`
+
+Run:
+
+```bash
+scripts/test_integration.sh
+# ... later
+scripts/test_integration.sh --down
+```
+
 ## Notes
 
 - Object keys are built from `prefix + relative_key`.

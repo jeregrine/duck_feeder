@@ -1,0 +1,30 @@
+services:
+  meta_postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: duck
+      POSTGRES_PASSWORD: duck
+      POSTGRES_DB: duckfeeder_meta
+    ports:
+      - "55432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U duck -d duckfeeder_meta"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  localstack:
+    image: localstack/localstack:3
+    profiles: ["s3"]
+    environment:
+      SERVICES: s3
+      AWS_DEFAULT_REGION: us-east-1
+    ports:
+      - "4566:4566"
+
+  fake_gcs:
+    image: fsouza/fake-gcs-server:1.52.3
+    profiles: ["gcs"]
+    command: ["-scheme", "http"]
+    ports:
+      - "4443:4443"
