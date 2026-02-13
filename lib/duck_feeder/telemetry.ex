@@ -54,6 +54,7 @@ defmodule DuckFeeder.Telemetry do
         count: 1,
         checked: Map.get(summary, :checked, 0),
         committed: summary |> Map.get(:committed, []) |> length(),
+        retried: summary |> Map.get(:retried, []) |> length(),
         skipped: summary |> Map.get(:skipped, []) |> length(),
         errors: summary |> Map.get(:errors, []) |> length()
       },

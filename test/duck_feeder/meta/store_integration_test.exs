@@ -243,6 +243,9 @@ defmodule DuckFeeder.Meta.StoreIntegrationTest do
                etag: "etag-2"
              })
 
+    assert {:ok, [%{batch_id: ^batch_id, object_key: "raw/users/part-0001.parquet"}]} =
+             Meta.list_batch_files(conn, batch_id)
+
     assert {:ok, %Postgrex.Result{rows: [[20, 200, "def", "etag-2"]]}} =
              Postgrex.query(
                conn,

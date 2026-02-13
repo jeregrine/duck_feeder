@@ -23,6 +23,7 @@ defmodule DuckFeeder.Meta do
   defdelegate commit_uploaded_batch_tx(conn, batch_id), to: Store
 
   defdelegate put_batch_file(conn, attrs), to: Store
+  defdelegate list_batch_files(conn, batch_id), to: Store
   defdelegate list_stale_batches(conn, opts \\ []), to: Store
 
   defdelegate build_batch_id(designated_table_id, lsn_start, lsn_end, file_indexes \\ []),

@@ -63,6 +63,7 @@ This tracks progress against `docs/plan_compact.md`.
 
 - [x] **Recovery foundation**
   - [x] basic stale batch reconciler helper (`DuckFeeder.Reconciler`)
+  - [x] failed-batch cleanup/retry option (delete known files + move `failed` -> `pending`)
   - [x] scheduled reconciler worker (`DuckFeeder.Reconciler.Worker`)
 
 - [x] **Test harness foundations**
@@ -77,7 +78,7 @@ This tracks progress against `docs/plan_compact.md`.
 - [ ] **Initial snapshot + WAL handoff orchestration** (stream cutoff coordination + table copy execution)
 - [ ] **Parquet writer adapter** (Rustler/NIF path)
 - [ ] **DuckLake metadata SQL commit implementation** (spec-aligned)
-- [ ] **Advanced recovery/reconciler loop** (orphan file cleanup, scheduling, retry policy controls)
+- [ ] **Advanced recovery/reconciler loop** (orphan detection, policy tuning, large-scale cleanup safety)
 - [ ] **Full integration suite** (Postgres + S3 + GCS + metadata DB)
 
 ## Local test status

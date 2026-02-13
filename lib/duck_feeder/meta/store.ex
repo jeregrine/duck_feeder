@@ -145,6 +145,13 @@ defmodule DuckFeeder.Meta.Store do
   RETURNING id
   """
 
+  @list_batch_files_sql """
+  SELECT id, batch_id, object_key, row_count, file_size, checksum, etag
+  FROM duckfeeder_meta.batch_files
+  WHERE batch_id = $1
+  ORDER BY id
+  """
+
   @list_stale_batches_sql """
   SELECT batch_id, designated_table_id, lsn_start::text, lsn_end::text, state, updated_at
   FROM duckfeeder_meta.batches
@@ -412,6 +419,26 @@ defmodule DuckFeeder.Meta.Store do
          committed?: true,
          already_committed?: batch.state == :committed
        }}
+    end
+  end
+
+  @spec list_batch_files(conn(), String.t()) :: {:ok, [map()]} | {:error, term()}
+  def list_batch_files(conn, batch_id) when is_binary(batch_id) do
+    with {:ok, result} <- query(conn, @list_batch_files_sql, [batch_id]) do
+      files =
+        Enum.map(result.rows, fn [id, batch_id, object_key, row_count, file_size, checksum, etag] ->
+          %{
+            id: id,
+            batch_id: batch_id,
+            object_key: object_key,
+            row_count: row_count,
+            file_size: file_size,
+            checksum: checksum,
+            etag: etag
+          }
+        end)
+
+      {:ok, files}
     end
   end
 
