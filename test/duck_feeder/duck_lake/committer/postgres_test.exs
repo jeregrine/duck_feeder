@@ -92,6 +92,37 @@ defmodule DuckFeeder.DuckLake.Committer.PostgresTest do
     refute_received {:meta_commit_uploaded_batch_tx, _}
   end
 
+  test "uses default ducklake commit log statement" do
+    tx_fun = fn _conn, fun ->
+      try do
+        {:ok, fun.(:tx_conn)}
+      catch
+        {:rollback, reason} -> {:error, reason}
+      end
+    end
+
+    query_fun = fn _conn, sql, params ->
+      send(self(), {:query, sql, params})
+      {:ok, %Postgrex.Result{rows: []}}
+    end
+
+    rollback_fun = fn _conn, reason -> throw({:rollback, reason}) end
+
+    assert {:ok, %{batch_id: "batch-1"}} =
+             Postgres.commit_batch(:meta_conn, "batch-1",
+               meta_module: FakeMeta,
+               transaction_fun: tx_fun,
+               query_fun: query_fun,
+               rollback_fun: rollback_fun,
+               object_key: "raw/users/file-1.parquet",
+               write_result: %{row_count: 10, file_size_bytes: 99}
+             )
+
+    assert_received {:query, sql, ["batch-1", "raw/users/file-1.parquet", 10, 99]}
+    assert sql =~ "INSERT INTO duckfeeder_meta.ducklake_commits"
+    assert_received {:meta_commit_uploaded_batch_tx, "batch-1"}
+  end
+
   test "returns error for invalid statement shape" do
     tx_fun = fn _conn, fun ->
       try do

@@ -74,3 +74,20 @@ CREATE TABLE IF NOT EXISTS duckfeeder_meta.schema_history (
 
 CREATE INDEX IF NOT EXISTS schema_history_table_lsn_idx
   ON duckfeeder_meta.schema_history (designated_table_id, seen_lsn DESC);
+
+CREATE TABLE IF NOT EXISTS duckfeeder_meta.ducklake_commits (
+  id BIGSERIAL PRIMARY KEY,
+  batch_id TEXT NOT NULL REFERENCES duckfeeder_meta.batches(batch_id) ON DELETE CASCADE,
+  designated_table_id BIGINT NOT NULL REFERENCES duckfeeder_meta.designated_tables(id) ON DELETE CASCADE,
+  target_schema TEXT NOT NULL,
+  target_table TEXT NOT NULL,
+  object_key TEXT NOT NULL,
+  lsn_end TEXT NOT NULL,
+  row_count BIGINT NOT NULL DEFAULT 0,
+  file_size BIGINT NOT NULL DEFAULT 0,
+  inserted_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  CONSTRAINT ducklake_commits_unique_batch_object UNIQUE (batch_id, object_key)
+);
+
+CREATE INDEX IF NOT EXISTS ducklake_commits_table_lsn_idx
+  ON duckfeeder_meta.ducklake_commits (designated_table_id, lsn_end DESC);

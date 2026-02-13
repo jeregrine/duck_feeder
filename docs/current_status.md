@@ -52,6 +52,7 @@ This tracks progress against `docs/plan_compact.md`.
   - [x] `DuckFeeder.BatchProcessor`
   - [x] `DuckFeeder.DuckLake.Committer` interface + no-op committer
   - [x] `DuckFeeder.DuckLake.Committer.Postgres` transactional scaffold
+  - [x] default commit-log SQL target (`duckfeeder_meta.ducklake_commits`)
   - [x] `DuckFeeder.Service` end-to-end wiring module
   - [x] `DuckFeeder.Runtime` metadata-driven service boot wiring
   - [x] `DuckFeeder.Runtime.start_stream/4` service + CDC stream startup wiring
