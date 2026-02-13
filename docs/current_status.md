@@ -25,6 +25,8 @@ This tracks progress against `docs/plan_compact.md`.
   - [x] `DuckFeeder.CDC.ChangelogRow`
   - [x] `DuckFeeder.CDC.Lsn`
   - [x] `DuckFeeder.CDC.Setup` (publication/slot SQL helpers)
+  - [x] `DuckFeeder.CDC.Bootstrap` (startup orchestration for publication/slot/LSN)
+  - [x] `DuckFeeder.CDC.ReplicationProtocol` (replication SQL + status message encoding)
   - [x] `DuckFeeder.CDC.MessageMapper` (generic message->event mapping)
   - [x] `DuckFeeder.CDC.SnapshotBoundary`
   - [x] `DuckFeeder.CDC.Pipeline`
