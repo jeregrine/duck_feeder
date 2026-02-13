@@ -22,6 +22,8 @@ defmodule DuckFeeder do
   defdelegate start_service(meta_conn, source_name, storage_config, opts \\ []),
     to: DuckFeeder.Runtime
 
+  defdelegate reconcile(context, opts \\ []), to: DuckFeeder.Reconciler
+
   defdelegate put_file(storage_config, local_path, relative_key, opts \\ []),
     to: DuckFeeder.Storage
 

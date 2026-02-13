@@ -137,6 +137,14 @@ defmodule DuckFeeder.Meta.Store do
   RETURNING id
   """
 
+  @list_stale_batches_sql """
+  SELECT batch_id, designated_table_id, lsn_start::text, lsn_end::text, state, updated_at
+  FROM duckfeeder_meta.batches
+  WHERE state = ANY($1::text[])
+    AND updated_at < $2::timestamptz
+  ORDER BY updated_at ASC
+  """
+
   @type conn :: pid()
 
   @spec bootstrap(conn()) :: :ok | {:error, term()}
@@ -372,6 +380,40 @@ defmodule DuckFeeder.Meta.Store do
     |> normalize_transaction_result()
   end
 
+  @spec list_stale_batches(conn(), keyword()) :: {:ok, [map()]} | {:error, term()}
+  def list_stale_batches(conn, opts \\ []) do
+    states =
+      opts
+      |> Keyword.get(:states, [:uploaded, :failed])
+      |> Enum.map(&state_to_db!/1)
+
+    stale_before =
+      Keyword.get(opts, :stale_before, DateTime.add(DateTime.utc_now(), -30 * 60, :second))
+
+    with {:ok, result} <- query(conn, @list_stale_batches_sql, [states, stale_before]) do
+      batches =
+        Enum.map(result.rows, fn [
+                                   batch_id,
+                                   designated_table_id,
+                                   lsn_start,
+                                   lsn_end,
+                                   state,
+                                   updated_at
+                                 ] ->
+          %{
+            batch_id: batch_id,
+            designated_table_id: designated_table_id,
+            lsn_start: lsn_start,
+            lsn_end: lsn_end,
+            state: state,
+            updated_at: updated_at
+          }
+        end)
+
+      {:ok, batches}
+    end
+  end
+
   @spec put_batch_file(conn(), map()) :: {:ok, pos_integer()} | {:error, term()}
   def put_batch_file(conn, attrs) when is_map(attrs) do
     with {:ok, batch_id} <- fetch_required(attrs, :batch_id),
@@ -503,4 +545,11 @@ defmodule DuckFeeder.Meta.Store do
   end
 
   defp normalize_mode(mode), do: {:error, {:invalid_designated_table_mode, mode}}
+
+  defp state_to_db!(state) do
+    case BatchState.to_db(state) do
+      {:ok, db_state} -> db_state
+      {:error, reason} -> raise ArgumentError, "invalid batch state for query: #{inspect(reason)}"
+    end
+  end
 end

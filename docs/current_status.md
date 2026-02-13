@@ -50,6 +50,9 @@ This tracks progress against `docs/plan_compact.md`.
   - [x] batch flush telemetry (`[:duck_feeder, :batch, :flushed]`)
   - [x] batch processed telemetry (`[:duck_feeder, :batch, :processed]`)
 
+- [x] **Recovery foundation**
+  - [x] basic stale batch reconciler helper (`DuckFeeder.Reconciler`)
+
 - [x] **Test harness foundations**
   - [x] unit tests for all current modules
   - [x] integration test file for meta store (env-gated)
@@ -62,7 +65,7 @@ This tracks progress against `docs/plan_compact.md`.
 - [ ] **Initial snapshot + WAL handoff**
 - [ ] **Parquet writer adapter** (Rustler/NIF path)
 - [ ] **DuckLake metadata SQL commit implementation** (spec-aligned)
-- [ ] **Recovery/reconciler loop** (orphan files, stuck batches)
+- [ ] **Advanced recovery/reconciler loop** (orphan file cleanup, scheduling, retry policy controls)
 - [ ] **Full integration suite** (Postgres + S3 + GCS + metadata DB)
 
 ## Local test status

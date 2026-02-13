@@ -40,6 +40,11 @@ Parquet/Rust integration.
 {:ok, service_pid} = DuckFeeder.start_service(meta_conn, "source-a", storage_config)
 ```
 
+## Reconciliation
+
+`DuckFeeder.Reconciler` provides stale-batch reconciliation helpers.
+It currently retries stale `uploaded` batches via `commit_uploaded_batch/2`.
+
 ## Storage API
 
 ```elixir
