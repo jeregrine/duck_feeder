@@ -136,6 +136,19 @@ defmodule DuckFeeder.CDC.ConnectionTest do
              Connection.handle_data(xlog(0, 1, bad_insert_payload), state)
   end
 
+  test "handle_disconnect emits noreply" do
+    {:ok, state} =
+      Connection.init(
+        slot_name: "duck_slot",
+        publication_name: "duck_pub",
+        start_lsn: "0/0",
+        event_sink: self(),
+        status_interval_ms: 0
+      )
+
+    assert {:noreply, %State{slot_name: "duck_slot"}} = Connection.handle_disconnect(state)
+  end
+
   defp xlog(wal_start, wal_end, payload) do
     <<?w, wal_start::64, wal_end::64, 0::64-signed, payload::binary>>
   end

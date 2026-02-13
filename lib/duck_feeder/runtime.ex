@@ -160,6 +160,7 @@ defmodule DuckFeeder.Runtime do
       converter_module: Keyword.get(opts, :converter_module),
       event_sink: event_sink,
       auto_reconnect: Keyword.get(opts, :auto_reconnect, true),
+      reconnect_backoff: Keyword.get(opts, :reconnect_backoff),
       sync_connect: Keyword.get(opts, :sync_connect, true)
     ]
     |> Enum.reject(fn {_key, value} -> is_nil(value) end)

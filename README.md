@@ -108,6 +108,10 @@ Optional snapshot-before-stream mode is available via:
 - `snapshot_before_stream?: true`
 - `snapshot_row_handler: fn designated_table, row -> ... end`
 
+Replication connection tuning options include:
+- `auto_reconnect: true | false`
+- `reconnect_backoff: milliseconds`
+
 ## Replication connection API
 
 `DuckFeeder.CDC.Connection` provides a live `Postgrex.ReplicationConnection` client

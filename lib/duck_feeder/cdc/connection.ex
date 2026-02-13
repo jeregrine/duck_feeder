@@ -74,6 +74,7 @@ defmodule DuckFeeder.CDC.Connection do
           | {:converter_state, term()}
           | {:status_interval_ms, non_neg_integer()}
           | {:auto_reconnect, boolean()}
+          | {:reconnect_backoff, non_neg_integer()}
           | {:sync_connect, boolean()}
 
   @spec start_link([option()]) :: :gen_statem.start_ret()
@@ -83,12 +84,19 @@ defmodule DuckFeeder.CDC.Connection do
 
     init_arg =
       opts
-      |> Keyword.drop([:connection_opts, :name, :auto_reconnect, :sync_connect])
+      |> Keyword.drop([
+        :connection_opts,
+        :name,
+        :auto_reconnect,
+        :reconnect_backoff,
+        :sync_connect
+      ])
 
     start_opts =
       connection_opts
       |> maybe_put(:name, name_opt)
       |> Keyword.put_new(:auto_reconnect, Keyword.get(opts, :auto_reconnect, true))
+      |> maybe_put(:reconnect_backoff, Keyword.get(opts, :reconnect_backoff))
       |> Keyword.put_new(:sync_connect, Keyword.get(opts, :sync_connect, true))
 
     Postgrex.ReplicationConnection.start_link(__MODULE__, init_arg, start_opts)
@@ -206,6 +214,17 @@ defmodule DuckFeeder.CDC.Connection do
   end
 
   def handle_info(_info, %State{} = state), do: {:noreply, state}
+
+  @impl true
+  def handle_disconnect(%State{} = state) do
+    DuckFeeder.Telemetry.cdc_connection(:disconnected, %{
+      slot_name: state.slot_name,
+      publication_name: state.publication_name,
+      applied_lsn: state.applied_lsn
+    })
+
+    {:noreply, state}
+  end
 
   defp maybe_ack_event(state, %Event.Commit{end_lsn: end_lsn}) do
     lsn = Lsn.parse!(end_lsn)
