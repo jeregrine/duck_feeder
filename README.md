@@ -20,6 +20,13 @@ You can seed `duckfeeder_meta` source + designated table rows from runtime confi
 {:ok, validated} = DuckFeeder.validate_config(runtime_config)
 {:ok, %{source_id: _id, designated_table_ids: _ids}} =
   DuckFeeder.seed_meta(meta_conn, validated, source_name: "primary")
+
+# Convenience: seed metadata and immediately start stream runtime
+{:ok, %{runtime: %{service_pid: _service, cdc_pid: _cdc}}} =
+  DuckFeeder.seed_and_start_stream(meta_conn, validated,
+    seed_opts: [source_name: "primary"],
+    start_opts: [bootstrap_replication?: false]
+  )
 ```
 
 ## Writer API (temporary adapter)

@@ -26,6 +26,16 @@ defmodule DuckFeeder.BootstrapTest do
     def register_designated_table(_conn, _attrs), do: {:error, :insert_failed}
   end
 
+  defmodule FakeRuntime do
+    def start_stream(_meta_conn, source_name, storage_config, start_opts) do
+      if pid = Process.get(:test_pid),
+        do: send(pid, {:runtime_start_stream, source_name, storage_config, start_opts})
+
+      {:ok,
+       %{service_pid: self(), cdc_pid: self(), start_lsn: "0/0", source: %{name: source_name}}}
+    end
+  end
+
   setup do
     Process.put(:test_pid, self())
     :ok
@@ -75,6 +85,49 @@ defmodule DuckFeeder.BootstrapTest do
     assert_received {:meta_register_designated_table, table_attrs}
     assert table_attrs.source_id == 10
     assert table_attrs.source_table == "users"
+  end
+
+  test "can seed metadata and start runtime stream from config" do
+    config = %{
+      source: %{
+        postgres_url: "postgres://source",
+        slot_name: "duck_slot",
+        publication_name: "duck_pub",
+        designated_tables: [
+          %{
+            source_schema: "public",
+            source_table: "users",
+            target_schema: "raw",
+            target_table: "users",
+            mode: "cdc_changelog",
+            primary_keys: ["id"]
+          }
+        ]
+      },
+      storage: %{
+        provider: :s3,
+        bucket: "bucket",
+        access_key_id: "key",
+        secret_access_key: "secret"
+      },
+      metadata: %{postgres_url: "postgres://meta"}
+    }
+
+    assert {:ok, result} =
+             Bootstrap.seed_and_start_stream(:meta_conn, config,
+               runtime_module: FakeRuntime,
+               seed_opts: [meta_module: FakeMeta, source_name: "source-a"],
+               start_opts: [bootstrap_replication?: false]
+             )
+
+    assert result.source_id == 10
+    assert result.source_name == "source-a"
+    assert result.runtime.start_lsn == "0/0"
+
+    assert_received {:runtime_start_stream, "source-a", storage_config, start_opts}
+    assert storage_config.provider == :s3
+    assert storage_config.bucket == "bucket"
+    assert start_opts[:meta_module] == FakeMeta
   end
 
   test "returns errors when designated table registration fails" do

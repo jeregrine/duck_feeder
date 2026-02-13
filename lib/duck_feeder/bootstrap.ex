@@ -3,7 +3,7 @@ defmodule DuckFeeder.Bootstrap do
   Helpers for bootstrapping `duckfeeder_meta` from runtime config.
   """
 
-  alias DuckFeeder.{Config, Meta}
+  alias DuckFeeder.{Config, Meta, Runtime}
 
   @spec seed_meta(pid(), map() | keyword(), keyword()) :: {:ok, map()} | {:error, term()}
   def seed_meta(meta_conn, config, opts \\ []) do
@@ -24,6 +24,35 @@ defmodule DuckFeeder.Bootstrap do
          source_id: source_id,
          designated_table_ids: designated_table_ids,
          source_name: source_name(validated.source, opts)
+       }}
+    end
+  end
+
+  @spec seed_and_start_stream(pid(), map() | keyword(), keyword()) ::
+          {:ok, map()} | {:error, term()}
+  def seed_and_start_stream(meta_conn, config, opts \\ []) do
+    seed_opts = Keyword.get(opts, :seed_opts, [])
+    start_opts = Keyword.get(opts, :start_opts, [])
+    runtime_module = Keyword.get(opts, :runtime_module, Runtime)
+
+    with {:ok, validated} <- Config.validate(config),
+         {:ok, seed_result} <- seed_meta(meta_conn, config, seed_opts),
+         {:ok, runtime_start_opts} <-
+           runtime_start_opts(seed_opts, start_opts),
+         storage_config <- Config.storage_config(validated),
+         {:ok, runtime_result} <-
+           runtime_module.start_stream(
+             meta_conn,
+             seed_result.source_name,
+             storage_config,
+             runtime_start_opts
+           ) do
+      {:ok,
+       %{
+         source_id: seed_result.source_id,
+         designated_table_ids: seed_result.designated_table_ids,
+         source_name: seed_result.source_name,
+         runtime: runtime_result
        }}
     end
   end
@@ -84,7 +113,22 @@ defmodule DuckFeeder.Bootstrap do
     end
   end
 
+  defp runtime_start_opts(seed_opts, start_opts) do
+    seed_meta_module = Keyword.get(seed_opts, :meta_module)
+
+    opts =
+      case Keyword.has_key?(start_opts, :meta_module) do
+        true -> start_opts
+        false -> maybe_put(start_opts, :meta_module, seed_meta_module)
+      end
+
+    {:ok, opts}
+  end
+
   defp source_name(source, opts) do
     Keyword.get(opts, :source_name, Map.get(source, :name, "default"))
   end
+
+  defp maybe_put(opts, _key, nil), do: opts
+  defp maybe_put(opts, key, value), do: Keyword.put(opts, key, value)
 end
