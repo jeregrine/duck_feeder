@@ -70,6 +70,10 @@ Added normalized CDC event and routing modules:
 `TransactionBuffer` emits committed transactions only at commit boundaries.
 `Router` maps committed changes to designated target tables.
 
+Added batching/pipeline foundations:
+- `DuckFeeder.Ingest.BatchBuffer`
+- `DuckFeeder.TablePipeline`
+
 ## Meta schema + checkpoint/batch state machine
 
 Added `duckfeeder_meta` bootstrap SQL:
