@@ -138,13 +138,17 @@ defmodule DuckFeeder.RuntimeTest do
              Runtime.service_options(:meta_conn, "source-a", storage,
                meta_module: FakeMeta,
                observer_pid: self(),
-               object_prefix: "prefix"
+               object_prefix: "prefix",
+               committer_module: DuckFeeder.DuckLake.Committer.Noop,
+               committer_opts: [ducklake_sql: ["SELECT 1"]]
              )
 
     assert opts[:designated_tables] != []
     assert opts[:storage] == storage
     assert opts[:object_prefix] == "prefix"
     assert opts[:meta_module] == FakeMeta
+    assert opts[:committer_module] == DuckFeeder.DuckLake.Committer.Noop
+    assert opts[:committer_opts] == [ducklake_sql: ["SELECT 1"]]
   end
 
   test "starts service from metadata" do

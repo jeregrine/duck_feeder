@@ -33,6 +33,8 @@ defmodule DuckFeeder.Service do
           | {:pipeline_opts, map()}
           | {:max_tx_changes, pos_integer()}
           | {:observer_pid, pid()}
+          | {:committer_module, module()}
+          | {:committer_opts, keyword()}
 
   @spec start_link([option()]) :: GenServer.on_start()
   def start_link(opts) do
@@ -72,7 +74,9 @@ defmodule DuckFeeder.Service do
         storage: Keyword.fetch!(opts, :storage),
         object_prefix: Keyword.get(opts, :object_prefix, "duck_feeder")
       }
-      |> maybe_put_meta_module(opts)
+      |> maybe_put_optional(:meta_module, Keyword.get(opts, :meta_module))
+      |> maybe_put_optional(:committer_module, Keyword.get(opts, :committer_module))
+      |> maybe_put_optional(:committer_opts, Keyword.get(opts, :committer_opts))
 
     observer_pid = Keyword.get(opts, :observer_pid, self())
 
@@ -118,10 +122,6 @@ defmodule DuckFeeder.Service do
     end)
   end
 
-  defp maybe_put_meta_module(context, opts) do
-    case Keyword.get(opts, :meta_module) do
-      nil -> context
-      module -> Map.put(context, :meta_module, module)
-    end
-  end
+  defp maybe_put_optional(context, _key, nil), do: context
+  defp maybe_put_optional(context, key, value), do: Map.put(context, key, value)
 end

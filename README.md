@@ -39,6 +39,7 @@ Parquet/Rust integration.
 It supports pluggable committers via `DuckFeeder.DuckLake.Committer` (default no-op committer).
 `DuckFeeder.DuckLake.Committer.Postgres` is available as a transactional scaffold for
 running DuckLake SQL statements + checkpoint commit in one transaction.
+Runtime/service startup accepts `committer_module` and `committer_opts` passthrough.
 
 ```elixir
 {:ok, result} = DuckFeeder.process_batch(context, {"raw", "users"}, batch)
