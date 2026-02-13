@@ -29,6 +29,44 @@ defmodule DuckFeeder.RuntimeStreamIntegrationTest do
     def delete_object(_config, _object_ref), do: :ok
   end
 
+  defmodule LocalFilesystemStorage do
+    @behaviour DuckFeeder.Storage.Adapter
+
+    @impl true
+    def put_file(config, local_path, %{key: key}, _opts) do
+      root_dir = Map.fetch!(config, :root_dir)
+      destination = Path.join(root_dir, key)
+
+      File.mkdir_p!(Path.dirname(destination))
+      File.cp!(local_path, destination)
+
+      {:ok, %{etag: "itest-local-etag", version_id: nil, size: File.stat!(destination).size}}
+    end
+
+    @impl true
+    def head_object(config, %{key: key}) do
+      root_dir = Map.fetch!(config, :root_dir)
+      path = Path.join(root_dir, key)
+
+      case File.stat(path) do
+        {:ok, stat} -> {:ok, %{size: stat.size}}
+        {:error, reason} -> {:error, reason}
+      end
+    end
+
+    @impl true
+    def delete_object(config, %{key: key}) do
+      root_dir = Map.fetch!(config, :root_dir)
+      path = Path.join(root_dir, key)
+
+      case File.rm(path) do
+        :ok -> :ok
+        {:error, :enoent} -> :ok
+        {:error, reason} -> {:error, reason}
+      end
+    end
+  end
+
   setup_all do
     {:ok, meta_conn} = Postgrex.start_link(url: @meta_url)
     assert :ok = Meta.bootstrap(meta_conn)
@@ -146,7 +184,20 @@ defmodule DuckFeeder.RuntimeStreamIntegrationTest do
     target_table: target_table,
     designated_table_id: designated_table_id
   } do
-    storage = %{provider: :s3, bucket: "bucket", adapter: FakeStorage}
+    local_data_root =
+      Path.join(
+        System.tmp_dir!(),
+        "duck_feeder_ducklake_trace_#{System.unique_integer([:positive])}"
+      )
+
+    File.mkdir_p!(local_data_root)
+
+    storage = %{
+      provider: :s3,
+      bucket: "bucket",
+      adapter: LocalFilesystemStorage,
+      root_dir: local_data_root
+    }
 
     assert {:ok, %{service_pid: service_pid, cdc_pid: cdc_pid}} =
              Runtime.start_stream(meta_conn, source_name, storage,
@@ -178,6 +229,9 @@ defmodule DuckFeeder.RuntimeStreamIntegrationTest do
     assert [%{object_key: object_key}] = batch_files
     assert String.ends_with?(object_key, ".parquet")
 
+    local_parquet_path = Path.join(local_data_root, object_key)
+    assert File.exists?(local_parquet_path)
+
     assert {:ok, %{rows: [[snapshot_count]]}} =
              Postgrex.query(
                meta_conn,
@@ -196,7 +250,79 @@ defmodule DuckFeeder.RuntimeStreamIntegrationTest do
 
     assert commit_count >= 1
 
+    trace_schema = "ducklake_trace_#{designated_table_id}"
+    trace_catalog = "metadata_trace_#{designated_table_id}"
+    trace_table = "users_trace_#{designated_table_id}"
+
+    ducklake_sql =
+      [
+        "INSTALL postgres;",
+        "LOAD postgres;",
+        "INSTALL ducklake;",
+        "LOAD ducklake;",
+        "ATTACH 'ducklake:",
+        ducklake_postgres_connection(@meta_url),
+        "' AS dl (",
+        "DATA_PATH '",
+        String.replace(local_data_root, "'", "''"),
+        "', METADATA_SCHEMA '",
+        trace_schema,
+        "', METADATA_CATALOG '",
+        trace_catalog,
+        "');",
+        "CREATE TABLE dl.main.",
+        trace_table,
+        " (id VARCHAR, name VARCHAR);",
+        "CALL ducklake_add_data_files('dl', '",
+        trace_table,
+        "', '",
+        String.replace(local_parquet_path, "'", "''"),
+        "');",
+        "SELECT count(*) AS row_count FROM dl.main.",
+        trace_table,
+        ";"
+      ]
+      |> IO.iodata_to_binary()
+
+    assert {duckdb_output, 0} = System.cmd("duckdb", ["-c", ducklake_sql], stderr_to_stdout: true)
+    assert duckdb_output =~ "row_count"
+    assert duckdb_output =~ "1"
+
     GenServer.stop(cdc_pid)
     GenServer.stop(service_pid)
+  end
+
+  defp ducklake_postgres_connection(url) do
+    uri = URI.parse(url)
+
+    userinfo = uri.userinfo || ""
+
+    {username, password} =
+      case String.split(userinfo, ":", parts: 2) do
+        [u, p] -> {u, p}
+        [u] -> {u, ""}
+        _ -> {"", ""}
+      end
+
+    dbname = String.trim_leading(uri.path || "", "/")
+
+    [
+      "postgres:",
+      "dbname=",
+      dbname,
+      " ",
+      "host=",
+      uri.host || "localhost",
+      " ",
+      "port=",
+      Integer.to_string(uri.port || 5432),
+      " ",
+      "user=",
+      username,
+      " ",
+      "password=",
+      password
+    ]
+    |> IO.iodata_to_binary()
   end
 end
