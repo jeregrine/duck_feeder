@@ -85,6 +85,7 @@ Added normalized CDC event and routing modules:
 - `DuckFeeder.CDC.TransactionBuffer`
 - `DuckFeeder.CDC.Router`
 - `DuckFeeder.CDC.Pipeline`
+- `DuckFeeder.Service`
 
 `TransactionBuffer` emits committed transactions only at commit boundaries.
 `Router` maps committed changes to designated target tables.
