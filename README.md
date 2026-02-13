@@ -22,6 +22,14 @@ This will be swapped for the Parquet/Rust writer adapter.
 :ok = DuckFeeder.cleanup_written_batch(%{}, write_result)
 ```
 
+## Batch processing API
+
+`DuckFeeder.BatchProcessor` connects flushed batches to write/upload/meta commit steps.
+
+```elixir
+{:ok, result} = DuckFeeder.process_batch(context, {"raw", "users"}, batch)
+```
+
 ## Storage API
 
 ```elixir

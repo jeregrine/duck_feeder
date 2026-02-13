@@ -14,6 +14,8 @@ defmodule DuckFeeder do
     to: DuckFeeder.Writer,
     as: :cleanup
 
+  defdelegate process_batch(context, table, batch), to: DuckFeeder.BatchProcessor
+
   defdelegate put_file(storage_config, local_path, relative_key, opts \\ []),
     to: DuckFeeder.Storage
 
