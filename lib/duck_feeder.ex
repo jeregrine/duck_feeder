@@ -7,6 +7,7 @@ defmodule DuckFeeder do
 
   defdelegate validate_config(config), to: DuckFeeder.Config, as: :validate
   defdelegate validate_config!(config), to: DuckFeeder.Config, as: :validate!
+  defdelegate seed_meta(meta_conn, config, opts \\ []), to: DuckFeeder.Bootstrap
 
   defdelegate write_batch(writer_config, batch, opts \\ []), to: DuckFeeder.Writer
 

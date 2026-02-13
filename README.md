@@ -12,6 +12,16 @@ HTTP stack is **Req-only** (no hackney dependency in this project).
 
 `DuckFeeder.Config` validates runtime config (source/storage/metadata/ingest) with NimbleOptions.
 
+## Metadata bootstrap from config
+
+You can seed `duckfeeder_meta` source + designated table rows from runtime config:
+
+```elixir
+{:ok, validated} = DuckFeeder.validate_config(runtime_config)
+{:ok, %{source_id: _id, designated_table_ids: _ids}} =
+  DuckFeeder.seed_meta(meta_conn, validated, source_name: "primary")
+```
+
 ## Writer API (temporary adapter)
 
 `DuckFeeder.Writer` currently defaults to `DuckFeeder.Writer.Jsonl` as a placeholder.

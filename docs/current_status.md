@@ -17,6 +17,7 @@ This tracks progress against `docs/plan_compact.md`.
   - [x] `priv/duckfeeder_meta/create_tables.sql`
   - [x] `DuckFeeder.Meta.Store` CRUD/state machine helpers
   - [x] idempotent `commit_uploaded_batch/2` checkpoint advancement
+  - [x] config-driven metadata seeding helper (`DuckFeeder.Bootstrap.seed_meta/3`)
 
 - [x] **CDC foundations**
   - [x] `DuckFeeder.CDC.Event`
