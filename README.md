@@ -15,7 +15,8 @@ HTTP stack is **Req-only** (no hackney dependency in this project).
 ## Writer API (temporary adapter)
 
 `DuckFeeder.Writer` currently defaults to `DuckFeeder.Writer.Jsonl` as a placeholder.
-This will be swapped for the Parquet/Rust writer adapter.
+`DuckFeeder.Writer.ParquetNif` exists as the not-yet-implemented adapter target for
+Parquet/Rust integration.
 
 ```elixir
 {:ok, write_result} = DuckFeeder.write_batch(%{}, %{rows: [%{"id" => 1}]})
