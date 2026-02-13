@@ -262,6 +262,10 @@ See `docs/current_status.md` for implemented modules vs remaining target archite
 For embedding DuckFeeder in an existing OTP app, see:
 - `docs/existing_app_supervision.md`
 
+Convenience helpers:
+- `DuckFeeder.runtime_child_spec/4`
+- `DuckFeeder.runtime_child_spec_from_config/3`
+
 ## Notes
 
 - Object keys are built from `prefix + relative_key`.

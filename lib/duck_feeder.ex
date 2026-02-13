@@ -10,6 +10,12 @@ defmodule DuckFeeder do
   defdelegate seed_meta(meta_conn, config, opts \\ []), to: DuckFeeder.Bootstrap
   defdelegate seed_and_start_stream(meta_conn, config, opts \\ []), to: DuckFeeder.Bootstrap
 
+  defdelegate runtime_child_spec(meta_conn, source_name, storage_config, opts \\ []),
+    to: DuckFeeder.Integration
+
+  defdelegate runtime_child_spec_from_config(meta_conn, config, opts \\ []),
+    to: DuckFeeder.Integration
+
   defdelegate write_batch(writer_config, batch, opts \\ []), to: DuckFeeder.Writer
 
   defdelegate cleanup_written_batch(writer_config, write_result),

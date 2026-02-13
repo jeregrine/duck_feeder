@@ -62,6 +62,7 @@ This tracks progress against `docs/plan_compact.md`.
   - [x] `DuckFeeder.Runtime.StreamWorker` managed stream lifecycle wrapper
   - [x] `DuckFeeder.Runtime.Supervisor` stream+reconciler lifecycle wrapper
   - [x] existing-app supervision integration runbook (`docs/existing_app_supervision.md`)
+  - [x] existing-app runtime child-spec helpers (`DuckFeeder.Integration`)
 
 - [x] **Observability foundations**
   - [x] telemetry helper module (`DuckFeeder.Telemetry`)
