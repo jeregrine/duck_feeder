@@ -258,6 +258,9 @@ Core events currently emitted:
 
 See `docs/current_status.md` for implemented modules vs remaining target architecture work.
 
+For embedding DuckFeeder in an existing OTP app, see:
+- `docs/existing_app_supervision.md`
+
 ## Notes
 
 - Object keys are built from `prefix + relative_key`.

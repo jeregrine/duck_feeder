@@ -137,6 +137,12 @@ defmodule DuckFeeder.CDC.Connection do
         state.publication_name
       )
 
+    DuckFeeder.Telemetry.cdc_connection(:stream_starting, %{
+      slot_name: state.slot_name,
+      publication_name: state.publication_name,
+      start_lsn: state.start_lsn
+    })
+
     {:stream, query, [], state |> Map.put(:step, :streaming) |> schedule_status_tick()}
   end
 
@@ -145,9 +151,11 @@ defmodule DuckFeeder.CDC.Connection do
     state = bump_received_lsn(state, wal_end)
 
     if reply == 1 do
+      DuckFeeder.Telemetry.cdc_frame(:keepalive, :ack_requested, %{wal_end: wal_end})
       state = maybe_advance_flush_from_keepalive(state, wal_end)
       {:noreply, [standby_status_update(state)], state}
     else
+      DuckFeeder.Telemetry.cdc_frame(:keepalive, :noop, %{wal_end: wal_end})
       {:noreply, [], state}
     end
   end
@@ -160,6 +168,7 @@ defmodule DuckFeeder.CDC.Connection do
 
     case state.converter_module.convert(decoded, state.converter_state) do
       {:ignore, converter_state} ->
+        DuckFeeder.Telemetry.cdc_frame(:xlog, :ignored, %{wal_end: wal_end})
         {:noreply, %{state | converter_state: converter_state} |> bump_received_lsn(wal_end)}
 
       {:ok, event, converter_state} ->
@@ -169,14 +178,21 @@ defmodule DuckFeeder.CDC.Connection do
             |> Map.put(:converter_state, converter_state)
             |> bump_received_lsn(wal_end)
 
+          DuckFeeder.Telemetry.cdc_frame(:xlog, :event, %{
+            wal_end: wal_end,
+            event_type: event.__struct__
+          })
+
           {acks, state} = maybe_ack_event(state, event)
           {:noreply, acks, state}
         else
           {:error, reason} ->
+            DuckFeeder.Telemetry.cdc_connection(:event_sink_error, %{reason: reason})
             {:disconnect, {:event_sink_failed, reason}}
         end
 
       {:error, reason} ->
+        DuckFeeder.Telemetry.cdc_connection(:convert_error, %{reason: reason})
         {:disconnect, {:logical_replication_convert_failed, reason}}
     end
   end
@@ -185,6 +201,7 @@ defmodule DuckFeeder.CDC.Connection do
 
   @impl true
   def handle_info(:status_tick, %State{} = state) do
+    DuckFeeder.Telemetry.cdc_frame(:status_tick, :ack_sent, %{applied_lsn: state.applied_lsn})
     {:noreply, [standby_status_update(state)], schedule_status_tick(state)}
   end
 

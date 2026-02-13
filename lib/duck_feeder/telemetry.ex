@@ -46,6 +46,27 @@ defmodule DuckFeeder.Telemetry do
     )
   end
 
+  @spec cdc_connection(atom(), map()) :: :ok
+  def cdc_connection(status, metadata \\ %{}) when is_atom(status) and is_map(metadata) do
+    execute(
+      [:cdc, :connection],
+      %{count: 1},
+      Map.put(metadata, :status, status)
+    )
+  end
+
+  @spec cdc_frame(atom(), atom(), map()) :: :ok
+  def cdc_frame(frame_type, outcome, metadata \\ %{})
+      when is_atom(frame_type) and is_atom(outcome) and is_map(metadata) do
+    execute(
+      [:cdc, :frame],
+      %{count: 1},
+      metadata
+      |> Map.put(:frame_type, frame_type)
+      |> Map.put(:outcome, outcome)
+    )
+  end
+
   @spec reconciler_run({:ok, map()} | {:error, term()}) :: :ok
   def reconciler_run({:ok, summary}) when is_map(summary) do
     execute(

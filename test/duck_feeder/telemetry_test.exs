@@ -107,6 +107,36 @@ defmodule DuckFeeder.TelemetryTest do
     assert metadata.table == "users"
   end
 
+  test "emits cdc connection/frame telemetry" do
+    handler_id = "duck-feeder-test-cdc-conn-#{System.unique_integer([:positive])}"
+
+    :ok =
+      :telemetry.attach_many(
+        handler_id,
+        [
+          [:duck_feeder, :cdc, :connection],
+          [:duck_feeder, :cdc, :frame]
+        ],
+        &__MODULE__.handle_event/4,
+        self()
+      )
+
+    on_exit(fn ->
+      :telemetry.detach(handler_id)
+    end)
+
+    DuckFeeder.Telemetry.cdc_connection(:stream_starting, %{slot_name: "slot"})
+    DuckFeeder.Telemetry.cdc_frame(:keepalive, :ack_requested, %{wal_end: 1})
+
+    assert_receive {:telemetry, [:duck_feeder, :cdc, :connection], %{count: 1}, metadata}, 300
+    assert metadata.status == :stream_starting
+    assert metadata.slot_name == "slot"
+
+    assert_receive {:telemetry, [:duck_feeder, :cdc, :frame], %{count: 1}, frame_meta}, 300
+    assert frame_meta.frame_type == :keepalive
+    assert frame_meta.outcome == :ack_requested
+  end
+
   test "emits reconciler run telemetry" do
     handler_id = "duck-feeder-test-reconciler-run-#{System.unique_integer([:positive])}"
 

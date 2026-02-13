@@ -60,6 +60,7 @@ This tracks progress against `docs/plan_compact.md`.
   - [x] `DuckFeeder.Runtime.start_stream/4` service + CDC stream startup wiring
   - [x] `DuckFeeder.Runtime.StreamWorker` managed stream lifecycle wrapper
   - [x] `DuckFeeder.Runtime.Supervisor` stream+reconciler lifecycle wrapper
+  - [x] existing-app supervision integration runbook (`docs/existing_app_supervision.md`)
 
 - [x] **Observability foundations**
   - [x] telemetry helper module (`DuckFeeder.Telemetry`)
@@ -87,7 +88,6 @@ This tracks progress against `docs/plan_compact.md`.
 - [ ] **Parquet writer adapter** (Rustler/NIF path)
 - [ ] **Full DuckLake metadata SQL commit implementation** (table metadata/stats/history beyond snapshot+file append path)
 - [ ] **Advanced recovery/reconciler loop** (orphan detection, policy tuning, large-scale cleanup safety)
-- [ ] **Existing app supervision-tree integration runbook** (recommended child specs, shutdown strategy, config lifecycle)
 - [ ] **Full integration suite** (Postgres + S3 + GCS + metadata DB)
 
 ## Local test status
