@@ -65,6 +65,7 @@ This tracks progress against `docs/plan_compact.md`.
 - [x] **Test harness foundations**
   - [x] unit tests for all current modules
   - [x] integration test file for meta store (env-gated)
+  - [x] integration test file for CDC connection stream (env-gated)
   - [x] docker compose stack + helper script for integration runs
 
 ## Remaining to reach target architecture

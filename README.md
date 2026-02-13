@@ -179,6 +179,9 @@ Typical bootstrap/use flow:
 
 - Compose stack: `dev/docker-compose.integration.yml`
 - Helper script: `scripts/test_integration.sh`
+- Env-gated integration tests:
+  - `DUCK_FEEDER_META_DATABASE_URL` (meta store integration)
+  - `DUCK_FEEDER_SOURCE_DATABASE_URL` (CDC connection stream integration)
 
 Run:
 
