@@ -15,7 +15,8 @@ defmodule DuckFeeder.BatchProcessor do
           required(:storage) => map(),
           optional(:object_prefix) => String.t(),
           optional(:meta_module) => module(),
-          optional(:committer_module) => module()
+          optional(:committer_module) => module(),
+          optional(:committer_opts) => keyword()
         }
 
   @type batch :: %{
@@ -110,12 +111,17 @@ defmodule DuckFeeder.BatchProcessor do
            }),
          {:ok, :uploaded} <- advance_to(meta, conn, batch_id, :encoded, :uploaded),
          {:ok, commit_result} <-
-           committer_module.commit_batch(conn, batch_id,
-             meta_module: meta,
-             table: table,
-             batch: batch,
-             object_key: object_key,
-             write_result: write_result
+           committer_module.commit_batch(
+             conn,
+             batch_id,
+             Keyword.merge(
+               Map.get(context, :committer_opts, []),
+               meta_module: meta,
+               table: table,
+               batch: batch,
+               object_key: object_key,
+               write_result: write_result
+             )
            ) do
       {:ok,
        %{

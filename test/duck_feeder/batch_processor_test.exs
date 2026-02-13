@@ -158,6 +158,7 @@ defmodule DuckFeeder.BatchProcessorTest do
       writer: %{adapter: FakeWriter},
       storage: %{provider: :s3, bucket: "bucket", adapter: FakeStorage},
       committer_module: FakeCommitter,
+      committer_opts: [ducklake_sql: ["SELECT 1"]],
       object_prefix: "cdc"
     }
 
@@ -168,6 +169,7 @@ defmodule DuckFeeder.BatchProcessorTest do
 
     assert_received {:committer_commit_batch, "batch-test", opts}
     assert opts[:meta_module] == FakeMeta
+    assert opts[:ducklake_sql] == ["SELECT 1"]
 
     refute_received {:meta_commit_uploaded_batch, "batch-test"}
   end

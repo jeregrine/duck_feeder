@@ -378,24 +378,41 @@ defmodule DuckFeeder.Meta.Store do
   def commit_uploaded_batch(conn, batch_id) when is_binary(batch_id) do
     conn
     |> Postgrex.transaction(fn tx_conn ->
-      with {:ok, batch} <- lock_batch_for_commit(tx_conn, batch_id),
-           {:ok, to_state} <- commit_target_state(batch.state),
-           {:ok, checkpoint_lsn} <-
-             upsert_checkpoint_max(tx_conn, batch.designated_table_id, batch.lsn_end),
-           {:ok, _} <- maybe_transition_for_commit(tx_conn, batch_id, batch.state, to_state) do
-        %{
-          batch_id: batch_id,
-          designated_table_id: batch.designated_table_id,
-          batch_lsn_end: batch.lsn_end,
-          checkpoint_lsn: checkpoint_lsn,
-          committed?: true,
-          already_committed?: batch.state == :committed
-        }
-      else
+      case commit_uploaded_batch_tx(tx_conn, batch_id) do
+        {:ok, result} -> result
         {:error, reason} -> Postgrex.rollback(tx_conn, reason)
       end
     end)
     |> normalize_transaction_result()
+  end
+
+  @spec commit_uploaded_batch_tx(conn(), String.t()) ::
+          {:ok,
+           %{
+             batch_id: String.t(),
+             designated_table_id: pos_integer(),
+             batch_lsn_end: String.t(),
+             checkpoint_lsn: String.t(),
+             committed?: true,
+             already_committed?: boolean()
+           }}
+          | {:error, term()}
+  def commit_uploaded_batch_tx(conn, batch_id) when is_binary(batch_id) do
+    with {:ok, batch} <- lock_batch_for_commit(conn, batch_id),
+         {:ok, to_state} <- commit_target_state(batch.state),
+         {:ok, checkpoint_lsn} <-
+           upsert_checkpoint_max(conn, batch.designated_table_id, batch.lsn_end),
+         {:ok, _} <- maybe_transition_for_commit(conn, batch_id, batch.state, to_state) do
+      {:ok,
+       %{
+         batch_id: batch_id,
+         designated_table_id: batch.designated_table_id,
+         batch_lsn_end: batch.lsn_end,
+         checkpoint_lsn: checkpoint_lsn,
+         committed?: true,
+         already_committed?: batch.state == :committed
+       }}
+    end
   end
 
   @spec list_stale_batches(conn(), keyword()) :: {:ok, [map()]} | {:error, term()}

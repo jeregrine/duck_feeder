@@ -27,6 +27,8 @@ Parquet/Rust integration.
 
 `DuckFeeder.BatchProcessor` connects flushed batches to write/upload/meta commit steps.
 It supports pluggable committers via `DuckFeeder.DuckLake.Committer` (default no-op committer).
+`DuckFeeder.DuckLake.Committer.Postgres` is available as a transactional scaffold for
+running DuckLake SQL statements + checkpoint commit in one transaction.
 
 ```elixir
 {:ok, result} = DuckFeeder.process_batch(context, {"raw", "users"}, batch)
