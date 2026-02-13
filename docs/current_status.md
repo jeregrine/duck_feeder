@@ -40,6 +40,12 @@ This tracks progress against `docs/plan_compact.md`.
   - [x] `DuckFeeder.BatchProcessor`
   - [x] `DuckFeeder.Service` end-to-end wiring module
 
+- [x] **Observability foundations**
+  - [x] telemetry helper module (`DuckFeeder.Telemetry`)
+  - [x] CDC event telemetry (`[:duck_feeder, :cdc, :event]`)
+  - [x] batch flush telemetry (`[:duck_feeder, :batch, :flushed]`)
+  - [x] batch processed telemetry (`[:duck_feeder, :batch, :processed]`)
+
 - [x] **Test harness foundations**
   - [x] unit tests for all current modules
   - [x] integration test file for meta store (env-gated)
