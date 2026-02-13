@@ -12,12 +12,15 @@ defmodule DuckFeeder.DuckLake.SQLTest do
 
     assert [
              {spec_sql, ["batch-1", "raw/users/file-1.parquet", 10, 1024]},
+             {stats_sql, ["batch-1"]},
              {log_sql, ["batch-1", "raw/users/file-1.parquet", 10, 1024]}
            ] = statements
 
     assert spec_sql =~ "INSERT INTO ducklake_metadata.ducklake_snapshot"
     assert spec_sql =~ "INSERT INTO ducklake_metadata.ducklake_data_file"
     assert spec_sql =~ "INSERT INTO ducklake_metadata.ducklake_snapshot_changes"
+
+    assert stats_sql =~ "INSERT INTO ducklake_metadata.ducklake_table_stats"
 
     assert log_sql =~ "INSERT INTO duckfeeder_meta.ducklake_commits"
   end
@@ -34,8 +37,13 @@ defmodule DuckFeeder.DuckLake.SQLTest do
         include_commit_log?: false
       )
 
-    assert [{spec_sql, ["batch-1", "raw/users/file-1.parquet", 10, 1024]}] = statements
+    assert [
+             {spec_sql, ["batch-1", "raw/users/file-1.parquet", 10, 1024]},
+             {stats_sql, ["batch-1"]}
+           ] = statements
+
     assert spec_sql =~ "ducklake_metadata.ducklake_snapshot"
+    assert stats_sql =~ "ducklake_metadata.ducklake_table_stats"
   end
 
   test "respects custom statement list and function" do

@@ -104,6 +104,12 @@ CREATE TABLE IF NOT EXISTS ducklake_metadata.ducklake_snapshot_changes (
   CONSTRAINT ducklake_snapshot_changes_unique UNIQUE (snapshot_id, data_file_id, change_kind)
 );
 
+CREATE TABLE IF NOT EXISTS ducklake_metadata.ducklake_table_stats (
+  table_id BIGINT PRIMARY KEY,
+  row_count BIGINT NOT NULL DEFAULT 0,
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
 CREATE TABLE IF NOT EXISTS duckfeeder_meta.ducklake_commits (
   id BIGSERIAL PRIMARY KEY,
   batch_id TEXT NOT NULL REFERENCES duckfeeder_meta.batches(batch_id) ON DELETE CASCADE,

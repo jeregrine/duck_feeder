@@ -54,6 +54,7 @@ This tracks progress against `docs/plan_compact.md`.
   - [x] `DuckFeeder.DuckLake.Committer` interface + no-op committer
   - [x] `DuckFeeder.DuckLake.Committer.Postgres` transactional scaffold
   - [x] default spec-aligned snapshot/file/change SQL scaffold (`ducklake_metadata.*`)
+  - [x] default spec-aligned table stats refresh (`ducklake_metadata.ducklake_table_stats`)
   - [x] default commit-log SQL target (`duckfeeder_meta.ducklake_commits`)
   - [x] `DuckFeeder.Service` end-to-end wiring module
   - [x] `DuckFeeder.Runtime` metadata-driven service boot wiring

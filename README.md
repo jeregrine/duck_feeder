@@ -50,7 +50,8 @@ It supports pluggable committers via `DuckFeeder.DuckLake.Committer` (default no
 running DuckLake SQL statements + checkpoint commit in one transaction.
 By default it writes spec-aligned snapshot/file/change rows into
 `ducklake_metadata.ducklake_snapshot`, `ducklake_metadata.ducklake_data_file`, and
-`ducklake_metadata.ducklake_snapshot_changes`, plus an audit row in
+`ducklake_metadata.ducklake_snapshot_changes`, refreshes `ducklake_metadata.ducklake_table_stats`,
+and writes an audit row in
 `duckfeeder_meta.ducklake_commits`.
 (override via `committer_opts[:ducklake_sql]`).
 Runtime/service startup accepts `committer_module` and `committer_opts` passthrough.

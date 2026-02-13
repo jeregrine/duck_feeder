@@ -33,6 +33,27 @@ defmodule DuckFeeder.DuckLake.SQL do
   ON CONFLICT (snapshot_id, data_file_id, change_kind) DO NOTHING
   """
 
+  @default_spec_table_stats_sql """
+  INSERT INTO ducklake_metadata.ducklake_table_stats (table_id, row_count, updated_at)
+  SELECT
+    base.table_id,
+    COALESCE(SUM(data_file.row_count), 0),
+    now()
+  FROM (
+    SELECT batches.designated_table_id AS table_id
+    FROM duckfeeder_meta.batches batches
+    WHERE batches.batch_id = $1
+  ) AS base
+  LEFT JOIN ducklake_metadata.ducklake_snapshot snapshot
+    ON snapshot.table_id = base.table_id
+  LEFT JOIN ducklake_metadata.ducklake_data_file data_file
+    ON data_file.snapshot_id = snapshot.id
+  GROUP BY base.table_id
+  ON CONFLICT (table_id) DO UPDATE SET
+    row_count = EXCLUDED.row_count,
+    updated_at = now()
+  """
+
   @default_commit_log_sql """
   INSERT INTO duckfeeder_meta.ducklake_commits
     (
@@ -97,7 +118,8 @@ defmodule DuckFeeder.DuckLake.SQL do
       ]
 
       [
-        {@default_spec_snapshot_file_sql, params}
+        {@default_spec_snapshot_file_sql, params},
+        {@default_spec_table_stats_sql, [batch_id]}
         | maybe_commit_log_statement(include_commit_log?, params)
       ]
     else
