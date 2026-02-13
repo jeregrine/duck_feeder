@@ -4,7 +4,7 @@ defmodule DuckFeeder.Runtime do
   """
 
   alias DuckFeeder.{Meta, Service}
-  alias DuckFeeder.CDC.{Connection, ConnectionOptions}
+  alias DuckFeeder.CDC.{Bootstrap, Connection, ConnectionOptions, Lsn}
 
   @spec service_options(pid(), String.t(), map(), keyword()) ::
           {:ok, keyword()} | {:error, term()}
@@ -54,13 +54,22 @@ defmodule DuckFeeder.Runtime do
            meta_module.list_designated_tables(meta_conn, source_id: source.id),
          {:ok, slot_name} <- require_source_field(source, :slot_name),
          {:ok, publication_name} <- require_source_field(source, :publication_name),
-         {:ok, start_lsn} <-
+         {:ok, meta_start_lsn} <-
            meta_module.fetch_source_start_lsn(
              meta_conn,
              source.id,
              Keyword.get(opts, :default_start_lsn, "0/0")
            ),
          {:ok, connection_opts} <- connection_options_module.resolve(source, opts),
+         {:ok, bootstrap_start_lsn} <-
+           maybe_bootstrap_start_lsn(
+             connection_opts,
+             slot_name,
+             publication_name,
+             designated_tables,
+             opts
+           ),
+         {:ok, start_lsn} <- resolve_start_lsn(meta_start_lsn, bootstrap_start_lsn),
          {:ok, service_pid} <-
            service_module.start_link(
              build_service_opts(
@@ -147,6 +156,59 @@ defmodule DuckFeeder.Runtime do
       sync_connect: Keyword.get(opts, :sync_connect, true)
     ]
     |> Enum.reject(fn {_key, value} -> is_nil(value) end)
+  end
+
+  defp maybe_bootstrap_start_lsn(
+         connection_opts,
+         slot_name,
+         publication_name,
+         designated_tables,
+         opts
+       ) do
+    if Keyword.get(opts, :bootstrap_replication?, true) do
+      bootstrap_module = Keyword.get(opts, :bootstrap_module, Bootstrap)
+      query_connect_fun = Keyword.get(opts, :query_connect_fun, &Postgrex.start_link/1)
+      query_disconnect_fun = Keyword.get(opts, :query_disconnect_fun, &GenServer.stop/1)
+
+      case query_connect_fun.(connection_opts) do
+        {:ok, query_conn} ->
+          result =
+            bootstrap_module.bootstrap(query_conn, %{
+              publication_name: publication_name,
+              slot_name: slot_name,
+              designated_tables: designated_tables
+            })
+
+          _ = safe_disconnect_query_conn(query_disconnect_fun, query_conn)
+
+          case result do
+            {:ok, %{start_lsn: start_lsn}} -> {:ok, start_lsn}
+            {:error, _reason} = error -> error
+          end
+
+        {:error, reason} ->
+          {:error, {:query_connection_failed, reason}}
+      end
+    else
+      {:ok, nil}
+    end
+  end
+
+  defp resolve_start_lsn(meta_start_lsn, nil), do: {:ok, meta_start_lsn}
+
+  defp resolve_start_lsn(meta_start_lsn, bootstrap_start_lsn) do
+    case Lsn.max(meta_start_lsn, bootstrap_start_lsn) do
+      {:error, _reason} = error -> error
+      lsn -> {:ok, lsn}
+    end
+  end
+
+  defp safe_disconnect_query_conn(disconnect_fun, query_conn) do
+    disconnect_fun.(query_conn)
+  rescue
+    _ -> :ok
+  catch
+    _, _ -> :ok
   end
 
   defp require_source_field(source, key) do

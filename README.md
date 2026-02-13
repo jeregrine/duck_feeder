@@ -41,6 +41,7 @@ It supports pluggable committers via `DuckFeeder.DuckLake.Committer` (default no
 {:ok, service_pid} = DuckFeeder.start_service(meta_conn, "source-a", storage_config)
 
 # Start both service + replication stream client
+# (publication/slot bootstrap is enabled by default)
 {:ok, %{service_pid: _service, cdc_pid: _cdc}} =
   DuckFeeder.start_stream(meta_conn, "source-a", storage_config)
 ```
