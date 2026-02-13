@@ -73,6 +73,7 @@ Added normalized CDC event and routing modules:
 Added batching/pipeline foundations:
 - `DuckFeeder.Ingest.BatchBuffer`
 - `DuckFeeder.TablePipeline`
+- `DuckFeeder.Ingest`
 
 ## Meta schema + checkpoint/batch state machine
 
