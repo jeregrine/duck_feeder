@@ -53,6 +53,7 @@ This tracks progress against `docs/plan_compact.md`.
   - [x] `DuckFeeder.BatchProcessor`
   - [x] `DuckFeeder.DuckLake.Committer` interface + no-op committer
   - [x] `DuckFeeder.DuckLake.Committer.Postgres` transactional scaffold
+  - [x] default spec-aligned snapshot/file/change SQL scaffold (`ducklake_metadata.*`)
   - [x] default commit-log SQL target (`duckfeeder_meta.ducklake_commits`)
   - [x] `DuckFeeder.Service` end-to-end wiring module
   - [x] `DuckFeeder.Runtime` metadata-driven service boot wiring
@@ -84,8 +85,9 @@ This tracks progress against `docs/plan_compact.md`.
 - [ ] **Replication client hardening** (bootstrap lifecycle, reconnect policy tuning, backpressure/metrics)
 - [ ] **Production initial snapshot + WAL handoff path** (direct ingest integration + replay validation)
 - [ ] **Parquet writer adapter** (Rustler/NIF path)
-- [ ] **DuckLake metadata SQL commit implementation** (spec-aligned)
+- [ ] **Full DuckLake metadata SQL commit implementation** (table metadata/stats/history beyond snapshot+file append path)
 - [ ] **Advanced recovery/reconciler loop** (orphan detection, policy tuning, large-scale cleanup safety)
+- [ ] **Existing app supervision-tree integration runbook** (recommended child specs, shutdown strategy, config lifecycle)
 - [ ] **Full integration suite** (Postgres + S3 + GCS + metadata DB)
 
 ## Local test status

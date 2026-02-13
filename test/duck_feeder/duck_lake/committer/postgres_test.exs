@@ -92,7 +92,7 @@ defmodule DuckFeeder.DuckLake.Committer.PostgresTest do
     refute_received {:meta_commit_uploaded_batch_tx, _}
   end
 
-  test "uses default ducklake commit log statement" do
+  test "uses default ducklake spec-aligned statements" do
     tx_fun = fn _conn, fun ->
       try do
         {:ok, fun.(:tx_conn)}
@@ -118,8 +118,12 @@ defmodule DuckFeeder.DuckLake.Committer.PostgresTest do
                write_result: %{row_count: 10, file_size_bytes: 99}
              )
 
-    assert_received {:query, sql, ["batch-1", "raw/users/file-1.parquet", 10, 99]}
-    assert sql =~ "INSERT INTO duckfeeder_meta.ducklake_commits"
+    assert_received {:query, spec_sql, ["batch-1", "raw/users/file-1.parquet", 10, 99]}
+    assert spec_sql =~ "INSERT INTO ducklake_metadata.ducklake_snapshot"
+
+    assert_received {:query, log_sql, ["batch-1", "raw/users/file-1.parquet", 10, 99]}
+    assert log_sql =~ "INSERT INTO duckfeeder_meta.ducklake_commits"
+
     assert_received {:meta_commit_uploaded_batch_tx, "batch-1"}
   end
 

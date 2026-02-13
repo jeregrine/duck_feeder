@@ -75,6 +75,35 @@ CREATE TABLE IF NOT EXISTS duckfeeder_meta.schema_history (
 CREATE INDEX IF NOT EXISTS schema_history_table_lsn_idx
   ON duckfeeder_meta.schema_history (designated_table_id, seen_lsn DESC);
 
+CREATE SCHEMA IF NOT EXISTS ducklake_metadata;
+
+CREATE TABLE IF NOT EXISTS ducklake_metadata.ducklake_snapshot (
+  id BIGSERIAL PRIMARY KEY,
+  table_id BIGINT NOT NULL,
+  lsn_end TEXT NOT NULL,
+  committed_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  CONSTRAINT ducklake_snapshot_unique_table_lsn UNIQUE (table_id, lsn_end)
+);
+
+CREATE TABLE IF NOT EXISTS ducklake_metadata.ducklake_data_file (
+  id BIGSERIAL PRIMARY KEY,
+  snapshot_id BIGINT NOT NULL REFERENCES ducklake_metadata.ducklake_snapshot(id) ON DELETE CASCADE,
+  object_key TEXT NOT NULL,
+  row_count BIGINT NOT NULL DEFAULT 0,
+  file_size BIGINT NOT NULL DEFAULT 0,
+  inserted_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  CONSTRAINT ducklake_data_file_unique_snapshot_object UNIQUE (snapshot_id, object_key)
+);
+
+CREATE TABLE IF NOT EXISTS ducklake_metadata.ducklake_snapshot_changes (
+  id BIGSERIAL PRIMARY KEY,
+  snapshot_id BIGINT NOT NULL REFERENCES ducklake_metadata.ducklake_snapshot(id) ON DELETE CASCADE,
+  change_kind TEXT NOT NULL DEFAULT 'append',
+  data_file_id BIGINT NOT NULL REFERENCES ducklake_metadata.ducklake_data_file(id) ON DELETE CASCADE,
+  inserted_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  CONSTRAINT ducklake_snapshot_changes_unique UNIQUE (snapshot_id, data_file_id, change_kind)
+);
+
 CREATE TABLE IF NOT EXISTS duckfeeder_meta.ducklake_commits (
   id BIGSERIAL PRIMARY KEY,
   batch_id TEXT NOT NULL REFERENCES duckfeeder_meta.batches(batch_id) ON DELETE CASCADE,

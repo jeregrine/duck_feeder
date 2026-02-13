@@ -7,6 +7,32 @@ defmodule DuckFeeder.DuckLake.SQL do
 
   @type statement :: String.t() | {String.t(), list()}
 
+  @default_spec_snapshot_file_sql """
+  WITH snapshot AS (
+    INSERT INTO ducklake_metadata.ducklake_snapshot (table_id, lsn_end, committed_at)
+    SELECT batches.designated_table_id, batches.lsn_end::text, now()
+    FROM duckfeeder_meta.batches batches
+    WHERE batches.batch_id = $1
+    ON CONFLICT (table_id, lsn_end) DO UPDATE SET
+      committed_at = EXCLUDED.committed_at
+    RETURNING id
+  ),
+  data_file AS (
+    INSERT INTO ducklake_metadata.ducklake_data_file (snapshot_id, object_key, row_count, file_size, inserted_at)
+    SELECT snapshot.id, $2, $3, $4, now()
+    FROM snapshot
+    ON CONFLICT (snapshot_id, object_key) DO UPDATE SET
+      row_count = EXCLUDED.row_count,
+      file_size = EXCLUDED.file_size,
+      inserted_at = now()
+    RETURNING id, snapshot_id
+  )
+  INSERT INTO ducklake_metadata.ducklake_snapshot_changes (snapshot_id, change_kind, data_file_id, inserted_at)
+  SELECT data_file.snapshot_id, 'append', data_file.id, now()
+  FROM data_file
+  ON CONFLICT (snapshot_id, data_file_id, change_kind) DO NOTHING
+  """
+
   @default_commit_log_sql """
   INSERT INTO duckfeeder_meta.ducklake_commits
     (
@@ -60,19 +86,25 @@ defmodule DuckFeeder.DuckLake.SQL do
   defp default_commit_statements(batch_id, opts) do
     object_key = Keyword.get(opts, :object_key)
     write_result = Keyword.get(opts, :write_result, %{}) |> Map.new()
+    include_commit_log? = Keyword.get(opts, :include_commit_log?, true)
 
     if is_binary(object_key) and object_key != "" do
+      params = [
+        batch_id,
+        object_key,
+        Map.get(write_result, :row_count, 0),
+        Map.get(write_result, :file_size_bytes, 0)
+      ]
+
       [
-        {@default_commit_log_sql,
-         [
-           batch_id,
-           object_key,
-           Map.get(write_result, :row_count, 0),
-           Map.get(write_result, :file_size_bytes, 0)
-         ]}
+        {@default_spec_snapshot_file_sql, params}
+        | maybe_commit_log_statement(include_commit_log?, params)
       ]
     else
       []
     end
   end
+
+  defp maybe_commit_log_statement(true, params), do: [{@default_commit_log_sql, params}]
+  defp maybe_commit_log_statement(false, _params), do: []
 end
