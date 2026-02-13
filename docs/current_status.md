@@ -51,6 +51,7 @@ This tracks progress against `docs/plan_compact.md`.
   - [x] `DuckFeeder.Writer` adapter interface
   - [x] temporary `DuckFeeder.Writer.Jsonl` adapter
   - [x] placeholder `DuckFeeder.Writer.ParquetNif` adapter
+  - [x] writer format selection + parquet fallback wiring
   - [x] `DuckFeeder.BatchProcessor`
   - [x] `DuckFeeder.DuckLake.Committer` interface + no-op committer
   - [x] `DuckFeeder.DuckLake.Committer.Postgres` transactional scaffold

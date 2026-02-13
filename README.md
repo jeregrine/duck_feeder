@@ -36,6 +36,7 @@ You can seed `duckfeeder_meta` source + designated table rows from runtime confi
 Parquet/Rust integration.
 
 You can select by format (`:jsonl | :parquet`) or explicit adapter module.
+Optional fallback is supported (e.g. `format: :parquet, fallback_format: :jsonl`).
 
 ```elixir
 {:ok, write_result} = DuckFeeder.write_batch(%{}, %{rows: [%{"id" => 1}]})
