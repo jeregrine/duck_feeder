@@ -21,6 +21,7 @@ DuckFeeder.delete_object(storage_config, "events/table=users/part-0001.parquet")
 ## S3 config example
 
 The S3 adapter uses direct HTTP calls with Req + AWS SigV4.
+It supports single PUT and multipart upload modes.
 
 ```elixir
 %{
@@ -32,7 +33,12 @@ The S3 adapter uses direct HTTP calls with Req + AWS SigV4.
   secret_access_key: System.fetch_env!("AWS_SECRET_ACCESS_KEY"),
   session_token: System.get_env("AWS_SESSION_TOKEN"),
   endpoint: System.get_env("S3_ENDPOINT"), # optional for S3-compatible/localstack
-  force_path_style: true                    # common for S3-compatible services
+  force_path_style: true,                   # common for S3-compatible services
+  adapter_opts: %{
+    multipart_threshold: 64 * 1_024 * 1_024,
+    part_size: 8 * 1_024 * 1_024,
+    chunk_size: 8 * 1_024 * 1_024
+  }
 }
 ```
 

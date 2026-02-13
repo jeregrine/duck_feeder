@@ -2,7 +2,19 @@ defmodule DuckFeeder.Storage.S3 do
   @moduledoc """
   S3/S3-compatible adapter.
 
-  Talks to S3 directly over HTTP using Req + AWS SigV4 (no ExAws).
+  Talks to S3 directly over HTTP using Req + AWS SigV4.
+
+  Supports both:
+  - single PUT uploads
+  - multipart uploads for larger files
+
+  Multipart adapter options:
+  - `:multipart` (`true | false`) - force on/off
+  - `:multipart_threshold` - auto-multipart threshold in bytes (default: 64 MiB)
+  - `:part_size` - multipart chunk size in bytes (default: 8 MiB, minimum 5 MiB)
+  - `:chunk_size` - stream chunk size for single PUT (default: 8 MiB)
+  - `:request_opts` - extra Req request options
+  - `:request_fun` - request function override for tests (`fn req, opts -> ... end`)
   """
 
   @behaviour DuckFeeder.Storage.Adapter
@@ -11,27 +23,18 @@ defmodule DuckFeeder.Storage.S3 do
 
   @default_region "us-east-1"
   @default_chunk_size 8 * 1_024 * 1_024
+  @default_multipart_threshold 64 * 1_024 * 1_024
+  @min_part_size 5 * 1_024 * 1_024
 
   @impl Adapter
   def put_file(config, local_path, %{bucket: bucket, key: key}, opts) do
     with {:ok, credentials} <- credentials(config),
-         {:ok, size} <- file_size(local_path),
-         {:ok, response} <-
-           request(config, credentials,
-             method: :put,
-             bucket: bucket,
-             key: key,
-             headers: put_headers(size, opts),
-             body: File.stream!(local_path, [], chunk_size(config, opts)),
-             opts: request_opts(config, opts)
-           ),
-         :ok <- ensure_success(response, :s3_put_failed) do
-      {:ok,
-       %{
-         etag: header(response, "etag"),
-         version_id: header(response, "x-amz-version-id"),
-         size: size
-       }}
+         {:ok, size} <- file_size(local_path) do
+      if multipart_upload?(size, config, opts) do
+        put_file_multipart(config, credentials, local_path, bucket, key, size, opts)
+      else
+        put_file_single(config, credentials, local_path, bucket, key, size, opts)
+      end
     end
   rescue
     exception ->
@@ -46,7 +49,7 @@ defmodule DuckFeeder.Storage.S3 do
              method: :head,
              bucket: bucket,
              key: key,
-             opts: request_opts(config, [])
+             call_opts: []
            ) do
       case response.status do
         200 ->
@@ -77,7 +80,7 @@ defmodule DuckFeeder.Storage.S3 do
              method: :delete,
              bucket: bucket,
              key: key,
-             opts: request_opts(config, [])
+             call_opts: []
            ) do
       case response.status do
         status when status in 200..299 -> :ok
@@ -90,31 +93,189 @@ defmodule DuckFeeder.Storage.S3 do
       {:error, {:s3_delete_failed, Exception.message(exception)}}
   end
 
+  defp put_file_single(config, credentials, local_path, bucket, key, size, opts) do
+    with {:ok, response} <-
+           request(config, credentials,
+             method: :put,
+             bucket: bucket,
+             key: key,
+             headers: put_headers(size, opts),
+             body: File.stream!(local_path, [], chunk_size(config, opts)),
+             call_opts: opts
+           ),
+         :ok <- ensure_success(response, :s3_put_failed) do
+      {:ok,
+       %{
+         etag: header(response, "etag"),
+         version_id: header(response, "x-amz-version-id"),
+         size: size
+       }}
+    end
+  end
+
+  defp put_file_multipart(config, credentials, local_path, bucket, key, size, opts) do
+    with {:ok, upload_id} <- initiate_multipart_upload(config, credentials, bucket, key, opts) do
+      case upload_and_complete_multipart(
+             config,
+             credentials,
+             local_path,
+             bucket,
+             key,
+             upload_id,
+             size,
+             opts
+           ) do
+        {:ok, result} ->
+          {:ok, result}
+
+        {:error, reason} ->
+          _ = abort_multipart_upload(config, credentials, bucket, key, upload_id, opts)
+          {:error, reason}
+
+        other ->
+          _ = abort_multipart_upload(config, credentials, bucket, key, upload_id, opts)
+          {:error, {:s3_multipart_failed, other}}
+      end
+    end
+  end
+
+  defp upload_and_complete_multipart(
+         config,
+         credentials,
+         local_path,
+         bucket,
+         key,
+         upload_id,
+         size,
+         opts
+       ) do
+    with {:ok, etags} <-
+           upload_parts(config, credentials, local_path, bucket, key, upload_id, opts),
+         {:ok, response} <-
+           complete_multipart_upload(config, credentials, bucket, key, upload_id, etags, opts),
+         :ok <- ensure_success(response, :s3_complete_multipart_failed) do
+      {:ok,
+       %{
+         etag: multipart_etag(response, etags),
+         version_id: header(response, "x-amz-version-id"),
+         size: size
+       }}
+    end
+  end
+
+  defp initiate_multipart_upload(config, credentials, bucket, key, opts) do
+    with {:ok, response} <-
+           request(config, credentials,
+             method: :post,
+             bucket: bucket,
+             key: key,
+             params: [uploads: ""],
+             headers: [{"content-type", "application/octet-stream"}],
+             body: "",
+             call_opts: opts
+           ),
+         :ok <- ensure_success(response, :s3_multipart_init_failed),
+         {:ok, upload_id} <- parse_upload_id(response.body) do
+      {:ok, upload_id}
+    end
+  end
+
+  defp upload_parts(config, credentials, local_path, bucket, key, upload_id, opts) do
+    local_path
+    |> File.stream!([], part_size(config, opts))
+    |> Enum.reduce_while({:ok, {1, []}}, fn chunk, {:ok, {part_number, rev_etags}} ->
+      with {:ok, response} <-
+             request(config, credentials,
+               method: :put,
+               bucket: bucket,
+               key: key,
+               params: [partNumber: part_number, uploadId: upload_id],
+               headers: put_part_headers(chunk),
+               body: chunk,
+               call_opts: opts
+             ),
+           :ok <- ensure_success(response, :s3_upload_part_failed),
+           etag when is_binary(etag) <- header(response, "etag") do
+        {:cont, {:ok, {part_number + 1, [etag | rev_etags]}}}
+      else
+        nil ->
+          {:halt, {:error, {:s3_upload_part_failed, :missing_etag, part_number}}}
+
+        {:error, _reason} = error ->
+          {:halt, error}
+      end
+    end)
+    |> normalize_uploaded_etags()
+  end
+
+  defp complete_multipart_upload(config, credentials, bucket, key, upload_id, etags, opts) do
+    body = complete_multipart_upload_xml(etags)
+
+    request(config, credentials,
+      method: :post,
+      bucket: bucket,
+      key: key,
+      params: [uploadId: upload_id],
+      headers: [
+        {"content-type", "application/xml"},
+        {"content-length", Integer.to_string(byte_size(body))}
+      ],
+      body: body,
+      call_opts: opts
+    )
+  end
+
+  defp abort_multipart_upload(config, credentials, bucket, key, upload_id, opts) do
+    case request(config, credentials,
+           method: :delete,
+           bucket: bucket,
+           key: key,
+           params: [uploadId: upload_id],
+           body: "",
+           call_opts: opts
+         ) do
+      {:ok, %Req.Response{status: status}} when status in [200, 204, 404] -> :ok
+      {:ok, _response} -> :ok
+      {:error, _reason} -> :ok
+    end
+  end
+
   defp request(config, credentials, opts) do
     method = Keyword.fetch!(opts, :method)
     bucket = Keyword.fetch!(opts, :bucket)
     key = Keyword.fetch!(opts, :key)
+
     headers = Keyword.get(opts, :headers, [])
     body = Keyword.get(opts, :body, "")
-    req_opts = Keyword.get(opts, :opts, [])
+    params = Keyword.get(opts, :params, [])
+    call_opts = Keyword.get(opts, :call_opts, [])
 
     req =
       Req.new(
         base_url: base_url(config, bucket),
         aws_sigv4: aws_sigv4_opts(config, credentials)
       )
-      |> Req.merge(req_opts)
+      |> Req.merge(request_opts(config, call_opts))
 
-    case Req.request(req,
+    request_fun = request_fun(config, call_opts)
+
+    case request_fun.(req,
            method: method,
            url: "/" <> encode_key(key),
            headers: headers,
            body: body,
+           params: params,
            decode_body: false,
            retry: false
          ) do
-      {:ok, response} -> {:ok, response}
-      {:error, reason} -> {:error, {:s3_http_failed, reason}}
+      {:ok, %Req.Response{} = response} ->
+        {:ok, response}
+
+      {:error, reason} ->
+        {:error, {:s3_http_failed, reason}}
+
+      other ->
+        {:error, {:s3_http_failed, {:unexpected_request_result, other}}}
     end
   end
 
@@ -150,19 +311,57 @@ defmodule DuckFeeder.Storage.S3 do
   end
 
   defp request_opts(config, call_opts) do
+    merged_adapter_opts(config, call_opts)
+    |> Map.get(:request_opts, [])
+  end
+
+  defp request_fun(config, call_opts) do
+    case Map.get(merged_adapter_opts(config, call_opts), :request_fun) do
+      fun when is_function(fun, 2) -> fun
+      _ -> &Req.request/2
+    end
+  end
+
+  defp multipart_upload?(size, _config, _opts) when size <= 0, do: false
+
+  defp multipart_upload?(size, config, opts) do
+    adapter_opts = merged_adapter_opts(config, opts)
+
+    case Map.get(adapter_opts, :multipart) do
+      true -> true
+      false -> false
+      _ -> size >= multipart_threshold(adapter_opts)
+    end
+  end
+
+  defp multipart_threshold(adapter_opts),
+    do: Map.get(adapter_opts, :multipart_threshold, @default_multipart_threshold)
+
+  defp part_size(config, opts) do
+    config
+    |> merged_adapter_opts(opts)
+    |> Map.get(:part_size, @default_chunk_size)
+    |> max(@min_part_size)
+  end
+
+  defp chunk_size(config, opts) do
+    config
+    |> merged_adapter_opts(opts)
+    |> Map.get(:chunk_size, @default_chunk_size)
+  end
+
+  defp merged_adapter_opts(config, call_opts) do
     config_opts =
       config
       |> Map.get(:adapter_opts, %{})
       |> Map.new()
 
-    call_adapter_opts =
+    call_opts_map =
       call_opts
       |> Keyword.get(:adapter_opts, %{})
       |> Map.new()
 
-    config_opts
-    |> Map.merge(call_adapter_opts)
-    |> Map.get(:request_opts, [])
+    Map.merge(config_opts, call_opts_map)
   end
 
   defp put_headers(size, opts) do
@@ -174,20 +373,72 @@ defmodule DuckFeeder.Storage.S3 do
     ]
   end
 
-  defp chunk_size(config, opts) do
-    config_size =
-      config
-      |> Map.get(:adapter_opts, %{})
-      |> Map.new()
-      |> Map.get(:chunk_size)
+  defp put_part_headers(chunk) do
+    [
+      {"content-type", "application/octet-stream"},
+      {"content-length", Integer.to_string(byte_size(chunk))}
+    ]
+  end
 
-    call_size =
-      opts
-      |> Keyword.get(:adapter_opts, %{})
-      |> Map.new()
-      |> Map.get(:chunk_size)
+  defp complete_multipart_upload_xml(etags) do
+    parts_xml =
+      etags
+      |> Enum.with_index(1)
+      |> Enum.map_join(fn {etag, part_number} ->
+        "<Part><PartNumber>#{part_number}</PartNumber><ETag>#{xml_escape(etag)}</ETag></Part>"
+      end)
 
-    call_size || config_size || @default_chunk_size
+    "<CompleteMultipartUpload>#{parts_xml}</CompleteMultipartUpload>"
+  end
+
+  defp normalize_uploaded_etags({:ok, {_next_part_number, rev_etags}}) when rev_etags != [],
+    do: {:ok, Enum.reverse(rev_etags)}
+
+  defp normalize_uploaded_etags({:ok, {_next_part_number, []}}),
+    do: {:error, {:s3_upload_part_failed, :no_parts_uploaded}}
+
+  defp normalize_uploaded_etags({:error, _reason} = error), do: error
+
+  defp parse_upload_id(body) when is_binary(body) do
+    case parse_xml_tag(body, "UploadId") do
+      nil -> {:error, {:invalid_multipart_init_response, body}}
+      upload_id -> {:ok, upload_id}
+    end
+  end
+
+  defp parse_upload_id(other), do: {:error, {:invalid_multipart_init_response, other}}
+
+  defp multipart_etag(response, etags) do
+    header(response, "etag") || parse_xml_tag(response.body, "ETag") || List.last(etags)
+  end
+
+  defp parse_xml_tag(body, tag) when is_binary(body) and is_binary(tag) do
+    regex = ~r/<#{tag}>([^<]+)<\/#{tag}>/
+
+    case Regex.run(regex, body, capture: :all_but_first) do
+      [value] -> xml_unescape(String.trim(value))
+      _ -> nil
+    end
+  end
+
+  defp parse_xml_tag(_body, _tag), do: nil
+
+  defp xml_escape(value) do
+    value
+    |> String.replace("&", "&amp;")
+    |> String.replace("<", "&lt;")
+    |> String.replace(">", "&gt;")
+    |> String.replace("\"", "&quot;")
+    |> String.replace("'", "&apos;")
+  end
+
+  defp xml_unescape(value) do
+    value
+    |> String.replace("&quot;", "\"")
+    |> String.replace("&apos;", "'")
+    |> String.replace("&lt;", "<")
+    |> String.replace("&gt;", ">")
+    |> String.replace("&amp;", "&")
   end
 
   defp region(config), do: config[:region] || @default_region
