@@ -46,6 +46,23 @@ defmodule DuckFeeder.Meta.StoreIntegrationTest do
      conn: conn, source_id: source_id, designated_table_id: designated_table_id, unique: unique}
   end
 
+  test "get_source and list_designated_tables", %{
+    conn: conn,
+    source_id: source_id,
+    designated_table_id: designated_table_id,
+    unique: unique
+  } do
+    source_name = "itest_source_#{unique}"
+
+    assert {:ok, %{id: ^source_id, name: ^source_name}} = Meta.get_source(conn, source_name)
+
+    assert {:ok, designated_tables} = Meta.list_designated_tables(conn, source_id: source_id)
+    assert [%{id: ^designated_table_id}] = designated_tables
+
+    assert {:error, {:source_not_found, "missing-source"}} =
+             Meta.get_source(conn, "missing-source")
+  end
+
   test "checkpoint roundtrip", %{conn: conn, designated_table_id: designated_table_id} do
     assert {:ok, "0/0"} = Meta.fetch_checkpoint(conn, designated_table_id)
 

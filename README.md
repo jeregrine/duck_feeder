@@ -30,6 +30,15 @@ This will be swapped for the Parquet/Rust writer adapter.
 {:ok, result} = DuckFeeder.process_batch(context, {"raw", "users"}, batch)
 ```
 
+## Runtime service wiring
+
+`DuckFeeder.Runtime` builds and starts `DuckFeeder.Service` using metadata rows.
+
+```elixir
+{:ok, service_opts} = DuckFeeder.service_options(meta_conn, "source-a", storage_config)
+{:ok, service_pid} = DuckFeeder.start_service(meta_conn, "source-a", storage_config)
+```
+
 ## Storage API
 
 ```elixir

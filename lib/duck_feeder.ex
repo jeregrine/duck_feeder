@@ -16,6 +16,12 @@ defmodule DuckFeeder do
 
   defdelegate process_batch(context, table, batch), to: DuckFeeder.BatchProcessor
 
+  defdelegate service_options(meta_conn, source_name, storage_config, opts \\ []),
+    to: DuckFeeder.Runtime
+
+  defdelegate start_service(meta_conn, source_name, storage_config, opts \\ []),
+    to: DuckFeeder.Runtime
+
   defdelegate put_file(storage_config, local_path, relative_key, opts \\ []),
     to: DuckFeeder.Storage
 

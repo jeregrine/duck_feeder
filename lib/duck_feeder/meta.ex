@@ -8,7 +8,9 @@ defmodule DuckFeeder.Meta do
   defdelegate bootstrap(conn), to: Store
 
   defdelegate register_source(conn, attrs), to: Store
+  defdelegate get_source(conn, source_name), to: Store
   defdelegate register_designated_table(conn, attrs), to: Store
+  defdelegate list_designated_tables(conn, opts \\ []), to: Store
 
   defdelegate fetch_checkpoint(conn, designated_table_id), to: Store
   defdelegate upsert_checkpoint(conn, designated_table_id, lsn), to: Store

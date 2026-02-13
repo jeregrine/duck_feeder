@@ -47,6 +47,19 @@ defmodule DuckFeeder.Meta.Store do
   RETURNING id
   """
 
+  @get_source_by_name_sql """
+  SELECT id, name, status, connection_info, slot_name, publication_name
+  FROM duckfeeder_meta.sources
+  WHERE name = $1
+  """
+
+  @list_designated_tables_sql """
+  SELECT id, source_id, source_schema, source_table, target_schema, target_table, mode, primary_keys, partition_config
+  FROM duckfeeder_meta.designated_tables
+  WHERE ($1::bigint IS NULL OR source_id = $1)
+  ORDER BY id
+  """
+
   @fetch_checkpoint_sql """
   SELECT last_committed_lsn::text
   FROM duckfeeder_meta.checkpoints
@@ -183,6 +196,61 @@ defmodule DuckFeeder.Meta.Store do
            ),
          {:ok, id} <- single_value(result) do
       {:ok, id}
+    end
+  end
+
+  @spec get_source(conn(), String.t()) :: {:ok, map()} | {:error, term()}
+  def get_source(conn, source_name) when is_binary(source_name) do
+    with {:ok, result} <- query(conn, @get_source_by_name_sql, [source_name]) do
+      case result.rows do
+        [[id, name, status, connection_info, slot_name, publication_name]] ->
+          {:ok,
+           %{
+             id: id,
+             name: name,
+             status: status,
+             connection_info: connection_info,
+             slot_name: slot_name,
+             publication_name: publication_name
+           }}
+
+        [] ->
+          {:error, {:source_not_found, source_name}}
+      end
+    end
+  end
+
+  @spec list_designated_tables(conn(), keyword()) :: {:ok, [map()]} | {:error, term()}
+  def list_designated_tables(conn, opts \\ []) do
+    source_id = Keyword.get(opts, :source_id)
+
+    with {:ok, result} <- query(conn, @list_designated_tables_sql, [source_id]) do
+      tables =
+        Enum.map(result.rows, fn [
+                                   id,
+                                   source_id,
+                                   source_schema,
+                                   source_table,
+                                   target_schema,
+                                   target_table,
+                                   mode,
+                                   primary_keys,
+                                   partition_config
+                                 ] ->
+          %{
+            id: id,
+            source_id: source_id,
+            source_schema: source_schema,
+            source_table: source_table,
+            target_schema: target_schema,
+            target_table: target_table,
+            mode: mode,
+            primary_keys: primary_keys,
+            partition_config: partition_config
+          }
+        end)
+
+      {:ok, tables}
     end
   end
 
