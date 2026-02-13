@@ -60,6 +60,16 @@ It supports single PUT and multipart upload modes.
 
 You can also provide `token_fun: fn -> token end` for rotating tokens.
 
+## CDC buffering + routing foundations
+
+Added normalized CDC event and routing modules:
+- `DuckFeeder.CDC.Event`
+- `DuckFeeder.CDC.TransactionBuffer`
+- `DuckFeeder.CDC.Router`
+
+`TransactionBuffer` emits committed transactions only at commit boundaries.
+`Router` maps committed changes to designated target tables.
+
 ## Meta schema + checkpoint/batch state machine
 
 Added `duckfeeder_meta` bootstrap SQL:
