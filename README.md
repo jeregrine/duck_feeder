@@ -112,6 +112,7 @@ Optional snapshot-before-stream mode is available via:
 Replication connection tuning options include:
 - `auto_reconnect: true | false`
 - `reconnect_backoff: milliseconds`
+- `max_lag_bytes: non_neg_integer()` (disconnect guard for unacked lag growth)
 - `event_sink_mode: :pid | :call` (default `:pid`)
 
 ## Replication connection API

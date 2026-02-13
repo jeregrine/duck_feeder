@@ -165,6 +165,7 @@ defmodule DuckFeeder.Runtime do
       publication_name: publication_name,
       start_lsn: start_lsn,
       status_interval_ms: Keyword.get(opts, :status_interval_ms, 10_000),
+      max_lag_bytes: Keyword.get(opts, :max_lag_bytes),
       decoder_module: Keyword.get(opts, :decoder_module),
       converter_module: Keyword.get(opts, :converter_module),
       event_sink: event_sink,

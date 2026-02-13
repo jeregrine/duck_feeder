@@ -189,6 +189,7 @@ defmodule DuckFeeder.RuntimeTest do
                connection_options_module: FakeConnectionOptions,
                bootstrap_replication?: false,
                reconnect_backoff: 1_500,
+               max_lag_bytes: 4_096,
                observer_pid: self(),
                service_name: nil,
                cdc_name: nil
@@ -206,6 +207,7 @@ defmodule DuckFeeder.RuntimeTest do
     assert cdc_opts[:start_lsn] == "0/20"
     assert cdc_opts[:connection_opts][:hostname] == "localhost"
     assert cdc_opts[:reconnect_backoff] == 1_500
+    assert cdc_opts[:max_lag_bytes] == 4_096
     assert is_pid(cdc_opts[:event_sink])
 
     assert_receive {:fake_service_event, %DuckFeeder.CDC.Event.Relation{id: 1}}

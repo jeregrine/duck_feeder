@@ -136,6 +136,45 @@ defmodule DuckFeeder.CDC.ConnectionTest do
              Connection.handle_data(xlog(0, 1, bad_insert_payload), state)
   end
 
+  test "disconnects when max lag is exceeded" do
+    {:ok, state} =
+      Connection.init(
+        slot_name: "duck_slot",
+        publication_name: "duck_pub",
+        start_lsn: "0/0",
+        event_sink: self(),
+        max_lag_bytes: 1,
+        status_interval_ms: 0
+      )
+
+    {:stream, _query, [], state} = Connection.handle_connect(state)
+
+    relation_payload =
+      <<
+        ?R,
+        1::32,
+        "public",
+        0,
+        "users",
+        0,
+        ?f,
+        2::16,
+        1::8,
+        "id",
+        0,
+        23::32,
+        -1::32-signed,
+        0::8,
+        "name",
+        0,
+        25::32,
+        -1::32-signed
+      >>
+
+    assert {:disconnect, {:max_lag_exceeded, 10, 1}} =
+             Connection.handle_data(xlog(0, 10, relation_payload), state)
+  end
+
   test "handle_disconnect emits noreply" do
     {:ok, state} =
       Connection.init(

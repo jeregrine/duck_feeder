@@ -38,6 +38,7 @@ defmodule DuckFeeder.CDC.Connection do
       :converter_module,
       :converter_state,
       :status_interval_ms,
+      :max_lag_bytes,
       :status_timer_ref,
       step: :disconnected,
       received_lsn: 0,
@@ -54,6 +55,7 @@ defmodule DuckFeeder.CDC.Connection do
             converter_module: module(),
             converter_state: term(),
             status_interval_ms: non_neg_integer(),
+            max_lag_bytes: non_neg_integer() | nil,
             status_timer_ref: reference() | nil,
             step: :disconnected | :streaming,
             received_lsn: non_neg_integer(),
@@ -73,6 +75,7 @@ defmodule DuckFeeder.CDC.Connection do
           | {:converter_module, module()}
           | {:converter_state, term()}
           | {:status_interval_ms, non_neg_integer()}
+          | {:max_lag_bytes, non_neg_integer()}
           | {:auto_reconnect, boolean()}
           | {:reconnect_backoff, non_neg_integer()}
           | {:sync_connect, boolean()}
@@ -119,6 +122,7 @@ defmodule DuckFeeder.CDC.Connection do
       end)
 
     status_interval_ms = Keyword.get(opts, :status_interval_ms, 10_000)
+    max_lag_bytes = Keyword.get(opts, :max_lag_bytes)
 
     {:ok,
      %State{
@@ -130,6 +134,7 @@ defmodule DuckFeeder.CDC.Connection do
        converter_module: converter_module,
        converter_state: converter_state,
        status_interval_ms: status_interval_ms,
+       max_lag_bytes: max_lag_bytes,
        received_lsn: start_lsn_int,
        flushed_lsn: start_lsn_int,
        applied_lsn: start_lsn_int
@@ -158,13 +163,18 @@ defmodule DuckFeeder.CDC.Connection do
   def handle_data(<<?k, wal_end::64, _clock::64-signed, reply::8>>, %State{} = state) do
     state = bump_received_lsn(state, wal_end)
 
-    if reply == 1 do
-      DuckFeeder.Telemetry.cdc_frame(:keepalive, :ack_requested, %{wal_end: wal_end})
-      state = maybe_advance_flush_from_keepalive(state, wal_end)
-      {:noreply, [standby_status_update(state)], state}
+    with :ok <- maybe_enforce_lag(state) do
+      if reply == 1 do
+        DuckFeeder.Telemetry.cdc_frame(:keepalive, :ack_requested, %{wal_end: wal_end})
+        state = maybe_advance_flush_from_keepalive(state, wal_end)
+        {:noreply, [standby_status_update(state)], state}
+      else
+        DuckFeeder.Telemetry.cdc_frame(:keepalive, :noop, %{wal_end: wal_end})
+        {:noreply, [], state}
+      end
     else
-      DuckFeeder.Telemetry.cdc_frame(:keepalive, :noop, %{wal_end: wal_end})
-      {:noreply, [], state}
+      {:error, reason} ->
+        {:disconnect, reason}
     end
   end
 
@@ -176,8 +186,14 @@ defmodule DuckFeeder.CDC.Connection do
 
     case state.converter_module.convert(decoded, state.converter_state) do
       {:ignore, converter_state} ->
-        DuckFeeder.Telemetry.cdc_frame(:xlog, :ignored, %{wal_end: wal_end})
-        {:noreply, %{state | converter_state: converter_state} |> bump_received_lsn(wal_end)}
+        state = %{state | converter_state: converter_state} |> bump_received_lsn(wal_end)
+
+        with :ok <- maybe_enforce_lag(state) do
+          DuckFeeder.Telemetry.cdc_frame(:xlog, :ignored, %{wal_end: wal_end})
+          {:noreply, [], state}
+        else
+          {:error, reason} -> {:disconnect, reason}
+        end
 
       {:ok, event, converter_state} ->
         with :ok <- dispatch_event(state.event_sink, event) do
@@ -186,13 +202,17 @@ defmodule DuckFeeder.CDC.Connection do
             |> Map.put(:converter_state, converter_state)
             |> bump_received_lsn(wal_end)
 
-          DuckFeeder.Telemetry.cdc_frame(:xlog, :event, %{
-            wal_end: wal_end,
-            event_type: event.__struct__
-          })
+          with :ok <- maybe_enforce_lag(state) do
+            DuckFeeder.Telemetry.cdc_frame(:xlog, :event, %{
+              wal_end: wal_end,
+              event_type: event.__struct__
+            })
 
-          {acks, state} = maybe_ack_event(state, event)
-          {:noreply, acks, state}
+            {acks, state} = maybe_ack_event(state, event)
+            {:noreply, acks, state}
+          else
+            {:error, reason} -> {:disconnect, reason}
+          end
         else
           {:error, reason} ->
             DuckFeeder.Telemetry.cdc_connection(:event_sink_error, %{reason: reason})
@@ -258,6 +278,27 @@ defmodule DuckFeeder.CDC.Connection do
 
   defp bump_received_lsn(%State{} = state, wal_end) do
     %{state | received_lsn: max(state.received_lsn, wal_end)}
+  end
+
+  defp maybe_enforce_lag(%State{max_lag_bytes: nil}), do: :ok
+
+  defp maybe_enforce_lag(%State{max_lag_bytes: max_lag_bytes} = state)
+       when is_integer(max_lag_bytes) and max_lag_bytes >= 0 do
+    lag_bytes = max(state.received_lsn - state.applied_lsn, 0)
+
+    if lag_bytes > max_lag_bytes do
+      reason = {:max_lag_exceeded, lag_bytes, max_lag_bytes}
+
+      DuckFeeder.Telemetry.cdc_connection(:lag_exceeded, %{
+        lag_bytes: lag_bytes,
+        max_lag_bytes: max_lag_bytes,
+        slot_name: state.slot_name
+      })
+
+      {:error, reason}
+    else
+      :ok
+    end
   end
 
   defp standby_status_update(%State{} = state) do
