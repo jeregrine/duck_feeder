@@ -22,6 +22,11 @@ This tracks progress against `docs/plan_compact.md`.
   - [x] `DuckFeeder.CDC.Event`
   - [x] `DuckFeeder.CDC.TransactionBuffer`
   - [x] `DuckFeeder.CDC.Router`
+  - [x] `DuckFeeder.CDC.ChangelogRow`
+  - [x] `DuckFeeder.CDC.Lsn`
+  - [x] `DuckFeeder.CDC.Setup` (publication/slot SQL helpers)
+  - [x] `DuckFeeder.CDC.MessageMapper` (generic message->event mapping)
+  - [x] `DuckFeeder.CDC.SnapshotBoundary`
   - [x] `DuckFeeder.CDC.Pipeline`
 
 - [x] **Ingest/batching foundations**
