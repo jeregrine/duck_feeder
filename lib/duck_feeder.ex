@@ -25,6 +25,9 @@ defmodule DuckFeeder do
   defdelegate start_stream(meta_conn, source_name, storage_config, opts \\ []),
     to: DuckFeeder.Runtime
 
+  defdelegate start_stream_worker(opts), to: DuckFeeder.Runtime.StreamWorker, as: :start_link
+  defdelegate stream_worker_info(server), to: DuckFeeder.Runtime.StreamWorker, as: :stream_info
+
   defdelegate start_cdc_connection(opts), to: DuckFeeder.CDC.Connection, as: :start_link
 
   defdelegate reconcile(context, opts \\ []), to: DuckFeeder.Reconciler

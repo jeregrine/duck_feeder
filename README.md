@@ -46,6 +46,16 @@ running DuckLake SQL statements + checkpoint commit in one transaction.
 # (publication/slot bootstrap is enabled by default)
 {:ok, %{service_pid: _service, cdc_pid: _cdc}} =
   DuckFeeder.start_stream(meta_conn, "source-a", storage_config)
+
+# Managed worker variant (monitors service + cdc pids)
+{:ok, worker} =
+  DuckFeeder.start_stream_worker(
+    meta_conn: meta_conn,
+    source_name: "source-a",
+    storage_config: storage_config
+  )
+
+{:ok, _info} = DuckFeeder.stream_worker_info(worker)
 ```
 
 ## Replication connection API
