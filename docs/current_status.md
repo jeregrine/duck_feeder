@@ -67,6 +67,7 @@ This tracks progress against `docs/plan_compact.md`.
 - [x] **Recovery foundation**
   - [x] basic stale batch reconciler helper (`DuckFeeder.Reconciler`)
   - [x] failed-batch cleanup/retry option (delete known files + move `failed` -> `pending`)
+  - [x] uploaded-object verification option (`verify_uploaded_objects?`)
   - [x] scheduled reconciler worker (`DuckFeeder.Reconciler.Worker`)
 
 - [x] **Test harness foundations**

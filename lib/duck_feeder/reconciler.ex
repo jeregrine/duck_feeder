@@ -66,9 +66,11 @@ defmodule DuckFeeder.Reconciler do
     end
   end
 
-  defp reconcile_batch(meta, conn, _context, _opts, %{batch_id: batch_id, state: "uploaded"}) do
-    case meta.commit_uploaded_batch(conn, batch_id) do
-      {:ok, _result} -> {:committed, batch_id}
+  defp reconcile_batch(meta, conn, context, opts, %{batch_id: batch_id, state: "uploaded"}) do
+    with :ok <- maybe_verify_uploaded_batch(meta, conn, context, opts, batch_id),
+         {:ok, _result} <- meta.commit_uploaded_batch(conn, batch_id) do
+      {:committed, batch_id}
+    else
       {:error, reason} -> {:error, batch_id, reason}
     end
   end
@@ -94,6 +96,46 @@ defmodule DuckFeeder.Reconciler do
          {:ok, %{to: :pending}} <-
            meta.transition_batch(conn, batch_id, :pending, error_message: nil) do
       :ok
+    end
+  end
+
+  defp maybe_verify_uploaded_batch(meta, conn, context, opts, batch_id) do
+    if Keyword.get(opts, :verify_uploaded_objects?, false) do
+      with {:ok, files} <- meta.list_batch_files(conn, batch_id),
+           :ok <- ensure_batch_files_present(files, batch_id),
+           :ok <- verify_batch_files(context, files, batch_id) do
+        :ok
+      end
+    else
+      :ok
+    end
+  end
+
+  defp ensure_batch_files_present([], batch_id),
+    do: {:error, {:missing_batch_files, batch_id}}
+
+  defp ensure_batch_files_present(files, _batch_id) when is_list(files), do: :ok
+
+  defp verify_batch_files(context, files, batch_id) when is_list(files) do
+    storage = Map.get(context, :storage)
+    storage_module = Map.get(context, :storage_module, Storage)
+    meta = Map.get(context, :meta_module, Meta)
+    conn = Map.fetch!(context, :meta_conn)
+
+    if is_map(storage) do
+      Enum.reduce_while(files, :ok, fn file, :ok ->
+        case storage_module.head_object(storage, file.object_key) do
+          {:ok, _meta} ->
+            {:cont, :ok}
+
+          {:error, reason} ->
+            error = {:missing_uploaded_object, file.object_key, reason}
+            _ = meta.transition_batch(conn, batch_id, :failed, error_message: inspect(error))
+            {:halt, {:error, error}}
+        end
+      end)
+    else
+      {:error, :missing_storage_for_uploaded_verification}
     end
   end
 

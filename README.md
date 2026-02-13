@@ -92,8 +92,11 @@ that decodes pgoutput and emits normalized `DuckFeeder.CDC.Event` values to an `
 It currently retries stale `uploaded` batches via `commit_uploaded_batch/2`.
 
 `DuckFeeder.Reconciler.Worker` runs reconciliation on an interval.
-`DuckFeeder.reconcile/2` supports `cleanup_failed_uploads?: true` to delete known
-failed batch files and transition failed batches back to `pending`.
+`DuckFeeder.reconcile/2` supports:
+- `cleanup_failed_uploads?: true` to delete known failed batch files and transition
+  failed batches back to `pending`
+- `verify_uploaded_objects?: true` to HEAD-check uploaded files before committing stale
+  uploaded batches
 
 ```elixir
 {:ok, worker} = DuckFeeder.start_reconciler(context: %{meta_conn: meta_conn})
