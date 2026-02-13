@@ -19,7 +19,7 @@ if ! command -v docker >/dev/null 2>&1; then
   exit 1
 fi
 
-docker compose -f "$COMPOSE_FILE" up -d meta_postgres
+docker compose -f "$COMPOSE_FILE" up -d meta_postgres source_postgres
 
 echo "waiting for meta_postgres to become healthy..."
 for _ in $(seq 1 60); do
@@ -29,7 +29,16 @@ for _ in $(seq 1 60); do
   sleep 1
 done
 
+echo "waiting for source_postgres to become healthy..."
+for _ in $(seq 1 60); do
+  if docker compose -f "$COMPOSE_FILE" exec -T source_postgres pg_isready -U duck -d duckfeeder_source >/dev/null 2>&1; then
+    break
+  fi
+  sleep 1
+done
+
 export DUCK_FEEDER_META_DATABASE_URL="postgres://duck:duck@localhost:55432/duckfeeder_meta"
+export DUCK_FEEDER_SOURCE_DATABASE_URL="postgres://duck:duck@localhost:55433/duckfeeder_source"
 
 pushd "$ROOT_DIR" >/dev/null
 mix test --only integration

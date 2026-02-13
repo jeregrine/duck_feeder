@@ -250,6 +250,7 @@ Typical bootstrap/use flow:
 ## Integration testing
 
 - Compose stack: `dev/docker-compose.integration.yml`
+  - includes `meta_postgres` and `source_postgres` (logical replication enabled)
 - Helper script: `scripts/test_integration.sh`
 - Env-gated integration tests:
   - `DUCK_FEEDER_META_DATABASE_URL` (meta store integration)
