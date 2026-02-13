@@ -143,6 +143,10 @@ scripts/test_integration.sh
 scripts/test_integration.sh --down
 ```
 
+## Progress tracking
+
+See `docs/current_status.md` for implemented modules vs remaining target architecture work.
+
 ## Notes
 
 - Object keys are built from `prefix + relative_key`.
