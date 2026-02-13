@@ -107,6 +107,31 @@ defmodule DuckFeeder.TelemetryTest do
     assert metadata.table == "users"
   end
 
+  test "emits reconciler run telemetry" do
+    handler_id = "duck-feeder-test-reconciler-run-#{System.unique_integer([:positive])}"
+
+    :ok =
+      :telemetry.attach(
+        handler_id,
+        [:duck_feeder, :reconciler, :run],
+        &__MODULE__.handle_event/4,
+        self()
+      )
+
+    on_exit(fn ->
+      :telemetry.detach(handler_id)
+    end)
+
+    DuckFeeder.Telemetry.reconciler_run(
+      {:ok, %{checked: 3, committed: ["b1"], skipped: [], errors: []}}
+    )
+
+    assert_receive {:telemetry, [:duck_feeder, :reconciler, :run], measurements, metadata}, 300
+    assert measurements.checked == 3
+    assert measurements.committed == 1
+    assert metadata.status == :ok
+  end
+
   def handle_event(event, measurements, metadata, pid) do
     send(pid, {:telemetry, event, measurements, metadata})
   end

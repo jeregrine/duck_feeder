@@ -28,6 +28,8 @@ defmodule DuckFeeder do
   defdelegate start_cdc_connection(opts), to: DuckFeeder.CDC.Connection, as: :start_link
 
   defdelegate reconcile(context, opts \\ []), to: DuckFeeder.Reconciler
+  defdelegate start_reconciler(opts), to: DuckFeeder.Reconciler.Worker, as: :start_link
+  defdelegate run_reconcile_once(server), to: DuckFeeder.Reconciler.Worker, as: :run_once
 
   defdelegate put_file(storage_config, local_path, relative_key, opts \\ []),
     to: DuckFeeder.Storage

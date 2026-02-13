@@ -56,6 +56,13 @@ that decodes pgoutput and emits normalized `DuckFeeder.CDC.Event` values to an `
 `DuckFeeder.Reconciler` provides stale-batch reconciliation helpers.
 It currently retries stale `uploaded` batches via `commit_uploaded_batch/2`.
 
+`DuckFeeder.Reconciler.Worker` runs reconciliation on an interval.
+
+```elixir
+{:ok, worker} = DuckFeeder.start_reconciler(context: %{meta_conn: meta_conn})
+{:ok, summary} = DuckFeeder.run_reconcile_once(worker)
+```
+
 ## Storage API
 
 ```elixir
@@ -185,6 +192,7 @@ Core events currently emitted:
 - `[:duck_feeder, :cdc, :event]`
 - `[:duck_feeder, :batch, :flushed]`
 - `[:duck_feeder, :batch, :processed]`
+- `[:duck_feeder, :reconciler, :run]`
 
 ## Progress tracking
 

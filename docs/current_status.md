@@ -59,6 +59,7 @@ This tracks progress against `docs/plan_compact.md`.
 
 - [x] **Recovery foundation**
   - [x] basic stale batch reconciler helper (`DuckFeeder.Reconciler`)
+  - [x] scheduled reconciler worker (`DuckFeeder.Reconciler.Worker`)
 
 - [x] **Test harness foundations**
   - [x] unit tests for all current modules
