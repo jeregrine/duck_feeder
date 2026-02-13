@@ -60,6 +60,14 @@ defmodule DuckFeeder.Meta.Store do
   ORDER BY id
   """
 
+  @fetch_source_start_lsn_sql """
+  SELECT COALESCE(MIN(checkpoints.last_committed_lsn)::text, $2::text)
+  FROM duckfeeder_meta.designated_tables designated_tables
+  LEFT JOIN duckfeeder_meta.checkpoints checkpoints
+    ON checkpoints.designated_table_id = designated_tables.id
+  WHERE designated_tables.source_id = $1
+  """
+
   @fetch_checkpoint_sql """
   SELECT last_committed_lsn::text
   FROM duckfeeder_meta.checkpoints
@@ -259,6 +267,16 @@ defmodule DuckFeeder.Meta.Store do
         end)
 
       {:ok, tables}
+    end
+  end
+
+  @spec fetch_source_start_lsn(conn(), pos_integer(), String.t()) ::
+          {:ok, String.t()} | {:error, term()}
+  def fetch_source_start_lsn(conn, source_id, default_lsn \\ "0/0")
+      when is_integer(source_id) and source_id > 0 and is_binary(default_lsn) do
+    with {:ok, result} <- query(conn, @fetch_source_start_lsn_sql, [source_id, default_lsn]),
+         {:ok, lsn} <- single_value(result) do
+      {:ok, lsn}
     end
   end
 

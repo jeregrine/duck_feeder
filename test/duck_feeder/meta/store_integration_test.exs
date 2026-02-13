@@ -63,6 +63,19 @@ defmodule DuckFeeder.Meta.StoreIntegrationTest do
              Meta.get_source(conn, "missing-source")
   end
 
+  test "fetch_source_start_lsn default and checkpoint behavior", %{
+    conn: conn,
+    source_id: source_id,
+    designated_table_id: designated_table_id
+  } do
+    assert {:ok, "0/5"} = Meta.fetch_source_start_lsn(conn, source_id, "0/5")
+
+    assert {:ok, "0/16B6A98"} =
+             Meta.upsert_checkpoint(conn, designated_table_id, "0/16B6A98")
+
+    assert {:ok, "0/16B6A98"} = Meta.fetch_source_start_lsn(conn, source_id)
+  end
+
   test "checkpoint roundtrip", %{conn: conn, designated_table_id: designated_table_id} do
     assert {:ok, "0/0"} = Meta.fetch_checkpoint(conn, designated_table_id)
 

@@ -39,6 +39,10 @@ It supports pluggable committers via `DuckFeeder.DuckLake.Committer` (default no
 ```elixir
 {:ok, service_opts} = DuckFeeder.service_options(meta_conn, "source-a", storage_config)
 {:ok, service_pid} = DuckFeeder.start_service(meta_conn, "source-a", storage_config)
+
+# Start both service + replication stream client
+{:ok, %{service_pid: _service, cdc_pid: _cdc}} =
+  DuckFeeder.start_stream(meta_conn, "source-a", storage_config)
 ```
 
 ## Replication connection API

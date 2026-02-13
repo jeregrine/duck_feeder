@@ -48,6 +48,7 @@ This tracks progress against `docs/plan_compact.md`.
   - [x] `DuckFeeder.DuckLake.Committer` interface + no-op committer
   - [x] `DuckFeeder.Service` end-to-end wiring module
   - [x] `DuckFeeder.Runtime` metadata-driven service boot wiring
+  - [x] `DuckFeeder.Runtime.start_stream/4` service + CDC stream startup wiring
 
 - [x] **Observability foundations**
   - [x] telemetry helper module (`DuckFeeder.Telemetry`)
@@ -65,7 +66,7 @@ This tracks progress against `docs/plan_compact.md`.
 
 ## Remaining to reach target architecture
 
-- [ ] **Replication client runtime integration + hardening** (bootstrap wiring, lifecycle management, reconnect/metrics tuning)
+- [ ] **Replication client hardening** (bootstrap lifecycle, reconnect policy tuning, backpressure/metrics)
 - [ ] **Initial snapshot + WAL handoff**
 - [ ] **Parquet writer adapter** (Rustler/NIF path)
 - [ ] **DuckLake metadata SQL commit implementation** (spec-aligned)

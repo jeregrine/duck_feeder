@@ -5,7 +5,25 @@ defmodule DuckFeeder.RuntimeTest do
 
   defmodule FakeMeta do
     def get_source(_conn, "source-a") do
-      {:ok, %{id: 10, name: "source-a"}}
+      {:ok,
+       %{
+         id: 10,
+         name: "source-a",
+         connection_info: %{"dsn" => "postgres://user:pass@localhost:5432/source_a"},
+         slot_name: "slot-a",
+         publication_name: "pub-a"
+       }}
+    end
+
+    def get_source(_conn, "source-missing-slot") do
+      {:ok,
+       %{
+         id: 11,
+         name: "source-missing-slot",
+         connection_info: %{"dsn" => "postgres://user:pass@localhost:5432/source_b"},
+         slot_name: nil,
+         publication_name: "pub-b"
+       }}
     end
 
     def get_source(_conn, other), do: {:error, {:source_not_found, other}}
@@ -27,7 +45,60 @@ defmodule DuckFeeder.RuntimeTest do
        ]}
     end
 
+    def list_designated_tables(_conn, source_id: 11), do: {:ok, []}
     def list_designated_tables(_conn, _opts), do: {:ok, []}
+
+    def fetch_source_start_lsn(_conn, 10, _default), do: {:ok, "0/20"}
+    def fetch_source_start_lsn(_conn, 11, default), do: {:ok, default}
+  end
+
+  defmodule FakeService do
+    use GenServer
+
+    def start_link(opts) do
+      GenServer.start_link(__MODULE__, opts)
+    end
+
+    def push_event(server, event) do
+      GenServer.call(server, {:push_event, event})
+    end
+
+    @impl true
+    def init(opts) do
+      observer_pid = opts[:observer_pid]
+      if is_pid(observer_pid), do: send(observer_pid, {:fake_service_start, opts})
+      {:ok, %{observer_pid: observer_pid}}
+    end
+
+    @impl true
+    def handle_call({:push_event, event}, _from, state) do
+      if is_pid(state.observer_pid), do: send(state.observer_pid, {:fake_service_event, event})
+      {:reply, :buffering, state}
+    end
+  end
+
+  defmodule FakeCDC do
+    alias DuckFeeder.CDC.Event
+
+    def start_link(opts) do
+      if pid = Process.get(:test_pid), do: send(pid, {:fake_cdc_start, opts})
+
+      :ok = opts[:event_sink].(%Event.Relation{id: 1, schema: "public", table: "users"})
+
+      pid = spawn_link(fn -> Process.sleep(:infinity) end)
+      {:ok, pid}
+    end
+  end
+
+  defmodule FakeConnectionOptions do
+    def resolve(_source, _opts) do
+      {:ok, [hostname: "localhost", port: 5432, database: "db", username: "postgres"]}
+    end
+  end
+
+  setup do
+    Process.put(:test_pid, self())
+    :ok
   end
 
   test "builds service options from metadata" do
@@ -62,10 +133,55 @@ defmodule DuckFeeder.RuntimeTest do
     GenServer.stop(pid)
   end
 
+  test "starts streaming runtime stack" do
+    storage = %{provider: :s3, bucket: "bucket", adapter: DuckFeeder.Storage.S3}
+
+    assert {:ok, %{service_pid: service_pid, cdc_pid: cdc_pid, start_lsn: "0/20"}} =
+             Runtime.start_stream(:meta_conn, "source-a", storage,
+               meta_module: FakeMeta,
+               service_module: FakeService,
+               cdc_module: FakeCDC,
+               connection_options_module: FakeConnectionOptions,
+               observer_pid: self(),
+               service_name: nil,
+               cdc_name: nil
+             )
+
+    assert is_pid(service_pid)
+    assert is_pid(cdc_pid)
+
+    assert_receive {:fake_service_start, service_opts}
+    assert service_opts[:designated_tables] != []
+
+    assert_receive {:fake_cdc_start, cdc_opts}
+    assert cdc_opts[:slot_name] == "slot-a"
+    assert cdc_opts[:publication_name] == "pub-a"
+    assert cdc_opts[:start_lsn] == "0/20"
+    assert cdc_opts[:connection_opts][:hostname] == "localhost"
+
+    assert_receive {:fake_service_event, %DuckFeeder.CDC.Event.Relation{id: 1}}
+
+    GenServer.stop(service_pid)
+    Process.exit(cdc_pid, :normal)
+  end
+
   test "returns error when source is missing" do
     storage = %{provider: :s3, bucket: "bucket", adapter: DuckFeeder.Storage.S3}
 
     assert {:error, {:source_not_found, "missing"}} =
              Runtime.service_options(:meta_conn, "missing", storage, meta_module: FakeMeta)
+  end
+
+  test "returns error when source fields are missing for stream startup" do
+    storage = %{provider: :s3, bucket: "bucket", adapter: DuckFeeder.Storage.S3}
+
+    assert {:error, {:missing_source_field, :slot_name}} =
+             Runtime.start_stream(:meta_conn, "source-missing-slot", storage,
+               meta_module: FakeMeta,
+               service_module: FakeService,
+               cdc_module: FakeCDC,
+               connection_options_module: FakeConnectionOptions,
+               observer_pid: self()
+             )
   end
 end
