@@ -111,6 +111,21 @@ defmodule DuckFeeder.RuntimeTest do
     end
   end
 
+  defmodule FakeSnapshotRunner do
+    def run(:query_conn, designated_tables, opts) do
+      if pid = Process.get(:test_pid), do: send(pid, {:fake_snapshot_runner, designated_tables})
+
+      :ok = opts[:row_handler].(hd(designated_tables), %{"id" => 1})
+
+      {:ok,
+       %{
+         snapshot_id: "snap-1",
+         boundary_lsn: "0/35",
+         table_counts: %{{"public", "users"} => 1}
+       }}
+    end
+  end
+
   setup do
     Process.put(:test_pid, self())
     :ok
@@ -220,6 +235,70 @@ defmodule DuckFeeder.RuntimeTest do
 
     GenServer.stop(service_pid)
     Process.exit(cdc_pid, :normal)
+  end
+
+  test "start_stream can run initial snapshot before replication stream" do
+    storage = %{provider: :s3, bucket: "bucket", adapter: DuckFeeder.Storage.S3}
+
+    query_connect_fun = fn connection_opts ->
+      send(self(), {:fake_query_connect_snapshot, connection_opts})
+      {:ok, :query_conn}
+    end
+
+    query_disconnect_fun = fn :query_conn ->
+      send(self(), {:fake_query_disconnect_snapshot, :query_conn})
+      :ok
+    end
+
+    row_handler = fn designated_table, row ->
+      send(self(), {:snapshot_row, designated_table, row})
+      :ok
+    end
+
+    assert {:ok, %{service_pid: service_pid, cdc_pid: cdc_pid, start_lsn: "0/35"}} =
+             Runtime.start_stream(:meta_conn, "source-a", storage,
+               meta_module: FakeMeta,
+               service_module: FakeService,
+               cdc_module: FakeCDC,
+               connection_options_module: FakeConnectionOptions,
+               bootstrap_replication?: false,
+               snapshot_before_stream?: true,
+               snapshot_runner_module: FakeSnapshotRunner,
+               snapshot_row_handler: row_handler,
+               query_connect_fun: query_connect_fun,
+               query_disconnect_fun: query_disconnect_fun,
+               observer_pid: self(),
+               service_name: nil,
+               cdc_name: nil
+             )
+
+    assert_receive {:fake_query_connect_snapshot, _}
+    assert_receive {:fake_snapshot_runner, [%{source_table: "users"}]}
+    assert_receive {:snapshot_row, %{source_table: "users"}, %{"id" => 1}}
+    assert_receive {:fake_query_disconnect_snapshot, :query_conn}
+
+    assert_receive {:fake_cdc_start, cdc_opts}
+    assert cdc_opts[:start_lsn] == "0/35"
+
+    GenServer.stop(service_pid)
+    Process.exit(cdc_pid, :normal)
+  end
+
+  test "returns error when snapshot mode is enabled without row handler" do
+    storage = %{provider: :s3, bucket: "bucket", adapter: DuckFeeder.Storage.S3}
+
+    assert {:error, :missing_snapshot_row_handler} =
+             Runtime.start_stream(:meta_conn, "source-a", storage,
+               meta_module: FakeMeta,
+               service_module: FakeService,
+               cdc_module: FakeCDC,
+               connection_options_module: FakeConnectionOptions,
+               bootstrap_replication?: false,
+               snapshot_before_stream?: true,
+               query_connect_fun: fn _ -> {:ok, :query_conn} end,
+               query_disconnect_fun: fn _ -> :ok end,
+               observer_pid: self()
+             )
   end
 
   test "returns error when source is missing" do

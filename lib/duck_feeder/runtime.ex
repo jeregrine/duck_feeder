@@ -69,7 +69,10 @@ defmodule DuckFeeder.Runtime do
              designated_tables,
              opts
            ),
-         {:ok, start_lsn} <- resolve_start_lsn(meta_start_lsn, bootstrap_start_lsn),
+         {:ok, snapshot_boundary_lsn} <-
+           maybe_snapshot_boundary_lsn(connection_opts, designated_tables, opts),
+         {:ok, start_lsn} <-
+           resolve_start_lsn(meta_start_lsn, [bootstrap_start_lsn, snapshot_boundary_lsn]),
          {:ok, service_pid} <-
            service_module.start_link(
              build_service_opts(
@@ -194,13 +197,55 @@ defmodule DuckFeeder.Runtime do
     end
   end
 
-  defp resolve_start_lsn(meta_start_lsn, nil), do: {:ok, meta_start_lsn}
+  defp maybe_snapshot_boundary_lsn(connection_opts, designated_tables, opts) do
+    if Keyword.get(opts, :snapshot_before_stream?, false) do
+      snapshot_runner_module =
+        Keyword.get(opts, :snapshot_runner_module, DuckFeeder.CDC.InitialSnapshot.Runner)
 
-  defp resolve_start_lsn(meta_start_lsn, bootstrap_start_lsn) do
-    case Lsn.max(meta_start_lsn, bootstrap_start_lsn) do
-      {:error, _reason} = error -> error
-      lsn -> {:ok, lsn}
+      query_connect_fun = Keyword.get(opts, :query_connect_fun, &Postgrex.start_link/1)
+      query_disconnect_fun = Keyword.get(opts, :query_disconnect_fun, &GenServer.stop/1)
+      snapshot_runner_opts = Keyword.get(opts, :snapshot_runner_opts, [])
+
+      with {:ok, row_handler} <- fetch_snapshot_row_handler(opts),
+           {:ok, query_conn} <- query_connect_fun.(connection_opts) do
+        result =
+          snapshot_runner_module.run(
+            query_conn,
+            designated_tables,
+            Keyword.merge(snapshot_runner_opts, row_handler: row_handler)
+          )
+
+        _ = safe_disconnect_query_conn(query_disconnect_fun, query_conn)
+
+        case result do
+          {:ok, %{boundary_lsn: boundary_lsn}} -> {:ok, boundary_lsn}
+          {:error, reason} -> {:error, {:initial_snapshot_failed, reason}}
+        end
+      else
+        {:error, :missing_snapshot_row_handler} = error -> error
+        {:error, reason} -> {:error, {:query_connection_failed, reason}}
+      end
+    else
+      {:ok, nil}
     end
+  end
+
+  defp fetch_snapshot_row_handler(opts) do
+    case Keyword.get(opts, :snapshot_row_handler) do
+      handler when is_function(handler, 2) -> {:ok, handler}
+      _ -> {:error, :missing_snapshot_row_handler}
+    end
+  end
+
+  defp resolve_start_lsn(meta_start_lsn, candidates) when is_list(candidates) do
+    candidates
+    |> Enum.reject(&is_nil/1)
+    |> Enum.reduce_while({:ok, meta_start_lsn}, fn candidate, {:ok, current} ->
+      case Lsn.max(current, candidate) do
+        {:error, _reason} = error -> {:halt, error}
+        max_lsn -> {:cont, {:ok, max_lsn}}
+      end
+    end)
   end
 
   defp safe_disconnect_query_conn(disconnect_fun, query_conn) do
