@@ -147,6 +147,13 @@ scripts/test_integration.sh
 scripts/test_integration.sh --down
 ```
 
+## Telemetry
+
+Core events currently emitted:
+- `[:duck_feeder, :cdc, :event]`
+- `[:duck_feeder, :batch, :flushed]`
+- `[:duck_feeder, :batch, :processed]`
+
 ## Progress tracking
 
 See `docs/current_status.md` for implemented modules vs remaining target architecture work.

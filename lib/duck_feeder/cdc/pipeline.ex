@@ -53,13 +53,16 @@ defmodule DuckFeeder.CDC.Pipeline do
   def handle_call({:push_event, event}, _from, %State{buffer: buffer} = state) do
     case TransactionBuffer.handle_event(buffer, event) do
       {:buffering, next_buffer} ->
+        DuckFeeder.Telemetry.cdc_event(event_type(event), :buffering)
         {:reply, :buffering, %{state | buffer: next_buffer}}
 
       {:ok, transaction, next_buffer} ->
         :ok = Ingest.ingest_transaction(state.ingest_pid, transaction)
+        DuckFeeder.Telemetry.cdc_event(event_type(event), :committed)
         {:reply, {:committed, transaction}, %{state | buffer: next_buffer}}
 
       {:error, reason} ->
+        DuckFeeder.Telemetry.cdc_event(event_type(event), :error)
         {:reply, {:error, reason}, state}
     end
   end
@@ -67,4 +70,7 @@ defmodule DuckFeeder.CDC.Pipeline do
   def handle_call(:in_transaction?, _from, %State{buffer: buffer} = state) do
     {:reply, TransactionBuffer.in_transaction?(buffer), state}
   end
+
+  defp event_type(%{__struct__: module}), do: module
+  defp event_type(other), do: other
 end

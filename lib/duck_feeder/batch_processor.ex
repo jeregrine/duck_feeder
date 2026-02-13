@@ -27,6 +27,12 @@ defmodule DuckFeeder.BatchProcessor do
           {:ok, map()} | {:error, term()}
   def process_batch(context, table, batch)
       when is_map(context) and is_tuple(table) and is_map(batch) do
+    result = do_process_batch(context, table, batch)
+    DuckFeeder.Telemetry.batch_processed(table, result)
+    result
+  end
+
+  defp do_process_batch(context, table, batch) do
     meta = Map.get(context, :meta_module, Meta)
     conn = Map.fetch!(context, :meta_conn)
 

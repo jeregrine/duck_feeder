@@ -136,6 +136,8 @@ defmodule DuckFeeder.TablePipeline do
   end
 
   defp emit_flush(%State{table: table, sink_pid: sink_pid, on_flush: on_flush}, batch) do
+    DuckFeeder.Telemetry.batch_flushed(table, batch)
+
     if is_pid(sink_pid) do
       send(sink_pid, {:duck_feeder_batch, table, batch})
     end
