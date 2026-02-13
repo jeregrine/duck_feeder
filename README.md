@@ -41,6 +41,11 @@ It supports pluggable committers via `DuckFeeder.DuckLake.Committer` (default no
 {:ok, service_pid} = DuckFeeder.start_service(meta_conn, "source-a", storage_config)
 ```
 
+## Replication connection API
+
+`DuckFeeder.CDC.Connection` provides a live `Postgrex.ReplicationConnection` client
+that decodes pgoutput and emits normalized `DuckFeeder.CDC.Event` values to an `event_sink`.
+
 ## Reconciliation
 
 `DuckFeeder.Reconciler` provides stale-batch reconciliation helpers.
@@ -109,6 +114,7 @@ Added normalized CDC event and routing modules:
 - `DuckFeeder.CDC.LogicalReplication.Converter`
 - `DuckFeeder.CDC.MessageMapper`
 - `DuckFeeder.CDC.SnapshotBoundary`
+- `DuckFeeder.CDC.Connection`
 - `DuckFeeder.CDC.Pipeline`
 - `DuckFeeder.Service`
 
