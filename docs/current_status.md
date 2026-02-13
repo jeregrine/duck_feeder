@@ -32,6 +32,7 @@ This tracks progress against `docs/plan_compact.md`.
   - [x] `DuckFeeder.CDC.LogicalReplication.Converter` (wire message -> normalized event conversion)
   - [x] `DuckFeeder.CDC.MessageMapper` (generic message->event mapping)
   - [x] `DuckFeeder.CDC.SnapshotBoundary`
+  - [x] `DuckFeeder.CDC.InitialSnapshot` (snapshot tx + copy SQL helpers)
   - [x] `DuckFeeder.CDC.Connection` (`Postgrex.ReplicationConnection` stream client)
   - [x] runtime bootstrap integration (`DuckFeeder.Runtime.start_stream/4` + `DuckFeeder.CDC.Bootstrap`)
   - [x] `DuckFeeder.CDC.Pipeline`
@@ -71,7 +72,7 @@ This tracks progress against `docs/plan_compact.md`.
 ## Remaining to reach target architecture
 
 - [ ] **Replication client hardening** (bootstrap lifecycle, reconnect policy tuning, backpressure/metrics)
-- [ ] **Initial snapshot + WAL handoff**
+- [ ] **Initial snapshot + WAL handoff orchestration** (stream cutoff coordination + table copy execution)
 - [ ] **Parquet writer adapter** (Rustler/NIF path)
 - [ ] **DuckLake metadata SQL commit implementation** (spec-aligned)
 - [ ] **Advanced recovery/reconciler loop** (orphan file cleanup, scheduling, retry policy controls)
