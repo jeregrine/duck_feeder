@@ -29,11 +29,10 @@ You can seed `duckfeeder_meta` source + designated table rows from runtime confi
   )
 ```
 
-## Writer API (temporary adapter)
+## Writer API
 
-`DuckFeeder.Writer` currently defaults to `DuckFeeder.Writer.Jsonl` as a placeholder.
-`DuckFeeder.Writer.ParquetNif` exists as the not-yet-implemented adapter target for
-Parquet/Rust integration.
+`DuckFeeder.Writer` supports both JSONL and Parquet output.
+`DuckFeeder.Writer.ParquetNif` now writes Parquet via a Rustler NIF.
 
 You can select by format (`:jsonl | :parquet`) or explicit adapter module.
 Optional fallback is supported (e.g. `format: :parquet, fallback_format: :jsonl`).

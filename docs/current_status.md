@@ -52,7 +52,7 @@ This tracks progress against `docs/plan_compact.md`.
 - [x] **Write/upload/commit orchestration foundation**
   - [x] `DuckFeeder.Writer` adapter interface
   - [x] temporary `DuckFeeder.Writer.Jsonl` adapter
-  - [x] placeholder `DuckFeeder.Writer.ParquetNif` adapter
+  - [x] `DuckFeeder.Writer.ParquetNif` (Rustler-backed parquet writer)
   - [x] writer format selection + parquet fallback wiring
   - [x] `DuckFeeder.BatchProcessor`
   - [x] `DuckFeeder.DuckLake.Committer` interface + no-op committer
@@ -94,7 +94,7 @@ This tracks progress against `docs/plan_compact.md`.
 
 - [ ] **Replication client hardening** (bootstrap lifecycle, reconnect policy tuning, backpressure/metrics)
 - [ ] **Production initial snapshot + WAL handoff path** (direct ingest integration + replay validation)
-- [ ] **Parquet writer adapter** (Rustler/NIF path)
+- [ ] **Parquet writer hardening** (type fidelity, performance tuning, and compatibility validation)
 - [ ] **Full DuckLake metadata SQL commit implementation** (table metadata/stats/history beyond snapshot+file append path)
 - [ ] **Advanced recovery/reconciler loop** (orphan detection, policy tuning, large-scale cleanup safety)
 - [ ] **Full integration suite** (Postgres + S3 + GCS + metadata DB)
@@ -102,4 +102,4 @@ This tracks progress against `docs/plan_compact.md`.
 ## Local test status
 
 - `mix test` passes for current codebase.
-- Integration tests require `DUCK_FEEDER_META_DATABASE_URL`.
+- Integration tests require `DUCK_FEEDER_META_DATABASE_URL` and `DUCK_FEEDER_SOURCE_DATABASE_URL`.

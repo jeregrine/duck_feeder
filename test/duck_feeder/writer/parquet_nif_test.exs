@@ -3,8 +3,19 @@ defmodule DuckFeeder.Writer.ParquetNifTest do
 
   alias DuckFeeder.Writer.ParquetNif
 
-  test "returns not implemented error" do
-    assert {:error, :parquet_nif_not_implemented} =
-             ParquetNif.write_batch(%{}, %{rows: []}, [])
+  test "writes parquet file" do
+    assert {:ok, result} =
+             ParquetNif.write_batch(%{}, %{rows: [%{"id" => 1, "name" => "duck"}]}, [])
+
+    assert result.format == :parquet
+    assert result.file_size_bytes > 0
+    assert File.exists?(result.local_path)
+
+    assert :ok = ParquetNif.cleanup(%{}, result)
+    refute File.exists?(result.local_path)
+  end
+
+  test "returns error for empty row list" do
+    assert {:error, :empty_rows} = ParquetNif.write_batch(%{}, %{rows: []}, [])
   end
 end

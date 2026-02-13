@@ -2,8 +2,7 @@ defmodule DuckFeeder.Writer do
   @moduledoc """
   Write-path entrypoint.
 
-  Defaults to `DuckFeeder.Writer.Jsonl` as a placeholder adapter until
-  Parquet/Rust writer integration is wired in.
+  Defaults to parquet via `DuckFeeder.Writer.ParquetNif`.
   """
 
   alias DuckFeeder.Writer.{Adapter, Jsonl, ParquetNif}
@@ -47,7 +46,7 @@ defmodule DuckFeeder.Writer do
         {:ok, adapter}
 
       nil ->
-        adapter_from_format(Map.get(config, :format, :jsonl))
+        adapter_from_format(Map.get(config, :format, :parquet))
 
       other ->
         {:error, {:invalid_writer_adapter, other}}

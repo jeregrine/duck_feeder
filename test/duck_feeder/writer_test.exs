@@ -3,13 +3,13 @@ defmodule DuckFeeder.WriterTest do
 
   alias DuckFeeder.Writer
 
-  test "writes jsonl batch and cleans up file" do
+  test "writes parquet batch by default and cleans up file" do
     batch = %{rows: [%{"id" => 1}, %{"id" => 2}]}
 
     assert {:ok, result} = Writer.write_batch(%{}, batch)
 
-    assert result.format == :jsonl
-    assert result.adapter == DuckFeeder.Writer.Jsonl
+    assert result.format == :parquet
+    assert result.adapter == DuckFeeder.Writer.ParquetNif
     assert result.row_count == 2
     assert result.file_size_bytes > 0
     assert File.exists?(result.local_path)
@@ -18,18 +18,29 @@ defmodule DuckFeeder.WriterTest do
     refute File.exists?(result.local_path)
   end
 
-  test "supports format-based adapter selection and fallback" do
-    assert {:error, :parquet_nif_not_implemented} =
-             Writer.write_batch(%{format: :parquet}, %{rows: []})
+  test "supports format-based adapter selection and parquet writing" do
+    {:ok, parquet_result} =
+      Writer.write_batch(%{format: :parquet}, %{rows: [%{"id" => 1, "name" => "duck"}]})
 
-    assert {:ok, result} =
-             Writer.write_batch(%{format: :parquet, fallback_format: :jsonl}, %{
-               rows: [%{"id" => 1}]
-             })
+    assert parquet_result.format == :parquet
+    assert parquet_result.adapter == DuckFeeder.Writer.ParquetNif
+    assert parquet_result.file_size_bytes > 0
+    assert File.exists?(parquet_result.local_path)
+    assert :ok = Writer.cleanup(%{format: :parquet}, parquet_result)
 
+    {:ok, result} =
+      Writer.write_batch(%{format: :parquet, fallback_format: :jsonl}, %{rows: [%{"id" => 1}]})
+
+    assert result.format == :parquet
+    assert result.adapter == DuckFeeder.Writer.ParquetNif
+    assert :ok = Writer.cleanup(%{format: :parquet, fallback_format: :jsonl}, result)
+  end
+
+  test "supports explicit jsonl format" do
+    assert {:ok, result} = Writer.write_batch(%{format: :jsonl}, %{rows: [%{"id" => 1}]})
     assert result.format == :jsonl
     assert result.adapter == DuckFeeder.Writer.Jsonl
-    assert :ok = Writer.cleanup(%{format: :parquet, fallback_format: :jsonl}, result)
+    assert :ok = Writer.cleanup(%{format: :jsonl}, result)
   end
 
   test "returns error for invalid adapter and format" do
@@ -38,8 +49,5 @@ defmodule DuckFeeder.WriterTest do
 
     assert {:error, {:invalid_writer_format, :csv}} =
              Writer.write_batch(%{format: :csv}, %{rows: []})
-
-    assert {:error, {:invalid_writer_fallback_adapter, "bad"}} =
-             Writer.write_batch(%{format: :parquet, fallback_adapter: "bad"}, %{rows: []})
   end
 end

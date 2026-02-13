@@ -137,4 +137,66 @@ defmodule DuckFeeder.RuntimeStreamIntegrationTest do
     GenServer.stop(cdc_pid)
     GenServer.stop(service_pid)
   end
+
+  test "wal cdc to parquet upload and ducklake metadata commit", %{
+    meta_conn: meta_conn,
+    source_conn: source_conn,
+    source_name: source_name,
+    source_table: source_table,
+    target_table: target_table,
+    designated_table_id: designated_table_id
+  } do
+    storage = %{provider: :s3, bucket: "bucket", adapter: FakeStorage}
+
+    assert {:ok, %{service_pid: service_pid, cdc_pid: cdc_pid}} =
+             Runtime.start_stream(meta_conn, source_name, storage,
+               observer_pid: self(),
+               writer: %{format: :parquet},
+               committer_module: DuckFeeder.DuckLake.Committer.Postgres,
+               pipeline_opts: %{max_rows: 1, max_bytes: 10_000, flush_interval_ms: 60_000},
+               bootstrap_replication?: true,
+               auto_reconnect: false,
+               sync_connect: true
+             )
+
+    Process.sleep(150)
+
+    assert {:ok, _} =
+             Postgrex.query(
+               source_conn,
+               "INSERT INTO public.\"#{source_table}\" (id, name) VALUES (2, 'goose')",
+               []
+             )
+
+    assert_receive {:duck_feeder_batch_processed, {"raw", ^target_table}, {:ok, result}, _batch},
+                   10_000
+
+    assert result.status in [:committed, :already_committed]
+    assert String.ends_with?(result.object_key, ".parquet")
+
+    assert {:ok, batch_files} = Meta.list_batch_files(meta_conn, result.batch_id)
+    assert [%{object_key: object_key}] = batch_files
+    assert String.ends_with?(object_key, ".parquet")
+
+    assert {:ok, %{rows: [[snapshot_count]]}} =
+             Postgrex.query(
+               meta_conn,
+               "SELECT count(*) FROM ducklake_metadata.ducklake_snapshot WHERE table_id = $1",
+               [designated_table_id]
+             )
+
+    assert snapshot_count >= 1
+
+    assert {:ok, %{rows: [[commit_count]]}} =
+             Postgrex.query(
+               meta_conn,
+               "SELECT count(*) FROM duckfeeder_meta.ducklake_commits WHERE designated_table_id = $1",
+               [designated_table_id]
+             )
+
+    assert commit_count >= 1
+
+    GenServer.stop(cdc_pid)
+    GenServer.stop(service_pid)
+  end
 end
