@@ -1,0 +1,87 @@
+# DuckFeeder
+
+Elixir-first CDC ingest library (Postgres WAL -> Parquet -> object storage -> DuckLake metadata).
+
+## Current status
+
+Started with a **semi-generic storage interface** supporting:
+- `:s3` (AWS S3 and S3-compatible)
+- `:gcs` (Google Cloud Storage JSON API)
+
+HTTP stack is **Req-only** (no hackney dependency in this project).
+
+## Storage API
+
+```elixir
+DuckFeeder.put_file(storage_config, "/tmp/batch.parquet", "events/table=users/part-0001.parquet")
+DuckFeeder.head_object(storage_config, "events/table=users/part-0001.parquet")
+DuckFeeder.delete_object(storage_config, "events/table=users/part-0001.parquet")
+```
+
+## S3 config example
+
+The S3 adapter uses direct HTTP calls with Req + AWS SigV4.
+
+```elixir
+%{
+  provider: :s3,
+  bucket: "ducklake-data",
+  prefix: "prod",
+  region: "us-east-1",
+  access_key_id: System.fetch_env!("AWS_ACCESS_KEY_ID"),
+  secret_access_key: System.fetch_env!("AWS_SECRET_ACCESS_KEY"),
+  session_token: System.get_env("AWS_SESSION_TOKEN"),
+  endpoint: System.get_env("S3_ENDPOINT"), # optional for S3-compatible/localstack
+  force_path_style: true                    # common for S3-compatible services
+}
+```
+
+## GCS config example
+
+```elixir
+%{
+  provider: :gcs,
+  bucket: "ducklake-data",
+  prefix: "prod",
+  token: System.fetch_env!("GCS_OAUTH_TOKEN")
+}
+```
+
+You can also provide `token_fun: fn -> token end` for rotating tokens.
+
+## Meta schema + checkpoint/batch state machine
+
+Added `duckfeeder_meta` bootstrap SQL:
+- `priv/duckfeeder_meta/create_tables.sql`
+
+Added Postgres-backed control-plane modules:
+- `DuckFeeder.Meta.SQL`
+- `DuckFeeder.Meta.Store`
+- `DuckFeeder.Meta.BatchState`
+- `DuckFeeder.Meta`
+
+Typical bootstrap/use flow:
+
+```elixir
+{:ok, conn} = Postgrex.start_link(...)
+:ok = DuckFeeder.Meta.bootstrap(conn)
+
+{:ok, source_id} = DuckFeeder.Meta.register_source(conn, %{name: "primary"})
+
+{:ok, designated_table_id} =
+  DuckFeeder.Meta.register_designated_table(conn, %{
+    source_id: source_id,
+    source_schema: "public",
+    source_table: "users",
+    target_schema: "raw",
+    target_table: "users"
+  })
+
+{:ok, "0/0"} = DuckFeeder.Meta.fetch_checkpoint(conn, designated_table_id)
+```
+
+## Notes
+
+- Object keys are built from `prefix + relative_key`.
+- Adapter override is supported via `adapter: MyAdapter` for tests/custom providers.
+- Batch states: `pending -> encoded -> uploaded -> committed` (with `failed` + retry path to `pending`).

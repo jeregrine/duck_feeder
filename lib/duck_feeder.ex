@@ -1,0 +1,13 @@
+defmodule DuckFeeder do
+  @moduledoc """
+  DuckFeeder entrypoint.
+
+  Currently exposes storage writes through a semi-generic interface.
+  """
+
+  defdelegate put_file(storage_config, local_path, relative_key, opts \\ []),
+    to: DuckFeeder.Storage
+
+  defdelegate head_object(storage_config, relative_key), to: DuckFeeder.Storage
+  defdelegate delete_object(storage_config, relative_key), to: DuckFeeder.Storage
+end
