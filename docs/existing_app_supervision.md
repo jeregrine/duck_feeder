@@ -33,7 +33,12 @@ def start(_type, _args) do
          bootstrap_replication?: true
        ],
        start_reconciler?: true,
-       reconcile_opts: [verify_uploaded_objects?: true, cleanup_failed_uploads?: true]
+       reconcile_opts: [
+         verify_uploaded_objects?: true,
+         cleanup_failed_uploads?: true,
+         max_batches: 500,
+         stop_on_error?: false
+       ]
      ]}
   ]
 

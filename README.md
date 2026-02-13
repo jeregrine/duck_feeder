@@ -130,6 +130,8 @@ It currently retries stale `uploaded` batches via `commit_uploaded_batch/2`.
   failed batches back to `pending`
 - `verify_uploaded_objects?: true` to HEAD-check uploaded files before committing stale
   uploaded batches
+- `max_batches: positive_integer()` to cap per-run work
+- `stop_on_error?: true` to halt run after first reconciliation error
 
 ```elixir
 {:ok, worker} = DuckFeeder.start_reconciler(context: %{meta_conn: meta_conn})

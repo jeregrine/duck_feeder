@@ -66,6 +66,19 @@ defmodule DuckFeeder.ReconcilerTest do
     end
   end
 
+  defmodule FakeMetaStopOnError do
+    def list_stale_batches(_conn, _opts) do
+      {:ok, [%{batch_id: "e1", state: "uploaded"}, %{batch_id: "e2", state: "uploaded"}]}
+    end
+
+    def commit_uploaded_batch(_conn, "e1"), do: {:error, :first_failed}
+
+    def commit_uploaded_batch(_conn, "e2") do
+      if pid = Process.get(:test_pid), do: send(pid, {:meta_commit_uploaded_batch, "e2"})
+      {:ok, %{batch_id: "e2"}}
+    end
+  end
+
   defmodule FakeStorageHeadFail do
     def head_object(_config, "raw/users/file-1.parquet") do
       if pid = Process.get(:test_pid),
@@ -164,5 +177,34 @@ defmodule DuckFeeder.ReconcilerTest do
     assert_received {:meta_transition_failed, [error_message: _error_message]}
 
     refute_received {:meta_commit_uploaded_batch, "b1"}
+  end
+
+  test "limits reconcile run with max_batches" do
+    assert {:ok, summary} =
+             Reconciler.reconcile(%{meta_conn: :fake, meta_module: FakeMeta}, max_batches: 2)
+
+    assert summary.checked == 2
+    assert summary.committed == ["b1"]
+    assert summary.skipped == ["b2"]
+    assert summary.errors == []
+  end
+
+  test "can stop after first batch error" do
+    assert {:ok, summary} =
+             Reconciler.reconcile(
+               %{meta_conn: :fake, meta_module: FakeMetaStopOnError},
+               stop_on_error?: true
+             )
+
+    assert summary.checked == 1
+    assert summary.errors == [{"e1", :first_failed}]
+    assert summary.committed == []
+
+    refute_received {:meta_commit_uploaded_batch, "e2"}
+  end
+
+  test "returns error for invalid max_batches" do
+    assert {:error, {:invalid_max_batches, 0}} =
+             Reconciler.reconcile(%{meta_conn: :fake, meta_module: FakeMeta}, max_batches: 0)
   end
 end

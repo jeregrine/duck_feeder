@@ -7,6 +7,9 @@ defmodule DuckFeeder.Reconciler do
   - optional failed-batch retry path (`cleanup_failed_uploads?: true`) that:
     - deletes known batch objects from storage
     - transitions batch from `failed` back to `pending`
+  - optional run safety controls:
+    - `max_batches: positive_integer()` to cap work per reconcile call
+    - `stop_on_error?: true` to halt after the first batch error
   """
 
   alias DuckFeeder.{Meta, Storage}
@@ -35,28 +38,37 @@ defmodule DuckFeeder.Reconciler do
       Keyword.get(opts, :stale_before, DateTime.add(DateTime.utc_now(), -30 * 60, :second))
 
     states = Keyword.get(opts, :states, [:uploaded, :failed])
+    stop_on_error? = Keyword.get(opts, :stop_on_error?, false)
 
-    with {:ok, stale_batches} <-
+    with {:ok, max_batches} <- normalize_max_batches(Keyword.get(opts, :max_batches)),
+         {:ok, stale_batches} <-
            meta.list_stale_batches(conn, stale_before: stale_before, states: states) do
       summary =
-        Enum.reduce(
-          stale_batches,
+        stale_batches
+        |> maybe_limit(max_batches)
+        |> Enum.reduce_while(
           %{checked: 0, committed: [], retried: [], skipped: [], errors: []},
           fn batch, acc ->
             acc = %{acc | checked: acc.checked + 1}
 
             case reconcile_batch(meta, conn, context, opts, batch) do
               {:committed, batch_id} ->
-                %{acc | committed: [batch_id | acc.committed]}
+                {:cont, %{acc | committed: [batch_id | acc.committed]}}
 
               {:retried, batch_id} ->
-                %{acc | retried: [batch_id | acc.retried]}
+                {:cont, %{acc | retried: [batch_id | acc.retried]}}
 
               {:skipped, batch_id} ->
-                %{acc | skipped: [batch_id | acc.skipped]}
+                {:cont, %{acc | skipped: [batch_id | acc.skipped]}}
 
               {:error, batch_id, reason} ->
-                %{acc | errors: [{batch_id, reason} | acc.errors]}
+                next_acc = %{acc | errors: [{batch_id, reason} | acc.errors]}
+
+                if stop_on_error? do
+                  {:halt, next_acc}
+                else
+                  {:cont, next_acc}
+                end
             end
           end
         )
@@ -155,6 +167,16 @@ defmodule DuckFeeder.Reconciler do
       {:error, :missing_storage_for_failed_cleanup}
     end
   end
+
+  defp maybe_limit(batches, nil), do: batches
+  defp maybe_limit(batches, max_batches), do: Enum.take(batches, max_batches)
+
+  defp normalize_max_batches(nil), do: {:ok, nil}
+
+  defp normalize_max_batches(max_batches) when is_integer(max_batches) and max_batches > 0,
+    do: {:ok, max_batches}
+
+  defp normalize_max_batches(other), do: {:error, {:invalid_max_batches, other}}
 
   defp finalize_summary(summary) do
     %{
