@@ -99,6 +99,19 @@ defmodule DuckFeeder.Service do
   end
 
   @impl true
+  def handle_info(
+        {:duck_feeder_cdc_event, event},
+        %State{cdc_pipeline_pid: cdc_pipeline_pid} = state
+      ) do
+    result = Pipeline.push_event(cdc_pipeline_pid, event)
+
+    if is_pid(state.observer_pid) do
+      send(state.observer_pid, {:duck_feeder_cdc_event_processed, result, event})
+    end
+
+    {:noreply, state}
+  end
+
   def handle_info({:duck_feeder_batch, table, batch}, %State{} = state) do
     result = BatchProcessor.process_batch(state.context, table, batch)
 

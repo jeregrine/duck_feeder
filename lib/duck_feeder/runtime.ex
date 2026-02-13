@@ -142,12 +142,21 @@ defmodule DuckFeeder.Runtime do
          service_pid,
          opts
        ) do
-    event_sink = fn event ->
-      case service_module.push_event(service_pid, event) do
-        {:error, reason} -> {:error, reason}
-        _ -> :ok
+    event_sink_mode = Keyword.get(opts, :event_sink_mode, :pid)
+
+    event_sink =
+      case event_sink_mode do
+        :pid ->
+          service_pid
+
+        :call ->
+          fn event ->
+            case service_module.push_event(service_pid, event) do
+              {:error, reason} -> {:error, reason}
+              _ -> :ok
+            end
+          end
       end
-    end
 
     [
       name: Keyword.get(opts, :cdc_name),

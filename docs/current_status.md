@@ -40,6 +40,7 @@ This tracks progress against `docs/plan_compact.md`.
   - [x] `DuckFeeder.CDC.Connection` (`Postgrex.ReplicationConnection` stream client)
   - [x] runtime bootstrap integration (`DuckFeeder.Runtime.start_stream/4` + `DuckFeeder.CDC.Bootstrap`)
   - [x] reconnect-backoff passthrough for replication startup (`reconnect_backoff`)
+  - [x] configurable CDC event sink mode (`event_sink_mode: :pid | :call`)
   - [x] `DuckFeeder.CDC.Pipeline`
 
 - [x] **Ingest/batching foundations**

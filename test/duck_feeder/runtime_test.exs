@@ -75,6 +75,12 @@ defmodule DuckFeeder.RuntimeTest do
       if is_pid(state.observer_pid), do: send(state.observer_pid, {:fake_service_event, event})
       {:reply, :buffering, state}
     end
+
+    @impl true
+    def handle_info({:duck_feeder_cdc_event, event}, state) do
+      if is_pid(state.observer_pid), do: send(state.observer_pid, {:fake_service_event, event})
+      {:noreply, state}
+    end
   end
 
   defmodule FakeCDC do
@@ -83,7 +89,12 @@ defmodule DuckFeeder.RuntimeTest do
     def start_link(opts) do
       if pid = Process.get(:test_pid), do: send(pid, {:fake_cdc_start, opts})
 
-      :ok = opts[:event_sink].(%Event.Relation{id: 1, schema: "public", table: "users"})
+      event = %Event.Relation{id: 1, schema: "public", table: "users"}
+
+      case opts[:event_sink] do
+        pid when is_pid(pid) -> send(pid, {:duck_feeder_cdc_event, event})
+        sink when is_function(sink, 1) -> :ok = sink.(event)
+      end
 
       pid = spawn_link(fn -> Process.sleep(:infinity) end)
       {:ok, pid}
@@ -195,8 +206,32 @@ defmodule DuckFeeder.RuntimeTest do
     assert cdc_opts[:start_lsn] == "0/20"
     assert cdc_opts[:connection_opts][:hostname] == "localhost"
     assert cdc_opts[:reconnect_backoff] == 1_500
+    assert is_pid(cdc_opts[:event_sink])
 
     assert_receive {:fake_service_event, %DuckFeeder.CDC.Event.Relation{id: 1}}
+
+    GenServer.stop(service_pid)
+    Process.exit(cdc_pid, :normal)
+  end
+
+  test "start_stream supports call-mode event sink" do
+    storage = %{provider: :s3, bucket: "bucket", adapter: DuckFeeder.Storage.S3}
+
+    assert {:ok, %{service_pid: service_pid, cdc_pid: cdc_pid, start_lsn: "0/20"}} =
+             Runtime.start_stream(:meta_conn, "source-a", storage,
+               meta_module: FakeMeta,
+               service_module: FakeService,
+               cdc_module: FakeCDC,
+               connection_options_module: FakeConnectionOptions,
+               bootstrap_replication?: false,
+               event_sink_mode: :call,
+               observer_pid: self(),
+               service_name: nil,
+               cdc_name: nil
+             )
+
+    assert_receive {:fake_cdc_start, cdc_opts}
+    assert is_function(cdc_opts[:event_sink], 1)
 
     GenServer.stop(service_pid)
     Process.exit(cdc_pid, :normal)
