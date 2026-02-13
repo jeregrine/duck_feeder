@@ -252,19 +252,21 @@ Typical bootstrap/use flow:
 
 ## Integration testing
 
-- Compose stack: `dev/docker-compose.integration.yml`
-  - includes `meta_postgres` and `source_postgres` (logical replication enabled)
-- Helper script: `scripts/test_integration.sh`
-- Env-gated integration tests:
-  - `DUCK_FEEDER_META_DATABASE_URL` (meta store integration)
-  - `DUCK_FEEDER_SOURCE_DATABASE_URL` (CDC connection stream integration)
+Requirements:
+- local Postgres instances available for:
+  - metadata DB (`DUCK_FEEDER_META_DATABASE_URL`)
+  - source DB with logical replication enabled (`DUCK_FEEDER_SOURCE_DATABASE_URL`)
+- `duckdb` CLI on PATH
+
+Helper script:
+- `scripts/test_integration.sh`
 
 Run:
 
 ```bash
+DUCK_FEEDER_META_DATABASE_URL=postgres://... \
+DUCK_FEEDER_SOURCE_DATABASE_URL=postgres://... \
 scripts/test_integration.sh
-# ... later
-scripts/test_integration.sh --down
 ```
 
 ## Telemetry

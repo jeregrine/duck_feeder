@@ -88,7 +88,7 @@ This tracks progress against `docs/plan_compact.md`.
   - [x] integration test file for meta store (env-gated)
   - [x] integration test file for CDC connection stream (env-gated)
   - [x] integration test file for runtime start_stream end-to-end flow (env-gated)
-  - [x] docker compose stack + helper script for integration runs (meta + source postgres)
+  - [x] helper script for integration runs (local pg + duckdb prerequisites)
 
 ## Remaining to reach target architecture
 
