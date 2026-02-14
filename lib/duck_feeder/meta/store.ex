@@ -75,6 +75,44 @@ defmodule DuckFeeder.Meta.Store do
   WHERE designated_table_id = $1
   """
 
+  @fetch_snapshot_handoff_sql """
+  SELECT state, boundary_lsn::text, started_at, completed_at, updated_at
+  FROM duckfeeder_meta.snapshot_handoffs
+  WHERE source_id = $1
+  """
+
+  @upsert_snapshot_handoff_pending_sql """
+  INSERT INTO duckfeeder_meta.snapshot_handoffs
+    (source_id, state, boundary_lsn, started_at, completed_at, updated_at)
+  VALUES
+    ($1, 'pending', $2::pg_lsn, now(), NULL, now())
+  ON CONFLICT (source_id) DO UPDATE SET
+    state = 'pending',
+    boundary_lsn = EXCLUDED.boundary_lsn,
+    started_at = now(),
+    completed_at = NULL,
+    updated_at = now()
+  RETURNING boundary_lsn::text
+  """
+
+  @upsert_snapshot_handoff_complete_sql """
+  INSERT INTO duckfeeder_meta.snapshot_handoffs
+    (source_id, state, boundary_lsn, started_at, completed_at, updated_at)
+  VALUES
+    ($1, 'complete', $2::pg_lsn, now(), now(), now())
+  ON CONFLICT (source_id) DO UPDATE SET
+    state = 'complete',
+    boundary_lsn = EXCLUDED.boundary_lsn,
+    completed_at = now(),
+    updated_at = now()
+  RETURNING boundary_lsn::text
+  """
+
+  @delete_snapshot_handoff_sql """
+  DELETE FROM duckfeeder_meta.snapshot_handoffs
+  WHERE source_id = $1
+  """
+
   @upsert_checkpoint_sql """
   INSERT INTO duckfeeder_meta.checkpoints (designated_table_id, last_committed_lsn, updated_at)
   VALUES ($1, $2::pg_lsn, now())
@@ -305,6 +343,59 @@ defmodule DuckFeeder.Meta.Store do
          {:ok, result} <- query(conn, @upsert_checkpoint_sql, [designated_table_id, lsn_param]),
          {:ok, committed_lsn} <- single_value(result) do
       {:ok, committed_lsn}
+    end
+  end
+
+  @spec fetch_snapshot_handoff(conn(), pos_integer()) :: {:ok, map() | nil} | {:error, term()}
+  def fetch_snapshot_handoff(conn, source_id) when is_integer(source_id) and source_id > 0 do
+    with {:ok, result} <- query(conn, @fetch_snapshot_handoff_sql, [source_id]) do
+      case result.rows do
+        [[state, boundary_lsn, started_at, completed_at, updated_at]] ->
+          {:ok,
+           %{
+             source_id: source_id,
+             state: String.to_atom(state),
+             boundary_lsn: boundary_lsn,
+             started_at: started_at,
+             completed_at: completed_at,
+             updated_at: updated_at
+           }}
+
+        [] ->
+          {:ok, nil}
+      end
+    end
+  end
+
+  @spec mark_snapshot_handoff_pending(conn(), pos_integer(), String.t()) ::
+          {:ok, String.t()} | {:error, term()}
+  def mark_snapshot_handoff_pending(conn, source_id, boundary_lsn)
+      when is_integer(source_id) and source_id > 0 and is_binary(boundary_lsn) do
+    with {:ok, boundary_param} <- lsn_param(boundary_lsn),
+         {:ok, result} <-
+           query(conn, @upsert_snapshot_handoff_pending_sql, [source_id, boundary_param]),
+         {:ok, committed_lsn} <- single_value(result) do
+      {:ok, committed_lsn}
+    end
+  end
+
+  @spec mark_snapshot_handoff_complete(conn(), pos_integer(), String.t()) ::
+          {:ok, String.t()} | {:error, term()}
+  def mark_snapshot_handoff_complete(conn, source_id, boundary_lsn)
+      when is_integer(source_id) and source_id > 0 and is_binary(boundary_lsn) do
+    with {:ok, boundary_param} <- lsn_param(boundary_lsn),
+         {:ok, result} <-
+           query(conn, @upsert_snapshot_handoff_complete_sql, [source_id, boundary_param]),
+         {:ok, committed_lsn} <- single_value(result) do
+      {:ok, committed_lsn}
+    end
+  end
+
+  @spec clear_snapshot_handoff(conn(), pos_integer()) :: :ok | {:error, term()}
+  def clear_snapshot_handoff(conn, source_id) when is_integer(source_id) and source_id > 0 do
+    case query(conn, @delete_snapshot_handoff_sql, [source_id]) do
+      {:ok, _result} -> :ok
+      {:error, reason} -> {:error, reason}
     end
   end
 

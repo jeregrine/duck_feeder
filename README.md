@@ -173,10 +173,26 @@ table name.
 Optional snapshot-before-stream mode is available via:
 - `snapshot_before_stream?: true`
 - `snapshot_row_handler: fn designated_table, row -> ... end`
+- `snapshot_on_restart?: true | false` (default `false`; cold-start snapshot by default)
+- `resume_incomplete_snapshot?: true | false` (default `false`; fail closed when durable handoff marker is pending)
+- `snapshot_handoff_mark_retries: non_neg_integer()` (default `2`)
+- `snapshot_handoff_mark_retry_delay_ms: non_neg_integer()` (default `0`)
 
 If no explicit `snapshot_row_handler` is provided, snapshot rows are replayed into the
 service ingest path by default (`snapshot_ingest?: true`). Set `snapshot_ingest?: false`
 to require an explicit row handler.
+
+Snapshot replay uses boundary-based synthetic LSN allocation so checkpoint advancement
+tracks the snapshot/WAL handoff boundary more closely.
+
+When snapshot replay is active, runtime persists a durable handoff marker
+(`duckfeeder_meta.snapshot_handoffs`) and only marks it complete after CDC start succeeds.
+If startup is interrupted mid-handoff, next start fails closed unless
+`resume_incomplete_snapshot?: true` is provided.
+When resuming, if checkpoint LSN is already at/after the handoff boundary,
+runtime can finalize the pending handoff without rerunning snapshot rows.
+If checkpoint progress falls within the synthetic snapshot LSN window, runtime skips
+already-replayed snapshot rows and continues from the remaining suffix.
 
 ### Migration ordering contract (important)
 

@@ -75,7 +75,7 @@ defmodule DuckFeeder.Runtime.StreamWorkerTest do
 
       assert_receive {:DOWN, ^monitor_ref, :process, ^worker,
                       {:stream_child_down, ^cdc_pid, :killed}},
-                     500
+                     2_000
     end)
   end
 

@@ -64,6 +64,9 @@ defmodule DuckFeeder.Runtime do
              source.id,
              Keyword.get(opts, :default_start_lsn, "0/0")
            ),
+         {:ok, snapshot_handoff} <-
+           fetch_snapshot_handoff(meta_module, meta_conn, source.id),
+         {:ok, snapshot_plan} <- snapshot_plan(meta_start_lsn, snapshot_handoff, opts),
          {:ok, connection_opts} <- connection_options_module.resolve(source, opts),
          {:ok, bootstrap_start_lsn} <-
            maybe_bootstrap_start_lsn(
@@ -74,9 +77,17 @@ defmodule DuckFeeder.Runtime do
              opts
            ),
          {:ok, snapshot_result} <-
-           maybe_snapshot_boundary_lsn(connection_opts, designated_tables, opts),
+           maybe_snapshot_boundary_lsn(
+             connection_opts,
+             designated_tables,
+             meta_start_lsn,
+             snapshot_plan,
+             opts
+           ),
          {:ok, start_lsn} <-
            resolve_start_lsn(meta_start_lsn, [bootstrap_start_lsn, snapshot_result.boundary_lsn]),
+         {:ok, snapshot_replay_plan} <-
+           snapshot_replay_plan(meta_start_lsn, snapshot_result),
          {:ok, service_pid} <-
            service_module.start_link(
              build_service_opts(
@@ -85,27 +96,61 @@ defmodule DuckFeeder.Runtime do
                designated_tables,
                storage_config,
                meta_module,
-               opts
-             )
-           ),
-         :ok <- maybe_replay_snapshot_rows(service_module, service_pid, snapshot_result.rows) do
-      case cdc_module.start_link(
-             build_cdc_opts(
-               connection_opts,
-               slot_name,
-               publication_name,
-               start_lsn,
-               service_module,
-               service_pid,
-               opts
+               with_snapshot_lsn_start(opts, snapshot_replay_plan.snapshot_lsn_start)
              )
            ) do
-        {:ok, cdc_pid} ->
-          {:ok,
-           %{service_pid: service_pid, cdc_pid: cdc_pid, start_lsn: start_lsn, source: source}}
+      with :ok <-
+             maybe_mark_snapshot_handoff_pending(
+               meta_module,
+               meta_conn,
+               source.id,
+               snapshot_plan,
+               snapshot_result,
+               opts
+             ),
+           :ok <-
+             maybe_replay_snapshot_rows(service_module, service_pid, snapshot_replay_plan.rows) do
+        case cdc_module.start_link(
+               build_cdc_opts(
+                 connection_opts,
+                 slot_name,
+                 publication_name,
+                 start_lsn,
+                 service_module,
+                 service_pid,
+                 opts
+               )
+             ) do
+          {:ok, cdc_pid} ->
+            case maybe_mark_snapshot_handoff_complete(
+                   meta_module,
+                   meta_conn,
+                   source.id,
+                   snapshot_result,
+                   opts
+                 ) do
+              :ok ->
+                {:ok,
+                 %{
+                   service_pid: service_pid,
+                   cdc_pid: cdc_pid,
+                   start_lsn: start_lsn,
+                   source: source
+                 }}
 
+              {:error, reason} ->
+                _ = safe_stop_cdc(cdc_pid)
+                _ = safe_stop_service(service_pid)
+                {:error, {:snapshot_handoff_mark_complete_failed, reason}}
+            end
+
+          {:error, reason} ->
+            _ = safe_stop_service(service_pid)
+            {:error, reason}
+        end
+      else
         {:error, reason} ->
-          _ = GenServer.stop(service_pid)
+          _ = safe_stop_service(service_pid)
           {:error, reason}
       end
     end
@@ -131,6 +176,7 @@ defmodule DuckFeeder.Runtime do
       pipeline_opts: Keyword.get(opts, :pipeline_opts, %{}),
       max_tx_changes: Keyword.get(opts, :max_tx_changes),
       observer_pid: Keyword.get(opts, :observer_pid),
+      snapshot_lsn_start: Keyword.get(opts, :snapshot_lsn_start),
       meta_module: meta_module
     ]
     |> Enum.reject(fn {_key, value} -> is_nil(value) end)
@@ -200,16 +246,19 @@ defmodule DuckFeeder.Runtime do
       case query_connect_fun.(connection_opts) do
         {:ok, query_conn} ->
           result =
-            bootstrap_module.bootstrap(query_conn, %{
-              publication_name: publication_name,
-              slot_name: slot_name,
-              designated_tables: designated_tables
-            })
+            safe_bootstrap(
+              bootstrap_module,
+              query_conn,
+              publication_name,
+              slot_name,
+              designated_tables
+            )
 
           _ = safe_disconnect_query_conn(query_disconnect_fun, query_conn)
 
           case result do
             {:ok, %{start_lsn: start_lsn}} -> {:ok, start_lsn}
+            {:ok, other} -> {:error, {:invalid_bootstrap_result, other}}
             {:error, _reason} = error -> error
           end
 
@@ -221,49 +270,268 @@ defmodule DuckFeeder.Runtime do
     end
   end
 
-  defp maybe_snapshot_boundary_lsn(connection_opts, designated_tables, opts) do
-    if Keyword.get(opts, :snapshot_before_stream?, false) do
-      snapshot_runner_module =
-        Keyword.get(opts, :snapshot_runner_module, DuckFeeder.CDC.InitialSnapshot.Runner)
+  defp maybe_snapshot_boundary_lsn(
+         _connection_opts,
+         _designated_tables,
+         _meta_start_lsn,
+         %{run_snapshot?: false, handoff_boundary_lsn: boundary_lsn},
+         _opts
+       ) do
+    {:ok, %{boundary_lsn: boundary_lsn, rows: []}}
+  end
 
-      query_connect_fun = Keyword.get(opts, :query_connect_fun, &Postgrex.start_link/1)
-      query_disconnect_fun = Keyword.get(opts, :query_disconnect_fun, &GenServer.stop/1)
-      snapshot_runner_opts = Keyword.get(opts, :snapshot_runner_opts, [])
+  defp maybe_snapshot_boundary_lsn(
+         connection_opts,
+         designated_tables,
+         _meta_start_lsn,
+         %{run_snapshot?: true},
+         opts
+       ) do
+    snapshot_runner_module =
+      Keyword.get(opts, :snapshot_runner_module, DuckFeeder.CDC.InitialSnapshot.Runner)
 
-      case snapshot_row_handler_with_collector(opts) do
-        {:ok, row_handler, collect_rows} ->
-          case query_connect_fun.(connection_opts) do
-            {:ok, query_conn} ->
-              result =
-                snapshot_runner_module.run(
-                  query_conn,
-                  designated_tables,
-                  Keyword.merge(snapshot_runner_opts, row_handler: row_handler)
-                )
+    query_connect_fun = Keyword.get(opts, :query_connect_fun, &Postgrex.start_link/1)
+    query_disconnect_fun = Keyword.get(opts, :query_disconnect_fun, &GenServer.stop/1)
+    snapshot_runner_opts = Keyword.get(opts, :snapshot_runner_opts, [])
 
-              rows = collect_rows.()
-              _ = safe_disconnect_query_conn(query_disconnect_fun, query_conn)
+    case snapshot_row_handler_with_collector(opts) do
+      {:ok, row_handler, collect_rows} ->
+        case query_connect_fun.(connection_opts) do
+          {:ok, query_conn} ->
+            result =
+              safe_snapshot_run(
+                snapshot_runner_module,
+                query_conn,
+                designated_tables,
+                Keyword.merge(snapshot_runner_opts, row_handler: row_handler)
+              )
 
-              case result do
-                {:ok, %{boundary_lsn: boundary_lsn}} ->
-                  {:ok, %{boundary_lsn: boundary_lsn, rows: rows}}
+            rows = collect_rows.()
+            _ = safe_disconnect_query_conn(query_disconnect_fun, query_conn)
 
-                {:error, reason} ->
-                  {:error, {:initial_snapshot_failed, reason}}
-              end
+            case result do
+              {:ok, %{boundary_lsn: boundary_lsn}} ->
+                {:ok, %{boundary_lsn: boundary_lsn, rows: rows}}
 
-            {:error, reason} ->
-              _ = collect_rows.()
-              {:error, {:query_connection_failed, reason}}
-          end
+              {:ok, other} ->
+                {:error, {:initial_snapshot_failed, {:invalid_snapshot_result, other}}}
 
-        {:error, :missing_snapshot_row_handler} = error ->
-          error
-      end
-    else
-      {:ok, %{boundary_lsn: nil, rows: []}}
+              {:error, reason} ->
+                {:error, {:initial_snapshot_failed, reason}}
+            end
+
+          {:error, reason} ->
+            _ = collect_rows.()
+            {:error, {:query_connection_failed, reason}}
+        end
+
+      {:error, :missing_snapshot_row_handler} = error ->
+        error
     end
   end
+
+  defp snapshot_plan(_meta_start_lsn, _snapshot_handoff, opts)
+       when not is_list(opts),
+       do: {:ok, %{run_snapshot?: false, mark_pending?: false, handoff_boundary_lsn: nil}}
+
+  defp snapshot_plan(meta_start_lsn, snapshot_handoff, opts) when is_binary(meta_start_lsn) do
+    snapshot_before_stream? = Keyword.get(opts, :snapshot_before_stream?, false)
+
+    cond do
+      match?(%{state: :pending}, snapshot_handoff) ->
+        snapshot_plan_from_pending_handoff(
+          meta_start_lsn,
+          snapshot_handoff,
+          snapshot_before_stream?,
+          opts
+        )
+
+      match?(%{state: :complete}, snapshot_handoff) ->
+        if snapshot_before_stream? and Keyword.get(opts, :snapshot_on_restart?, false) do
+          {:ok, %{run_snapshot?: true, mark_pending?: true, handoff_boundary_lsn: nil}}
+        else
+          {:ok, %{run_snapshot?: false, mark_pending?: false, handoff_boundary_lsn: nil}}
+        end
+
+      snapshot_before_stream? ->
+        if should_run_snapshot_before_stream?(meta_start_lsn, opts) do
+          {:ok, %{run_snapshot?: true, mark_pending?: true, handoff_boundary_lsn: nil}}
+        else
+          {:ok, %{run_snapshot?: false, mark_pending?: false, handoff_boundary_lsn: nil}}
+        end
+
+      true ->
+        {:ok, %{run_snapshot?: false, mark_pending?: false, handoff_boundary_lsn: nil}}
+    end
+  end
+
+  defp snapshot_plan_from_pending_handoff(
+         meta_start_lsn,
+         %{boundary_lsn: boundary_lsn} = snapshot_handoff,
+         snapshot_before_stream?,
+         opts
+       ) do
+    if Keyword.get(opts, :resume_incomplete_snapshot?, false) do
+      with {:ok, meta_at_or_past_boundary?} <- lsn_at_or_past?(meta_start_lsn, boundary_lsn) do
+        cond do
+          meta_at_or_past_boundary? ->
+            {:ok,
+             %{run_snapshot?: false, mark_pending?: false, handoff_boundary_lsn: boundary_lsn}}
+
+          snapshot_before_stream? ->
+            {:ok, %{run_snapshot?: true, mark_pending?: true, handoff_boundary_lsn: boundary_lsn}}
+
+          true ->
+            {:error, {:snapshot_resume_requires_snapshot_before_stream, snapshot_handoff}}
+        end
+      end
+    else
+      {:error, {:snapshot_handoff_incomplete, snapshot_handoff}}
+    end
+  end
+
+  defp snapshot_plan_from_pending_handoff(
+         _meta_start_lsn,
+         snapshot_handoff,
+         _snapshot_before_stream?,
+         _opts
+       ) do
+    {:error, {:snapshot_handoff_incomplete, snapshot_handoff}}
+  end
+
+  defp lsn_at_or_past?(_meta_start_lsn, nil), do: {:ok, false}
+
+  defp lsn_at_or_past?(meta_start_lsn, boundary_lsn)
+       when is_binary(meta_start_lsn) and is_binary(boundary_lsn) do
+    case Lsn.compare(meta_start_lsn, boundary_lsn) do
+      :eq -> {:ok, true}
+      :gt -> {:ok, true}
+      :lt -> {:ok, false}
+      {:error, reason} -> {:error, {:invalid_snapshot_handoff_lsn, reason}}
+    end
+  end
+
+  defp should_run_snapshot_before_stream?(meta_start_lsn, opts) when is_binary(meta_start_lsn) do
+    if Keyword.get(opts, :snapshot_on_restart?, false) do
+      true
+    else
+      default_start_lsn = Keyword.get(opts, :default_start_lsn, "0/0")
+
+      case Lsn.compare(meta_start_lsn, default_start_lsn) do
+        :eq -> true
+        _ -> false
+      end
+    end
+  end
+
+  defp fetch_snapshot_handoff(meta_module, meta_conn, source_id)
+       when is_atom(meta_module) and is_integer(source_id) and source_id > 0 do
+    if function_exported?(meta_module, :fetch_snapshot_handoff, 2) do
+      meta_module.fetch_snapshot_handoff(meta_conn, source_id)
+    else
+      {:ok, nil}
+    end
+  end
+
+  defp maybe_mark_snapshot_handoff_pending(
+         _meta_module,
+         _meta_conn,
+         source_id,
+         %{mark_pending?: false},
+         _snapshot_result,
+         _opts
+       )
+       when is_integer(source_id) and source_id > 0,
+       do: :ok
+
+  defp maybe_mark_snapshot_handoff_pending(
+         meta_module,
+         meta_conn,
+         source_id,
+         %{mark_pending?: true},
+         %{boundary_lsn: boundary_lsn},
+         opts
+       )
+       when is_atom(meta_module) and is_integer(source_id) and source_id > 0 do
+    if is_binary(boundary_lsn) and
+         function_exported?(meta_module, :mark_snapshot_handoff_pending, 3) do
+      retry_mark_snapshot_handoff(opts, fn ->
+        case meta_module.mark_snapshot_handoff_pending(meta_conn, source_id, boundary_lsn) do
+          {:ok, _} -> :ok
+          {:error, _reason} = error -> error
+        end
+      end)
+    else
+      :ok
+    end
+  end
+
+  defp maybe_mark_snapshot_handoff_complete(
+         meta_module,
+         meta_conn,
+         source_id,
+         %{boundary_lsn: boundary_lsn},
+         opts
+       )
+       when is_atom(meta_module) and is_integer(source_id) and source_id > 0 do
+    if is_binary(boundary_lsn) and
+         function_exported?(meta_module, :mark_snapshot_handoff_complete, 3) do
+      retry_mark_snapshot_handoff(opts, fn ->
+        case meta_module.mark_snapshot_handoff_complete(meta_conn, source_id, boundary_lsn) do
+          {:ok, _} -> :ok
+          {:error, _reason} = error -> error
+        end
+      end)
+    else
+      :ok
+    end
+  end
+
+  defp retry_mark_snapshot_handoff(opts, mark_fun)
+       when is_list(opts) and is_function(mark_fun, 0) do
+    retries =
+      normalize_snapshot_handoff_mark_retries(
+        Keyword.get(opts, :snapshot_handoff_mark_retries, 2)
+      )
+
+    delay_ms =
+      normalize_snapshot_handoff_mark_retry_delay_ms(
+        Keyword.get(opts, :snapshot_handoff_mark_retry_delay_ms, 0)
+      )
+
+    do_retry_mark_snapshot_handoff(mark_fun, retries, delay_ms)
+  end
+
+  defp do_retry_mark_snapshot_handoff(mark_fun, retries_left, delay_ms)
+       when is_function(mark_fun, 0) and is_integer(retries_left) and retries_left >= 0 do
+    case mark_fun.() do
+      :ok ->
+        :ok
+
+      {:error, _reason} = error ->
+        if retries_left > 0 do
+          if delay_ms > 0, do: Process.sleep(delay_ms)
+          do_retry_mark_snapshot_handoff(mark_fun, retries_left - 1, delay_ms)
+        else
+          error
+        end
+
+      other ->
+        {:error, {:invalid_snapshot_handoff_mark_result, other}}
+    end
+  end
+
+  defp normalize_snapshot_handoff_mark_retries(value)
+       when is_integer(value) and value >= 0,
+       do: value
+
+  defp normalize_snapshot_handoff_mark_retries(_value), do: 2
+
+  defp normalize_snapshot_handoff_mark_retry_delay_ms(value)
+       when is_integer(value) and value >= 0,
+       do: value
+
+  defp normalize_snapshot_handoff_mark_retry_delay_ms(_value), do: 0
 
   defp snapshot_row_handler_with_collector(opts) do
     case Keyword.get(opts, :snapshot_row_handler) do
@@ -272,25 +540,116 @@ defmodule DuckFeeder.Runtime do
 
       _ ->
         if Keyword.get(opts, :snapshot_ingest?, true) do
-          ref = make_ref()
-          Process.put(ref, [])
+          case Agent.start_link(fn -> [] end) do
+            {:ok, collector} ->
+              row_handler = fn designated_table, row ->
+                snapshot_collector_push(collector, designated_table, row)
+              end
 
-          row_handler = fn designated_table, row ->
-            Process.put(ref, [{designated_table, row} | Process.get(ref, [])])
-            :ok
+              collect_rows = fn -> snapshot_collector_drain(collector) end
+
+              {:ok, row_handler, collect_rows}
+
+            {:error, reason} ->
+              {:error, {:snapshot_collector_start_failed, reason}}
           end
-
-          collect_rows = fn ->
-            rows = Process.get(ref, []) |> Enum.reverse()
-            Process.delete(ref)
-            rows
-          end
-
-          {:ok, row_handler, collect_rows}
         else
           {:error, :missing_snapshot_row_handler}
         end
     end
+  end
+
+  defp snapshot_collector_push(collector, designated_table, row) when is_pid(collector) do
+    Agent.update(collector, fn rows -> [{designated_table, row} | rows] end)
+  rescue
+    exception ->
+      {:error, {:snapshot_collector_push_exception, exception}}
+  catch
+    :exit, reason ->
+      {:error, {:snapshot_collector_push_exit, reason}}
+
+    kind, reason ->
+      {:error, {:snapshot_collector_push_throw, kind, reason}}
+  else
+    :ok -> :ok
+    other -> {:error, {:invalid_snapshot_collector_push_result, other}}
+  end
+
+  defp snapshot_collector_drain(collector) when is_pid(collector) do
+    rows =
+      try do
+        Agent.get_and_update(collector, fn current_rows -> {Enum.reverse(current_rows), []} end)
+      rescue
+        _ -> []
+      catch
+        _, _ -> []
+      end
+
+    _ = safe_stop_collector(collector)
+    rows
+  end
+
+  defp safe_stop_collector(collector) when is_pid(collector) do
+    if Process.alive?(collector), do: Agent.stop(collector)
+    :ok
+  rescue
+    _ -> :ok
+  catch
+    _, _ -> :ok
+  end
+
+  defp snapshot_replay_plan(meta_start_lsn, %{boundary_lsn: nil, rows: rows})
+       when is_binary(meta_start_lsn) and is_list(rows) do
+    {:ok, %{rows: [], snapshot_lsn_start: nil}}
+  end
+
+  defp snapshot_replay_plan(meta_start_lsn, %{boundary_lsn: boundary_lsn, rows: rows})
+       when is_binary(meta_start_lsn) and is_binary(boundary_lsn) and is_list(rows) do
+    row_count = length(rows)
+
+    case Lsn.compare(meta_start_lsn, boundary_lsn) do
+      :lt ->
+        with {:ok, snapshot_lsn_start_counter} <-
+               snapshot_lsn_start_counter(boundary_lsn, row_count),
+             {:ok, replayed_count} <-
+               replayed_snapshot_row_count(meta_start_lsn, snapshot_lsn_start_counter, row_count) do
+          remaining_rows = Enum.drop(rows, replayed_count)
+          snapshot_lsn_start = Lsn.to_string(snapshot_lsn_start_counter + replayed_count)
+
+          {:ok, %{rows: remaining_rows, snapshot_lsn_start: snapshot_lsn_start}}
+        end
+
+      :eq ->
+        {:ok, %{rows: [], snapshot_lsn_start: nil}}
+
+      :gt ->
+        {:ok, %{rows: [], snapshot_lsn_start: nil}}
+
+      {:error, reason} ->
+        {:error, {:invalid_snapshot_handoff_lsn, reason}}
+    end
+  end
+
+  defp snapshot_lsn_start_counter(boundary_lsn, row_count)
+       when is_binary(boundary_lsn) and is_integer(row_count) and row_count >= 0 do
+    with {:ok, boundary} <- Lsn.parse(boundary_lsn) do
+      {:ok, max(boundary - row_count, 0)}
+    end
+  end
+
+  defp replayed_snapshot_row_count(meta_start_lsn, snapshot_lsn_start_counter, row_count)
+       when is_binary(meta_start_lsn) and is_integer(snapshot_lsn_start_counter) and
+              is_integer(row_count) and row_count >= 0 do
+    with {:ok, meta_counter} <- Lsn.parse(meta_start_lsn) do
+      replayed = max(meta_counter - snapshot_lsn_start_counter, 0)
+      {:ok, min(replayed, row_count)}
+    end
+  end
+
+  defp with_snapshot_lsn_start(opts, nil) when is_list(opts), do: opts
+
+  defp with_snapshot_lsn_start(opts, snapshot_lsn_start) when is_list(opts) do
+    Keyword.put(opts, :snapshot_lsn_start, snapshot_lsn_start)
   end
 
   defp maybe_replay_snapshot_rows(_service_module, _service_pid, []), do: :ok
@@ -298,7 +657,7 @@ defmodule DuckFeeder.Runtime do
   defp maybe_replay_snapshot_rows(service_module, service_pid, rows)
        when is_list(rows) do
     Enum.reduce_while(rows, :ok, fn {designated_table, row}, :ok ->
-      case service_module.ingest_snapshot_row(service_pid, designated_table, row) do
+      case safe_snapshot_ingest(service_module, service_pid, designated_table, row) do
         :ok -> {:cont, :ok}
         {:error, reason} -> {:halt, {:error, {:snapshot_replay_failed, reason}}}
       end
@@ -308,9 +667,61 @@ defmodule DuckFeeder.Runtime do
         :ok
 
       {:error, _reason} = error ->
-        _ = GenServer.stop(service_pid)
+        _ = safe_stop_service(service_pid)
         error
     end
+  end
+
+  defp safe_bootstrap(
+         bootstrap_module,
+         query_conn,
+         publication_name,
+         slot_name,
+         designated_tables
+       ) do
+    bootstrap_module.bootstrap(query_conn, %{
+      publication_name: publication_name,
+      slot_name: slot_name,
+      designated_tables: designated_tables
+    })
+  rescue
+    exception ->
+      {:error, {:bootstrap_exception, exception}}
+  catch
+    kind, reason ->
+      {:error, {:bootstrap_throw, kind, reason}}
+  end
+
+  defp safe_snapshot_run(
+         snapshot_runner_module,
+         query_conn,
+         designated_tables,
+         snapshot_runner_opts
+       ) do
+    snapshot_runner_module.run(query_conn, designated_tables, snapshot_runner_opts)
+  rescue
+    exception ->
+      {:error, {:snapshot_runner_exception, exception}}
+  catch
+    kind, reason ->
+      {:error, {:snapshot_runner_throw, kind, reason}}
+  end
+
+  defp safe_snapshot_ingest(service_module, service_pid, designated_table, row) do
+    case service_module.ingest_snapshot_row(service_pid, designated_table, row) do
+      :ok -> :ok
+      {:error, reason} -> {:error, reason}
+      other -> {:error, {:invalid_snapshot_ingest_result, other}}
+    end
+  rescue
+    exception ->
+      {:error, {:snapshot_ingest_exception, exception}}
+  catch
+    :exit, reason ->
+      {:error, {:snapshot_ingest_exit, reason}}
+
+    kind, reason ->
+      {:error, {:snapshot_ingest_throw, kind, reason}}
   end
 
   defp resolve_start_lsn(meta_start_lsn, candidates) when is_list(candidates) do
@@ -322,6 +733,27 @@ defmodule DuckFeeder.Runtime do
         max_lsn -> {:cont, {:ok, max_lsn}}
       end
     end)
+  end
+
+  defp safe_stop_service(service_pid) when is_pid(service_pid) do
+    if Process.alive?(service_pid) do
+      GenServer.stop(service_pid)
+    else
+      :ok
+    end
+  rescue
+    _ -> :ok
+  catch
+    _, _ -> :ok
+  end
+
+  defp safe_stop_cdc(cdc_pid) when is_pid(cdc_pid) do
+    if Process.alive?(cdc_pid), do: Process.exit(cdc_pid, :shutdown)
+    :ok
+  rescue
+    _ -> :ok
+  catch
+    _, _ -> :ok
   end
 
   defp safe_disconnect_query_conn(disconnect_fun, query_conn) do

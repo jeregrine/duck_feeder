@@ -93,6 +93,29 @@ defmodule DuckFeeder.Meta.StoreIntegrationTest do
     assert {:ok, "0/16B6A98"} = Meta.fetch_checkpoint(conn, designated_table_id)
   end
 
+  test "snapshot handoff state roundtrip", %{conn: conn, source_id: source_id} do
+    assert {:ok, nil} = Meta.fetch_snapshot_handoff(conn, source_id)
+
+    assert {:ok, "0/16B6A98"} =
+             Meta.mark_snapshot_handoff_pending(conn, source_id, "0/16B6A98")
+
+    assert {:ok, pending} = Meta.fetch_snapshot_handoff(conn, source_id)
+    assert pending.state == :pending
+    assert pending.boundary_lsn == "0/16B6A98"
+    assert is_nil(pending.completed_at)
+
+    assert {:ok, "0/16B6C40"} =
+             Meta.mark_snapshot_handoff_complete(conn, source_id, "0/16B6C40")
+
+    assert {:ok, complete} = Meta.fetch_snapshot_handoff(conn, source_id)
+    assert complete.state == :complete
+    assert complete.boundary_lsn == "0/16B6C40"
+    assert %DateTime{} = complete.completed_at
+
+    assert :ok = Meta.clear_snapshot_handoff(conn, source_id)
+    assert {:ok, nil} = Meta.fetch_snapshot_handoff(conn, source_id)
+  end
+
   test "batch lifecycle, retry path, and invalid transition", %{
     conn: conn,
     designated_table_id: designated_table_id,

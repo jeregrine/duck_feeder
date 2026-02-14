@@ -32,6 +32,15 @@ CREATE TABLE IF NOT EXISTS duckfeeder_meta.checkpoints (
   updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
+CREATE TABLE IF NOT EXISTS duckfeeder_meta.snapshot_handoffs (
+  source_id BIGINT PRIMARY KEY REFERENCES duckfeeder_meta.sources(id) ON DELETE CASCADE,
+  state TEXT NOT NULL CHECK (state IN ('pending', 'complete')),
+  boundary_lsn PG_LSN,
+  started_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  completed_at TIMESTAMPTZ,
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
 CREATE TABLE IF NOT EXISTS duckfeeder_meta.batches (
   id BIGSERIAL PRIMARY KEY,
   batch_id TEXT NOT NULL UNIQUE,

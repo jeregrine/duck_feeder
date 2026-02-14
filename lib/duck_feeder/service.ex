@@ -36,6 +36,7 @@ defmodule DuckFeeder.Service do
           | {:observer_pid, pid()}
           | {:committer_module, module()}
           | {:committer_opts, keyword()}
+          | {:snapshot_lsn_start, String.t()}
 
   @spec start_link([option()]) :: GenServer.on_start()
   def start_link(opts) do
@@ -87,13 +88,20 @@ defmodule DuckFeeder.Service do
 
     observer_pid = Keyword.get(opts, :observer_pid, self())
 
-    {:ok,
-     %State{
-       cdc_pipeline_pid: cdc_pipeline_pid,
-       ingest_pid: ingest_pid,
-       context: context,
-       observer_pid: observer_pid
-     }}
+    case snapshot_lsn_counter(opts) do
+      {:ok, snapshot_lsn_counter} ->
+        {:ok,
+         %State{
+           cdc_pipeline_pid: cdc_pipeline_pid,
+           ingest_pid: ingest_pid,
+           context: context,
+           observer_pid: observer_pid,
+           snapshot_lsn_counter: snapshot_lsn_counter
+         }}
+
+      {:error, reason} ->
+        {:stop, reason}
+    end
   end
 
   @impl true
@@ -189,6 +197,13 @@ defmodule DuckFeeder.Service do
   defp next_snapshot_lsn(counter) when is_integer(counter) and counter >= 0 do
     next_counter = counter + 1
     {Lsn.to_string(next_counter), next_counter}
+  end
+
+  defp snapshot_lsn_counter(opts) when is_list(opts) do
+    case Keyword.get(opts, :snapshot_lsn_start, "0/0") do
+      lsn when is_binary(lsn) -> Lsn.parse(lsn)
+      other -> {:error, {:invalid_snapshot_lsn_start, other}}
+    end
   end
 
   defp stringify_keys(map) when is_map(map) do

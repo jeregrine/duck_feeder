@@ -44,7 +44,12 @@ defmodule DuckFeeder.Reconciler do
 
     with {:ok, max_batches} <- normalize_max_batches(Keyword.get(opts, :max_batches)),
          {:ok, stale_batches} <-
-           meta.list_stale_batches(conn, stale_before: stale_before, states: states) do
+           meta.list_stale_batches(
+             conn,
+             stale_before: stale_before,
+             states: states,
+             designated_table_id: Keyword.get(opts, :designated_table_id)
+           ) do
       summary =
         stale_batches
         |> maybe_limit(max_batches)

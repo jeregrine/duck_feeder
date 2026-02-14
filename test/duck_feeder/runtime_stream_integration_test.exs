@@ -2,7 +2,7 @@ defmodule DuckFeeder.RuntimeStreamIntegrationTest do
   use ExUnit.Case, async: false
 
   alias DuckFeeder.{Meta, Reconciler, Runtime}
-  alias DuckFeeder.CDC.{ConnectionOptions, Setup}
+  alias DuckFeeder.CDC.{ConnectionOptions, Lsn, Setup}
 
   @moduletag :integration
 
@@ -65,9 +65,13 @@ defmodule DuckFeeder.RuntimeStreamIntegrationTest do
     def commit_batch(_meta_conn, _batch_id, _opts), do: {:error, :forced_commit_failure}
   end
 
+  defmodule FakeCDCFailStart do
+    def start_link(_opts), do: {:error, :failed_to_start_cdc}
+  end
+
   defmodule FilteredMeta do
     def list_stale_batches(conn, opts) do
-      designated_table_id = Process.get(:reconcile_designated_table_id)
+      designated_table_id = Keyword.get(opts, :designated_table_id)
 
       case DuckFeeder.Meta.list_stale_batches(conn, opts) do
         {:ok, batches} when is_integer(designated_table_id) ->
@@ -170,6 +174,7 @@ defmodule DuckFeeder.RuntimeStreamIntegrationTest do
     end)
 
     {:ok,
+     source_id: source_id,
      source_name: source_name,
      source_table: source_table,
      target_table: target_table,
@@ -268,6 +273,263 @@ defmodule DuckFeeder.RuntimeStreamIntegrationTest do
     assert batch_has_record_id?(cdc_batch, 2)
 
     refute batch_has_record_id?(cdc_batch, 1)
+
+    GenServer.stop(cdc_pid)
+    GenServer.stop(service_pid)
+  end
+
+  test "snapshot before stream handles larger snapshots across multiple batches", %{
+    meta_conn: meta_conn,
+    source_conn: source_conn,
+    source_name: source_name,
+    source_table: source_table,
+    target_table: target_table
+  } do
+    storage = %{provider: :s3, bucket: "bucket", adapter: FakeStorage}
+    snapshot_row_count = 25
+
+    assert {:ok, _} =
+             Postgrex.query(
+               source_conn,
+               """
+               INSERT INTO public."#{source_table}" (id, name)
+               SELECT g, concat('snapshot_', g)
+               FROM generate_series(1, $1::int) AS g
+               """,
+               [snapshot_row_count]
+             )
+
+    assert {:ok, %{service_pid: service_pid, cdc_pid: cdc_pid}} =
+             Runtime.start_stream(meta_conn, source_name, storage,
+               observer_pid: self(),
+               pipeline_opts: %{max_rows: 5, max_bytes: 10_000, flush_interval_ms: 60_000},
+               snapshot_before_stream?: true,
+               bootstrap_replication?: true,
+               auto_reconnect: false,
+               sync_connect: true
+             )
+
+    expected_ids =
+      1..snapshot_row_count
+      |> Enum.map(&to_string/1)
+      |> MapSet.new()
+
+    assert {:ok, snapshot_ids} =
+             await_processed_ids(target_table, expected_ids, MapSet.new(), 15_000)
+
+    assert snapshot_ids == expected_ids
+
+    assert {:ok, _} =
+             Postgrex.query(
+               source_conn,
+               """
+               INSERT INTO public."#{source_table}" (id, name)
+               SELECT g, concat('post_snapshot_', g)
+               FROM generate_series(1000, 1004) AS g
+               """,
+               []
+             )
+
+    assert_receive {:duck_feeder_batch_processed, {"raw", ^target_table}, {:ok, _cdc_result},
+                    cdc_batch},
+                   10_000
+
+    assert Enum.all?(1000..1004, &batch_has_record_id?(cdc_batch, &1))
+    refute Enum.any?(batch_record_ids(cdc_batch), &MapSet.member?(expected_ids, &1))
+
+    GenServer.stop(cdc_pid)
+    GenServer.stop(service_pid)
+  end
+
+  test "restart after snapshot handoff does not replay already-committed snapshot rows", %{
+    meta_conn: meta_conn,
+    source_conn: source_conn,
+    source_name: source_name,
+    source_table: source_table,
+    target_table: target_table,
+    designated_table_id: designated_table_id
+  } do
+    storage = %{provider: :s3, bucket: "bucket", adapter: FakeStorage}
+
+    assert {:ok, _} =
+             Postgrex.query(
+               source_conn,
+               "INSERT INTO public.\"#{source_table}\" (id, name) VALUES (1, 'preexisting')",
+               []
+             )
+
+    assert {:ok, %{service_pid: service_pid_1, cdc_pid: cdc_pid_1, start_lsn: start_lsn_1}} =
+             Runtime.start_stream(meta_conn, source_name, storage,
+               observer_pid: self(),
+               pipeline_opts: %{max_rows: 1, max_bytes: 10_000, flush_interval_ms: 60_000},
+               snapshot_before_stream?: true,
+               bootstrap_replication?: true,
+               auto_reconnect: false,
+               sync_connect: true
+             )
+
+    assert_receive {:duck_feeder_batch_processed, {"raw", ^target_table}, {:ok, _snapshot_result},
+                    snapshot_batch_1},
+                   10_000
+
+    assert batch_has_record_id?(snapshot_batch_1, 1)
+
+    assert {:ok, checkpoint_after_first_start} =
+             Meta.fetch_checkpoint(meta_conn, designated_table_id)
+
+    assert Lsn.compare(checkpoint_after_first_start, start_lsn_1) in [:eq, :gt]
+
+    GenServer.stop(cdc_pid_1)
+    GenServer.stop(service_pid_1)
+
+    assert {:ok, %{service_pid: service_pid_2, cdc_pid: cdc_pid_2, start_lsn: start_lsn_2}} =
+             Runtime.start_stream(meta_conn, source_name, storage,
+               observer_pid: self(),
+               pipeline_opts: %{max_rows: 1, max_bytes: 10_000, flush_interval_ms: 60_000},
+               snapshot_before_stream?: true,
+               bootstrap_replication?: true,
+               auto_reconnect: false,
+               sync_connect: true
+             )
+
+    assert Lsn.compare(start_lsn_2, checkpoint_after_first_start) in [:eq, :gt]
+
+    refute_receive {:duck_feeder_batch_processed, {"raw", ^target_table}, {:ok, _},
+                    _replay_batch},
+                   750
+
+    assert {:ok, _} =
+             Postgrex.query(
+               source_conn,
+               "INSERT INTO public.\"#{source_table}\" (id, name) VALUES (2, 'after_restart')",
+               []
+             )
+
+    assert_receive {:duck_feeder_batch_processed, {"raw", ^target_table}, {:ok, _cdc_result},
+                    cdc_batch_2},
+                   10_000
+
+    assert batch_has_record_id?(cdc_batch_2, 2)
+    refute batch_has_record_id?(cdc_batch_2, 1)
+
+    GenServer.stop(cdc_pid_2)
+    GenServer.stop(service_pid_2)
+  end
+
+  test "cdc start failure after snapshot leaves pending handoff until explicit resume", %{
+    meta_conn: meta_conn,
+    source_conn: source_conn,
+    source_id: source_id,
+    source_name: source_name,
+    source_table: source_table,
+    target_table: target_table
+  } do
+    storage = %{provider: :s3, bucket: "bucket", adapter: FakeStorage}
+
+    assert {:ok, _} =
+             Postgrex.query(
+               source_conn,
+               "INSERT INTO public.\"#{source_table}\" (id, name) VALUES (1, 'preexisting')",
+               []
+             )
+
+    assert {:error, :failed_to_start_cdc} =
+             Runtime.start_stream(meta_conn, source_name, storage,
+               observer_pid: self(),
+               cdc_module: FakeCDCFailStart,
+               pipeline_opts: %{max_rows: 1, max_bytes: 10_000, flush_interval_ms: 60_000},
+               snapshot_before_stream?: true,
+               bootstrap_replication?: true,
+               auto_reconnect: false,
+               sync_connect: true
+             )
+
+    assert {:ok, %{state: :pending}} = Meta.fetch_snapshot_handoff(meta_conn, source_id)
+
+    assert {:error, {:snapshot_handoff_incomplete, %{source_id: ^source_id, state: :pending}}} =
+             Runtime.start_stream(meta_conn, source_name, storage,
+               observer_pid: self(),
+               pipeline_opts: %{max_rows: 1, max_bytes: 10_000, flush_interval_ms: 60_000},
+               snapshot_before_stream?: true,
+               bootstrap_replication?: true,
+               auto_reconnect: false,
+               sync_connect: true
+             )
+
+    assert {:ok, %{service_pid: service_pid, cdc_pid: cdc_pid}} =
+             Runtime.start_stream(meta_conn, source_name, storage,
+               observer_pid: self(),
+               pipeline_opts: %{max_rows: 1, max_bytes: 10_000, flush_interval_ms: 60_000},
+               snapshot_before_stream?: true,
+               resume_incomplete_snapshot?: true,
+               bootstrap_replication?: true,
+               auto_reconnect: false,
+               sync_connect: true
+             )
+
+    assert {:ok, %{state: :complete}} = Meta.fetch_snapshot_handoff(meta_conn, source_id)
+
+    assert {:ok, _} =
+             Postgrex.query(
+               source_conn,
+               "INSERT INTO public.\"#{source_table}\" (id, name) VALUES (2, 'after_resume')",
+               []
+             )
+
+    assert {:ok, cdc_batch} = await_batch_with_record_id(target_table, 2, 10_000)
+
+    assert batch_has_record_id?(cdc_batch, 2)
+
+    GenServer.stop(cdc_pid)
+    GenServer.stop(service_pid)
+  end
+
+  test "pending snapshot handoff requires explicit resume flag", %{
+    meta_conn: meta_conn,
+    source_conn: source_conn,
+    source_id: source_id,
+    source_name: source_name,
+    source_table: source_table,
+    target_table: target_table
+  } do
+    storage = %{provider: :s3, bucket: "bucket", adapter: FakeStorage}
+
+    assert {:ok, _} =
+             Postgrex.query(
+               source_conn,
+               "INSERT INTO public.\"#{source_table}\" (id, name) VALUES (1, 'preexisting')",
+               []
+             )
+
+    assert {:ok, "0/10"} = Meta.mark_snapshot_handoff_pending(meta_conn, source_id, "0/10")
+
+    assert {:error, {:snapshot_handoff_incomplete, %{source_id: ^source_id, state: :pending}}} =
+             Runtime.start_stream(meta_conn, source_name, storage,
+               observer_pid: self(),
+               pipeline_opts: %{max_rows: 1, max_bytes: 10_000, flush_interval_ms: 60_000},
+               snapshot_before_stream?: true,
+               bootstrap_replication?: true,
+               auto_reconnect: false,
+               sync_connect: true
+             )
+
+    assert {:ok, %{service_pid: service_pid, cdc_pid: cdc_pid}} =
+             Runtime.start_stream(meta_conn, source_name, storage,
+               observer_pid: self(),
+               pipeline_opts: %{max_rows: 1, max_bytes: 10_000, flush_interval_ms: 60_000},
+               snapshot_before_stream?: true,
+               resume_incomplete_snapshot?: true,
+               bootstrap_replication?: true,
+               auto_reconnect: false,
+               sync_connect: true
+             )
+
+    assert_receive {:duck_feeder_batch_processed, {"raw", ^target_table}, {:ok, _},
+                    snapshot_batch},
+                   10_000
+
+    assert batch_has_record_id?(snapshot_batch, 1)
+    assert {:ok, %{state: :complete}} = Meta.fetch_snapshot_handoff(meta_conn, source_id)
 
     GenServer.stop(cdc_pid)
     GenServer.stop(service_pid)
@@ -488,8 +750,6 @@ defmodule DuckFeeder.RuntimeStreamIntegrationTest do
                state: :failed
              })
 
-    Process.put(:reconcile_designated_table_id, designated_table_id)
-
     assert {:ok, summary} =
              Reconciler.reconcile(
                %{
@@ -503,6 +763,7 @@ defmodule DuckFeeder.RuntimeStreamIntegrationTest do
                  }
                },
                states: [:failed],
+               designated_table_id: designated_table_id,
                cleanup_failed_uploads?: true,
                require_failed_batch_files?: true,
                stale_before: DateTime.add(DateTime.utc_now(), 60, :second)
@@ -579,8 +840,6 @@ defmodule DuckFeeder.RuntimeStreamIntegrationTest do
     local_parquet_path = Path.join(local_data_root, object_key)
     assert File.exists?(local_parquet_path)
 
-    Process.put(:reconcile_designated_table_id, designated_table_id)
-
     assert {:ok, summary} =
              Reconciler.reconcile(
                %{
@@ -589,6 +848,7 @@ defmodule DuckFeeder.RuntimeStreamIntegrationTest do
                  storage: storage
                },
                states: [:failed],
+               designated_table_id: designated_table_id,
                cleanup_failed_uploads?: true,
                stale_before: DateTime.add(DateTime.utc_now(), 60, :second)
              )
@@ -601,6 +861,55 @@ defmodule DuckFeeder.RuntimeStreamIntegrationTest do
 
     GenServer.stop(cdc_pid)
     GenServer.stop(service_pid)
+  end
+
+  defp await_processed_ids(target_table, expected_ids, acc, timeout_ms)
+       when is_binary(target_table) and is_integer(timeout_ms) and timeout_ms > 0 do
+    if MapSet.size(expected_ids) == MapSet.size(acc) do
+      {:ok, acc}
+    else
+      receive do
+        {:duck_feeder_batch_processed, {"raw", ^target_table}, {:ok, _result}, batch} ->
+          updated_acc =
+            batch
+            |> batch_record_ids()
+            |> MapSet.intersection(expected_ids)
+            |> MapSet.union(acc)
+
+          await_processed_ids(target_table, expected_ids, updated_acc, timeout_ms)
+      after
+        timeout_ms ->
+          {:error, {:missing_processed_ids, MapSet.difference(expected_ids, acc)}}
+      end
+    end
+  end
+
+  defp batch_record_ids(batch) when is_map(batch) do
+    batch.rows
+    |> Enum.map(fn row ->
+      row
+      |> Map.get(:_record, %{})
+      |> Map.get("id")
+      |> to_string()
+    end)
+    |> MapSet.new()
+  end
+
+  defp await_batch_with_record_id(target_table, record_id, timeout_ms)
+       when is_binary(target_table) and is_integer(timeout_ms) and timeout_ms > 0 do
+    expected = to_string(record_id)
+
+    receive do
+      {:duck_feeder_batch_processed, {"raw", ^target_table}, {:ok, _}, batch} ->
+        if MapSet.member?(batch_record_ids(batch), expected) do
+          {:ok, batch}
+        else
+          await_batch_with_record_id(target_table, record_id, timeout_ms)
+        end
+    after
+      timeout_ms ->
+        {:error, {:missing_batch_with_record_id, expected}}
+    end
   end
 
   defp batch_has_record_id?(batch, id) when is_map(batch) do

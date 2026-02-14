@@ -44,6 +44,15 @@ This is the single source of truth task list for project status and next work.
   - [x] `DuckFeeder.CDC.InitialSnapshot.Runner` (table copy + row dispatch orchestration)
   - [x] optional runtime snapshot-before-stream hook (`DuckFeeder.Runtime.start_stream/4`)
   - [x] default snapshot row replay into service when `snapshot_before_stream?: true` and no explicit row handler
+  - [x] snapshot replay uses boundary-based synthetic LSN allocation for stable snapshot/WAL handoff
+  - [x] snapshot-before-stream defaults to cold-start behavior (skip replay when checkpoint already exists; opt-in `snapshot_on_restart?: true`)
+  - [x] snapshot/bootstrapping runtime hardening: query connection cleanup + exception-safe bootstrap/snapshot execution paths
+  - [x] snapshot replay ingestion hardening: catches service ingest exits/exceptions and tears down service safely
+  - [x] durable snapshot handoff markers in metadata (`duckfeeder_meta.snapshot_handoffs`: `pending`/`complete`)
+  - [x] fail-closed restart behavior for incomplete snapshot handoff (`resume_incomplete_snapshot?: true` required)
+  - [x] pending-handoff resume can fast-forward to `complete` without rerunning snapshot when checkpoint is already at/after boundary
+  - [x] partial snapshot replay resumes from checkpoint progress within the synthetic LSN window (skip already-replayed snapshot rows)
+  - [x] durable handoff marker writes include bounded retry policy (`snapshot_handoff_mark_retries`, `snapshot_handoff_mark_retry_delay_ms`)
   - [x] `DuckFeeder.CDC.Connection` (`Postgrex.ReplicationConnection` stream client)
   - [x] runtime bootstrap integration (`DuckFeeder.Runtime.start_stream/4` + `DuckFeeder.CDC.Bootstrap`)
   - [x] reconnect-backoff passthrough for replication startup (`reconnect_backoff`)
@@ -112,6 +121,10 @@ This is the single source of truth task list for project status and next work.
   - [x] integration test file for CDC connection stream (test-config-gated)
   - [x] integration test file for runtime start_stream end-to-end flow (test-config-gated)
   - [x] integration coverage for snapshot->WAL handoff replay behavior (preexisting rows + post-snapshot WAL)
+  - [x] integration coverage for restart handoff behavior (checkpointed restart skips duplicate snapshot replay)
+  - [x] integration coverage for larger snapshot replay windows (multi-batch snapshot replay before WAL continuation)
+  - [x] integration coverage for pending snapshot handoff gating + explicit resume path
+  - [x] integration coverage for CDC-start failure after snapshot replay (pending handoff marker then explicit resume)
   - [x] integration test file for append stream end-to-end flow (test-config-gated)
   - [x] integration coverage for optional delete-file metadata commits (`ducklake_delete_file` + snapshot change marker)
   - [x] integration coverage for physically produced delete files (`delete_files_fun` rows -> writer/upload -> metadata rows)
@@ -145,14 +158,13 @@ This is the single source of truth task list for project status and next work.
 
 ## Remaining to reach target architecture
 
-- [ ] **DuckLake metadata SQL commit phase 2 (deep parity)** (full nested-field tree semantics, broader conflict-rule/concurrency matrix, compaction policy hardening)
-- [ ] **Snapshot/WAL handoff hardening** (restart/recovery edge cases, larger snapshot replay validation)
 - [ ] **Full integration suite** (Postgres + S3 + GCS + metadata DB)
 - [ ] **Benchee performance benchmarks** (single-writer CDC throughput + multi-writer append-stream latency/memory pressure)
 - [ ] **Replication client hardening** (bootstrap lifecycle, reconnect policy tuning, backpressure/metrics)
 - [ ] **Parquet writer hardening** (type fidelity, performance tuning, and compatibility validation)
 - [ ] **Advanced recovery/reconciler loop** (orphan detection, policy tuning, large-scale cleanup safety)
 - [ ] **Append event stream integrations** (`:telemetry`/Logger/error adapters over `DuckFeeder.AppendStream`)
+- [ ] **DuckLake metadata SQL commit phase 2 (deep parity)** (full nested-field tree semantics, broader conflict-rule/concurrency matrix, compaction policy hardening)
 
 ## DuckLake write-path parity checklist (reference: `/tmp/ducklake/test/sql`)
 
@@ -195,29 +207,35 @@ using DuckLake SQLLogicTests as inspiration for metadata/write-path coverage.
 
 ## Next steps (soft plan)
 
-1. **DuckLake metadata maturation (phase 2, deep-parity)**
-   - expand from ingest-writer subset to full DuckLake nested parent/child field-tree semantics
-   - extend conflict/concurrency matrix toward DuckLake extension breadth
-   - complete compaction policy/tiered maintenance hardening and related integration assertions
-
-2. **Full integration suite expansion**
+1. **Full integration suite expansion**
    - keep local filesystem-backed integration as the primary gate now
-   - add provider-backed S3/GCS matrix after core DuckLake metadata semantics are stable
+   - add provider-backed S3/GCS matrix after core semantics are stable
 
-3. **Parquet writer hardening (phase 2)**
-   - add more precise typing for temporal/decimal-like fields where practical
-   - tune performance and compatibility across DuckDB/object-store readers
-   - prefer Elixir-side normalization/casting for temporal values to keep Rust deps minimal
-
-4. **Recovery/reconcile hardening (phase 2)**
-   - add orphan-detection integration cases and larger-batch cleanup safety checks
-
-5. **Benchee performance suite**
+2. **Benchee performance suite**
    - single-writer benchmark: high-volume Postgres CDC path (batch throughput, flush latency)
    - multi-writer benchmark: concurrent append-stream producers (analytics/logs/errors/telemetry)
    - capture memory pressure + latency percentiles to guide batching defaults
 
-6. **Dependency footprint minimization (Elixir + Rust)**
+3. **Replication client hardening (phase 2)**
+   - bootstrap lifecycle edge cases, reconnect policy tuning, and backpressure instrumentation
+
+4. **Parquet writer hardening (phase 2)**
+   - add more precise typing for temporal/decimal-like fields where practical
+   - tune performance and compatibility across DuckDB/object-store readers
+   - prefer Elixir-side normalization/casting for temporal values to keep Rust deps minimal
+
+5. **Recovery/reconcile hardening (phase 2)**
+   - add orphan-detection integration cases and larger-batch cleanup safety checks
+
+6. **Append event stream integrations**
+   - implement `:telemetry` / Logger / error adapters over `DuckFeeder.AppendStream`
+
+7. **DuckLake metadata maturation (phase 2, deep-parity)**
+   - expand from ingest-writer subset to full DuckLake nested parent/child field-tree semantics
+   - extend conflict/concurrency matrix toward DuckLake extension breadth
+   - complete compaction policy/tiered maintenance hardening and related integration assertions
+
+8. **Dependency footprint minimization (Elixir + Rust)**
    - keep runtime deps minimal and avoid heavy crates unless required
    - bias toward Elixir-side transforms over Rust parsing when both are viable
 

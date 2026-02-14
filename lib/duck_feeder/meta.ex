@@ -16,6 +16,11 @@ defmodule DuckFeeder.Meta do
   defdelegate fetch_checkpoint(conn, designated_table_id), to: Store
   defdelegate upsert_checkpoint(conn, designated_table_id, lsn), to: Store
 
+  defdelegate fetch_snapshot_handoff(conn, source_id), to: Store
+  defdelegate mark_snapshot_handoff_pending(conn, source_id, boundary_lsn), to: Store
+  defdelegate mark_snapshot_handoff_complete(conn, source_id, boundary_lsn), to: Store
+  defdelegate clear_snapshot_handoff(conn, source_id), to: Store
+
   defdelegate insert_batch(conn, attrs), to: Store
   defdelegate get_batch_state(conn, batch_id), to: Store
   defdelegate transition_batch(conn, batch_id, to_state, opts \\ []), to: Store
