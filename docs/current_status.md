@@ -1,6 +1,6 @@
 # DuckFeeder Current Implementation Status
 
-This tracks progress against `docs/plan_compact.md`.
+This is the single source of truth task list for project status and next work.
 
 ## Completed
 
@@ -71,7 +71,6 @@ This tracks progress against `docs/plan_compact.md`.
   - [x] `DuckFeeder.Runtime.Supervisor` stream+reconciler lifecycle wrapper
   - [x] `DuckFeeder.Runtime.Manager` dynamic multi-source runtime manager
   - [x] runtime restart behavior coverage (stream worker restart on child failure, manager re-start after source exit)
-  - [x] existing-app supervision integration runbook (`docs/existing_app_supervision.md`)
   - [x] existing-app runtime child-spec helpers (`DuckFeeder.Integration`)
 
 - [x] **Observability foundations**
@@ -99,14 +98,13 @@ This tracks progress against `docs/plan_compact.md`.
 - [x] **Third-party license compliance (ElectricSQL LSN reference)**
   - [x] added source attribution + modification notes in `lib/duck_feeder/postgrex/extensions/pg_lsn.ex`
   - [x] vendored Apache-2.0 text at `third_party/electric/LICENSE`
-  - [x] documented compliance notes in `docs/third_party_licenses.md`
-  - [x] linked third-party licensing notes from `README.md`
+  - [x] documented compliance notes in this status file
 
 ## Ongoing Apache-2.0 obligations (ElectricSQL LSN-derived code)
 
 - Keep attribution/modification comments in `lib/duck_feeder/postgrex/extensions/pg_lsn.ex`.
 - Keep Apache-2.0 license text in `third_party/electric/LICENSE` in redistributions.
-- If additional ElectricSQL code is copied/adapted, document file-level provenance in `docs/third_party_licenses.md`.
+- If additional ElectricSQL code is copied/adapted, document file-level provenance in this status file.
 - If upstream adds a NOTICE file and we distribute covered code, include applicable NOTICE content.
 
 ## Remaining to reach target architecture
@@ -127,6 +125,7 @@ This tracks progress against `docs/plan_compact.md`.
 2. **Parquet writer hardening (phase 2)**
    - add more precise typing for temporal/decimal-like fields where practical
    - tune performance and compatibility across DuckDB/object-store readers
+   - prefer Elixir-side normalization/casting for temporal values to keep Rust deps minimal
 
 3. **Recovery/reconcile hardening (phase 2)**
    - add orphan-detection integration cases and larger-batch cleanup safety checks
@@ -134,6 +133,10 @@ This tracks progress against `docs/plan_compact.md`.
 4. **Full integration matrix expansion**
    - extend local integration beyond postgres/localfs to provider-backed S3/GCS paths
    - keep `mix test --only integration` as the required release gate
+
+5. **Dependency footprint minimization (Elixir + Rust)**
+   - keep runtime deps minimal and avoid heavy crates unless required
+   - bias toward Elixir-side transforms over Rust parsing when both are viable
 
 ## Local test status
 
