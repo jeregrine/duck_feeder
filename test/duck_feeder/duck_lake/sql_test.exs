@@ -34,6 +34,14 @@ defmodule DuckFeeder.DuckLake.SQLTest do
            end)
 
     assert Enum.any?(statements, fn {sql, _params} ->
+             sql =~ "INSERT INTO ducklake_metadata.ducklake_table_column_stats"
+           end)
+
+    assert Enum.any?(statements, fn {sql, _params} ->
+             sql =~ "INSERT INTO ducklake_metadata.ducklake_file_column_stats"
+           end)
+
+    assert Enum.any?(statements, fn {sql, _params} ->
              sql =~ "INSERT INTO ducklake_metadata.ducklake_snapshot_changes"
            end)
 

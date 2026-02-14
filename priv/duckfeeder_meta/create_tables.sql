@@ -300,6 +300,12 @@ CREATE UNIQUE INDEX IF NOT EXISTS ducklake_column_mapping_table_idx
 CREATE UNIQUE INDEX IF NOT EXISTS ducklake_name_mapping_unique_idx
   ON ducklake_metadata.ducklake_name_mapping (mapping_id, source_name, COALESCE(parent_column, -1));
 
+CREATE UNIQUE INDEX IF NOT EXISTS ducklake_file_column_stats_file_col_idx
+  ON ducklake_metadata.ducklake_file_column_stats (data_file_id, column_id);
+
+CREATE UNIQUE INDEX IF NOT EXISTS ducklake_table_column_stats_table_col_idx
+  ON ducklake_metadata.ducklake_table_column_stats (table_id, column_id);
+
 INSERT INTO ducklake_metadata.ducklake_snapshot (snapshot_id, snapshot_time, schema_version, next_catalog_id, next_file_id)
 SELECT 0, now(), 0, 1, 1
 WHERE NOT EXISTS (

@@ -325,6 +325,37 @@ defmodule DuckFeeder.RuntimeStreamIntegrationTest do
     assert stats_next_row_id >= 1
     assert stats_file_size_bytes > 0
 
+    assert {:ok, %{rows: [[table_column_stats_count]]}} =
+             Postgrex.query(
+               meta_conn,
+               """
+               SELECT count(*)
+               FROM ducklake_metadata.ducklake_table_column_stats stats
+               JOIN ducklake_metadata.ducklake_column col
+                 ON col.table_id = stats.table_id
+                AND col.column_id = stats.column_id
+               WHERE stats.table_id = $1
+               """,
+               [designated_table_id]
+             )
+
+    assert table_column_stats_count >= 1
+
+    assert {:ok, %{rows: [[file_column_stats_count]]}} =
+             Postgrex.query(
+               meta_conn,
+               """
+               SELECT count(*)
+               FROM ducklake_metadata.ducklake_file_column_stats stats
+               JOIN ducklake_metadata.ducklake_data_file files
+                 ON files.data_file_id = stats.data_file_id
+               WHERE files.table_id = $1
+               """,
+               [designated_table_id]
+             )
+
+    assert file_column_stats_count >= 1
+
     trace_unique =
       "#{System.system_time(:microsecond)}_#{System.unique_integer([:positive, :monotonic])}"
 

@@ -179,6 +179,34 @@ defmodule DuckFeeder.AppendStreamIntegrationTest do
     assert stats_record_count >= 2
     assert stats_next_row_id >= 2
 
+    assert {:ok, %{rows: [[table_column_stats_count]]}} =
+             Postgrex.query(
+               meta_conn,
+               """
+               SELECT count(*)
+               FROM ducklake_metadata.ducklake_table_column_stats
+               WHERE table_id = $1
+               """,
+               [designated_table_id]
+             )
+
+    assert table_column_stats_count >= 1
+
+    assert {:ok, %{rows: [[file_column_stats_count]]}} =
+             Postgrex.query(
+               meta_conn,
+               """
+               SELECT count(*)
+               FROM ducklake_metadata.ducklake_file_column_stats stats
+               JOIN ducklake_metadata.ducklake_data_file files
+                 ON files.data_file_id = stats.data_file_id
+               WHERE files.table_id = $1
+               """,
+               [designated_table_id]
+             )
+
+    assert file_column_stats_count >= 1
+
     GenServer.stop(stream)
   end
 end

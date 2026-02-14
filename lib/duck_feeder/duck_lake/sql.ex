@@ -253,11 +253,11 @@ defmodule DuckFeeder.DuckLake.SQL do
     current_snapshot.snapshot_id,
     NULL,
     1,
-    $2,
+    $2::varchar,
     true,
     'parquet',
-    $3,
-    $4,
+    $3::bigint,
+    $4::bigint,
     0,
     COALESCE(table_stats.next_row_id, 0),
     NULL,
@@ -274,7 +274,7 @@ defmodule DuckFeeder.DuckLake.SQL do
   @upsert_table_stats_sql """
   INSERT INTO ducklake_metadata.ducklake_table_stats
     (table_id, record_count, next_row_id, file_size_bytes)
-  SELECT table_ref.table_id, $2, $2, $3
+  SELECT table_ref.table_id, $2::bigint, $2::bigint, $3::bigint
   FROM (
     SELECT batches.designated_table_id AS table_id
     FROM duckfeeder_meta.batches batches
@@ -284,6 +284,83 @@ defmodule DuckFeeder.DuckLake.SQL do
     record_count = ducklake_metadata.ducklake_table_stats.record_count + EXCLUDED.record_count,
     next_row_id = ducklake_metadata.ducklake_table_stats.next_row_id + EXCLUDED.record_count,
     file_size_bytes = ducklake_metadata.ducklake_table_stats.file_size_bytes + EXCLUDED.file_size_bytes
+  """
+
+  @upsert_table_column_stats_sql """
+  INSERT INTO ducklake_metadata.ducklake_table_column_stats
+    (table_id, column_id, contains_null, contains_nan, min_value, max_value, extra_stats)
+  SELECT
+    table_ref.table_id,
+    col.column_id,
+    ($4::bigint > 0),
+    $7::boolean,
+    $5::varchar,
+    $6::varchar,
+    ('value_count=' || $3::bigint::text)
+  FROM (
+    SELECT batches.designated_table_id AS table_id
+    FROM duckfeeder_meta.batches batches
+    WHERE batches.batch_id = $1
+  ) table_ref
+  JOIN ducklake_metadata.ducklake_column col
+    ON col.table_id = table_ref.table_id
+   AND col.column_name = $2::varchar
+   AND col.end_snapshot IS NULL
+  ON CONFLICT (table_id, column_id) DO UPDATE SET
+    contains_null = ducklake_metadata.ducklake_table_column_stats.contains_null OR EXCLUDED.contains_null,
+    contains_nan = ducklake_metadata.ducklake_table_column_stats.contains_nan OR EXCLUDED.contains_nan,
+    min_value = CASE
+      WHEN ducklake_metadata.ducklake_table_column_stats.min_value IS NULL THEN EXCLUDED.min_value
+      WHEN EXCLUDED.min_value IS NULL THEN ducklake_metadata.ducklake_table_column_stats.min_value
+      ELSE LEAST(ducklake_metadata.ducklake_table_column_stats.min_value, EXCLUDED.min_value)
+    END,
+    max_value = CASE
+      WHEN ducklake_metadata.ducklake_table_column_stats.max_value IS NULL THEN EXCLUDED.max_value
+      WHEN EXCLUDED.max_value IS NULL THEN ducklake_metadata.ducklake_table_column_stats.max_value
+      ELSE GREATEST(ducklake_metadata.ducklake_table_column_stats.max_value, EXCLUDED.max_value)
+    END,
+    extra_stats = EXCLUDED.extra_stats
+  """
+
+  @insert_file_column_stats_sql """
+  WITH current_snapshot AS (
+    SELECT snapshot_id, next_file_id
+    FROM ducklake_metadata.ducklake_snapshot
+    ORDER BY snapshot_id DESC
+    LIMIT 1
+  ),
+  table_ref AS (
+    SELECT batches.designated_table_id AS table_id
+    FROM duckfeeder_meta.batches batches
+    WHERE batches.batch_id = $1
+  )
+  INSERT INTO ducklake_metadata.ducklake_file_column_stats
+    (data_file_id, table_id, column_id, column_size_bytes, value_count, null_count, min_value, max_value, contains_nan, extra_stats)
+  SELECT
+    current_snapshot.next_file_id - 1,
+    table_ref.table_id,
+    col.column_id,
+    NULL,
+    $3::bigint,
+    $4::bigint,
+    $5::varchar,
+    $6::varchar,
+    $7::boolean,
+    NULL
+  FROM current_snapshot
+  JOIN table_ref ON true
+  JOIN ducklake_metadata.ducklake_column col
+    ON col.table_id = table_ref.table_id
+   AND col.column_name = $2::varchar
+   AND col.end_snapshot IS NULL
+  ON CONFLICT (data_file_id, column_id) DO UPDATE SET
+    column_size_bytes = EXCLUDED.column_size_bytes,
+    value_count = EXCLUDED.value_count,
+    null_count = EXCLUDED.null_count,
+    min_value = EXCLUDED.min_value,
+    max_value = EXCLUDED.max_value,
+    contains_nan = EXCLUDED.contains_nan,
+    extra_stats = EXCLUDED.extra_stats
   """
 
   @insert_snapshot_changes_sql """
@@ -402,22 +479,26 @@ defmodule DuckFeeder.DuckLake.SQL do
       row_count = Map.get(write_result, :row_count, 0)
       file_size = Map.get(write_result, :file_size_bytes, 0)
 
-      columns = extract_columns(batch)
-      column_names_json = JSON.encode!(Enum.map(columns, &elem(&1, 0)))
+      column_descriptors = extract_column_descriptors(batch)
+      column_names_json = JSON.encode!(Enum.map(column_descriptors, & &1.name))
 
       [
         {@insert_snapshot_sql, [batch_id, column_names_json]},
         {@ensure_table_sql, [batch_id]}
       ] ++
-        column_statements(batch_id, columns) ++
+        column_statements(batch_id, column_descriptors) ++
         [
           {@ensure_mapping_sql, [batch_id]}
         ] ++
-        name_mapping_statements(batch_id, columns) ++
+        name_mapping_statements(batch_id, column_descriptors) ++
         [
           {@record_schema_version_sql, []},
           {@insert_data_file_sql, [batch_id, object_key, row_count, file_size]},
-          {@upsert_table_stats_sql, [batch_id, row_count, file_size]},
+          {@upsert_table_stats_sql, [batch_id, row_count, file_size]}
+        ] ++
+        table_column_stats_statements(batch_id, column_descriptors) ++
+        file_column_stats_statements(batch_id, column_descriptors) ++
+        [
           {@insert_snapshot_changes_sql, [batch_id]},
           {@default_schema_history_sql, [batch_id, object_key, row_count, file_size]}
           | maybe_commit_log_statement(include_commit_log?, [
@@ -432,19 +513,49 @@ defmodule DuckFeeder.DuckLake.SQL do
     end
   end
 
-  defp column_statements(batch_id, columns) do
-    Enum.map(columns, fn {name, type} ->
+  defp column_statements(batch_id, column_descriptors) do
+    Enum.map(column_descriptors, fn %{name: name, type: type} ->
       {@ensure_column_sql, [batch_id, name, type]}
     end)
   end
 
-  defp name_mapping_statements(batch_id, columns) do
-    Enum.map(columns, fn {name, _type} ->
+  defp name_mapping_statements(batch_id, column_descriptors) do
+    Enum.map(column_descriptors, fn %{name: name} ->
       {@ensure_name_mapping_sql, [batch_id, name]}
     end)
   end
 
-  defp extract_columns(batch) do
+  defp table_column_stats_statements(batch_id, column_descriptors) do
+    Enum.map(column_descriptors, fn %{name: name, stats: stats} ->
+      {@upsert_table_column_stats_sql,
+       [
+         batch_id,
+         name,
+         stats.value_count,
+         stats.null_count,
+         stats.min_value,
+         stats.max_value,
+         stats.contains_nan
+       ]}
+    end)
+  end
+
+  defp file_column_stats_statements(batch_id, column_descriptors) do
+    Enum.map(column_descriptors, fn %{name: name, stats: stats} ->
+      {@insert_file_column_stats_sql,
+       [
+         batch_id,
+         name,
+         stats.value_count,
+         stats.null_count,
+         stats.min_value,
+         stats.max_value,
+         stats.contains_nan
+       ]}
+    end)
+  end
+
+  defp extract_column_descriptors(batch) do
     rows = Map.get(batch, :rows, [])
 
     rows
@@ -458,13 +569,73 @@ defmodule DuckFeeder.DuckLake.SQL do
         acc
       end
     end)
-    |> Enum.map(fn {name, values} -> {name, infer_ducklake_type(values)} end)
-    |> Enum.sort_by(&elem(&1, 0))
+    |> Enum.map(fn {name, values} ->
+      %{
+        name: name,
+        type: infer_ducklake_type(values),
+        stats: infer_column_stats(values)
+      }
+    end)
+    |> Enum.sort_by(& &1.name)
   end
+
+  defp infer_column_stats(values) when is_list(values) do
+    cleaned_values = Enum.reject(values, &is_nil/1)
+    contains_nan = Enum.any?(cleaned_values, &nan?/1)
+
+    min_max_values =
+      cleaned_values
+      |> Enum.reject(&nan?/1)
+      |> Enum.map(&stat_string/1)
+
+    {min_value, max_value} =
+      case min_max_values do
+        [] -> {nil, nil}
+        [single] -> {single, single}
+        values -> {Enum.min(values), Enum.max(values)}
+      end
+
+    %{
+      value_count: length(values),
+      null_count: Enum.count(values, &is_nil/1),
+      min_value: min_value,
+      max_value: max_value,
+      contains_nan: contains_nan
+    }
+  end
+
+  defp stat_string(value) when is_binary(value), do: value
+  defp stat_string(value) when is_integer(value), do: Integer.to_string(value)
+
+  defp stat_string(value) when is_float(value),
+    do: :erlang.float_to_binary(value, [:compact, decimals: 16])
+
+  defp stat_string(value) when is_boolean(value), do: to_string(value)
+  defp stat_string(value) when is_tuple(value), do: value |> Tuple.to_list() |> stat_string()
+
+  defp stat_string(%DateTime{} = datetime), do: DateTime.to_iso8601(datetime)
+  defp stat_string(%NaiveDateTime{} = datetime), do: NaiveDateTime.to_iso8601(datetime)
+  defp stat_string(%Date{} = date), do: Date.to_iso8601(date)
+  defp stat_string(%Time{} = time), do: Time.to_iso8601(time)
+  defp stat_string(value) when is_struct(value), do: inspect(value)
+
+  defp stat_string(value) when is_map(value) or is_list(value) do
+    try do
+      JSON.encode!(value)
+    rescue
+      _ -> inspect(value)
+    end
+  end
+
+  defp stat_string(value), do: to_string(value)
+
+  defp nan?(value) when is_float(value), do: value != value
+  defp nan?(_), do: false
 
   defp infer_ducklake_type(values) when is_list(values) do
     values
     |> Enum.reject(&is_nil/1)
+    |> Enum.reject(&nan?/1)
     |> Enum.map(&value_type/1)
     |> Enum.uniq()
     |> resolve_type()

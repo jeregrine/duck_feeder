@@ -148,6 +148,14 @@ defmodule DuckFeeder.DuckLake.Committer.PostgresTest do
            end)
 
     assert Enum.any?(queries, fn {sql, _} ->
+             sql =~ "INSERT INTO ducklake_metadata.ducklake_table_column_stats"
+           end)
+
+    assert Enum.any?(queries, fn {sql, _} ->
+             sql =~ "INSERT INTO ducklake_metadata.ducklake_file_column_stats"
+           end)
+
+    assert Enum.any?(queries, fn {sql, _} ->
              sql =~ "INSERT INTO ducklake_metadata.ducklake_snapshot_changes"
            end)
 

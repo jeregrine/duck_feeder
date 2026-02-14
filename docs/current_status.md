@@ -68,6 +68,7 @@ This is the single source of truth task list for project status and next work.
   - [x] `DuckFeeder.DuckLake.Committer.Postgres` transactional scaffold
   - [x] DuckLake spec-table bootstrap aligned to `ducklake-web` table definitions (`ducklake_metadata.*`)
   - [x] default spec commit path writes snapshot/table/column/mapping/data_file/stats/snapshot_changes/schema_versions
+  - [x] default spec commit path writes table/file column stats (`ducklake_table_column_stats`, `ducklake_file_column_stats`)
   - [x] default schema/commit history record (`duckfeeder_meta.schema_history`)
   - [x] default commit-log SQL target (`duckfeeder_meta.ducklake_commits`)
   - [x] `DuckFeeder.Service` end-to-end wiring module
