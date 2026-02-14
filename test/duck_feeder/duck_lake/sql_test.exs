@@ -146,11 +146,16 @@ defmodule DuckFeeder.DuckLake.SQLTest do
       )
 
     assert Enum.any?(statements, fn {sql, _params} ->
-             sql =~ "UPDATE ducklake_metadata.ducklake_column col" and sql =~ "SET column_type ="
+             sql =~ "SELECT 1 /" and sql =~ "can_promote"
            end)
 
     assert Enum.any?(statements, fn {sql, _params} ->
-             sql =~ "UPDATE ducklake_metadata.ducklake_column col" and sql =~ "SET end_snapshot ="
+             sql =~ "INSERT INTO ducklake_metadata.ducklake_column" and
+               sql =~ "previous.column_id"
+           end)
+
+    assert Enum.any?(statements, fn {sql, _params} ->
+             sql =~ "DELETE FROM ducklake_metadata.ducklake_table_column_stats"
            end)
 
     assert Enum.any?(statements, fn {sql, _params} ->

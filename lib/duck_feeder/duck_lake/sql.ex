@@ -192,25 +192,108 @@ defmodule DuckFeeder.DuckLake.SQL do
   )
   """
 
-  @schema_change_rename_column_sql """
+  @schema_change_validate_rename_sql """
   WITH table_ref AS (
+    SELECT batches.designated_table_id AS table_id
+    FROM duckfeeder_meta.batches batches
+    WHERE batches.batch_id = $1
+  ),
+  checks AS (
+    SELECT
+      EXISTS (
+        SELECT 1
+        FROM ducklake_metadata.ducklake_column col
+        WHERE col.table_id = table_ref.table_id
+          AND col.column_name = $2::varchar
+          AND col.end_snapshot IS NULL
+      ) AS from_exists,
+      EXISTS (
+        SELECT 1
+        FROM ducklake_metadata.ducklake_column col
+        WHERE col.table_id = table_ref.table_id
+          AND col.column_name = $3::varchar
+          AND col.end_snapshot IS NULL
+      ) AS to_exists
+    FROM table_ref
+  )
+  SELECT 1 /
+    CASE
+      WHEN ((SELECT from_exists FROM checks) AND NOT (SELECT to_exists FROM checks))
+        OR (NOT (SELECT from_exists FROM checks) AND (SELECT to_exists FROM checks)) THEN 1
+      ELSE 0
+    END
+  """
+
+  @schema_change_rename_close_column_sql """
+  WITH current_snapshot AS (
+    SELECT snapshot_id
+    FROM ducklake_metadata.ducklake_snapshot
+    ORDER BY snapshot_id DESC
+    LIMIT 1
+  ),
+  table_ref AS (
     SELECT batches.designated_table_id AS table_id
     FROM duckfeeder_meta.batches batches
     WHERE batches.batch_id = $1
   )
   UPDATE ducklake_metadata.ducklake_column col
-  SET column_name = $3::varchar
-  FROM table_ref
+  SET end_snapshot = current_snapshot.snapshot_id
+  FROM current_snapshot, table_ref
   WHERE col.table_id = table_ref.table_id
     AND col.column_name = $2::varchar
     AND col.end_snapshot IS NULL
-    AND NOT EXISTS (
-      SELECT 1
-      FROM ducklake_metadata.ducklake_column existing
-      WHERE existing.table_id = table_ref.table_id
-        AND existing.column_name = $3::varchar
-        AND existing.end_snapshot IS NULL
+  """
+
+  @schema_change_rename_insert_column_sql """
+  WITH current_snapshot AS (
+    SELECT snapshot_id
+    FROM ducklake_metadata.ducklake_snapshot
+    ORDER BY snapshot_id DESC
+    LIMIT 1
+  ),
+  table_ref AS (
+    SELECT batches.designated_table_id AS table_id
+    FROM duckfeeder_meta.batches batches
+    WHERE batches.batch_id = $1
+  ),
+  previous AS (
+    SELECT col.*
+    FROM ducklake_metadata.ducklake_column col
+    JOIN table_ref ON col.table_id = table_ref.table_id
+    JOIN current_snapshot ON true
+    WHERE col.column_name = $2::varchar
+      AND col.end_snapshot = current_snapshot.snapshot_id
+    ORDER BY col.begin_snapshot DESC
+    LIMIT 1
+  )
+  INSERT INTO ducklake_metadata.ducklake_column
+    (
+      column_id,
+      begin_snapshot,
+      end_snapshot,
+      table_id,
+      column_order,
+      column_name,
+      column_type,
+      initial_default,
+      default_value,
+      nulls_allowed,
+      parent_column
     )
+  SELECT
+    previous.column_id,
+    current_snapshot.snapshot_id,
+    NULL,
+    previous.table_id,
+    previous.column_order,
+    $3::varchar,
+    previous.column_type,
+    previous.initial_default,
+    previous.default_value,
+    previous.nulls_allowed,
+    previous.parent_column
+  FROM previous
+  JOIN current_snapshot ON true
   """
 
   @schema_change_rename_mapping_sql """
@@ -232,6 +315,26 @@ defmodule DuckFeeder.DuckLake.SQL do
         AND existing.source_name = $3::varchar
         AND COALESCE(existing.parent_column, -1) = -1
     )
+  """
+
+  @schema_change_validate_drop_sql """
+  WITH table_ref AS (
+    SELECT batches.designated_table_id AS table_id
+    FROM duckfeeder_meta.batches batches
+    WHERE batches.batch_id = $1
+  )
+  SELECT 1 /
+    CASE
+      WHEN EXISTS (
+        SELECT 1
+        FROM ducklake_metadata.ducklake_column col
+        WHERE col.table_id = table_ref.table_id
+          AND col.column_name = $2::varchar
+          AND col.end_snapshot IS NULL
+      ) THEN 1
+      ELSE 0
+    END
+  FROM table_ref
   """
 
   @schema_change_drop_column_sql """
@@ -267,18 +370,173 @@ defmodule DuckFeeder.DuckLake.SQL do
     AND COALESCE(mapping.parent_column, -1) = -1
   """
 
-  @schema_change_type_sql """
+  @schema_change_drop_table_column_stats_sql """
+  WITH current_snapshot AS (
+    SELECT snapshot_id
+    FROM ducklake_metadata.ducklake_snapshot
+    ORDER BY snapshot_id DESC
+    LIMIT 1
+  ),
+  table_ref AS (
+    SELECT batches.designated_table_id AS table_id
+    FROM duckfeeder_meta.batches batches
+    WHERE batches.batch_id = $1
+  ),
+  dropped_cols AS (
+    SELECT col.column_id
+    FROM ducklake_metadata.ducklake_column col
+    JOIN table_ref ON col.table_id = table_ref.table_id
+    JOIN current_snapshot ON true
+    WHERE col.column_name = $2::varchar
+      AND col.end_snapshot = current_snapshot.snapshot_id
+  )
+  DELETE FROM ducklake_metadata.ducklake_table_column_stats stats
+  USING table_ref, dropped_cols
+  WHERE stats.table_id = table_ref.table_id
+    AND stats.column_id = dropped_cols.column_id
+  """
+
+  @schema_change_drop_file_column_stats_sql """
+  WITH current_snapshot AS (
+    SELECT snapshot_id
+    FROM ducklake_metadata.ducklake_snapshot
+    ORDER BY snapshot_id DESC
+    LIMIT 1
+  ),
+  table_ref AS (
+    SELECT batches.designated_table_id AS table_id
+    FROM duckfeeder_meta.batches batches
+    WHERE batches.batch_id = $1
+  ),
+  dropped_cols AS (
+    SELECT col.column_id
+    FROM ducklake_metadata.ducklake_column col
+    JOIN table_ref ON col.table_id = table_ref.table_id
+    JOIN current_snapshot ON true
+    WHERE col.column_name = $2::varchar
+      AND col.end_snapshot = current_snapshot.snapshot_id
+  )
+  DELETE FROM ducklake_metadata.ducklake_file_column_stats stats
+  USING table_ref, dropped_cols
+  WHERE stats.table_id = table_ref.table_id
+    AND stats.column_id = dropped_cols.column_id
+  """
+
+  @schema_change_validate_type_sql """
   WITH table_ref AS (
+    SELECT batches.designated_table_id AS table_id
+    FROM duckfeeder_meta.batches batches
+    WHERE batches.batch_id = $1
+  ),
+  active_col AS (
+    SELECT upper(col.column_type) AS source_type
+    FROM ducklake_metadata.ducklake_column col
+    JOIN table_ref ON col.table_id = table_ref.table_id
+    WHERE col.column_name = $2::varchar
+      AND col.end_snapshot IS NULL
+    LIMIT 1
+  ),
+  target AS (
+    SELECT upper($3::varchar) AS target_type
+  ),
+  validation AS (
+    SELECT
+      EXISTS (SELECT 1 FROM active_col) AS column_exists,
+      CASE
+        WHEN NOT EXISTS (SELECT 1 FROM active_col) THEN false
+        ELSE (
+          SELECT CASE
+            WHEN active_col.source_type = target.target_type THEN true
+            WHEN active_col.source_type = 'TINYINT' AND target.target_type IN ('SMALLINT', 'INTEGER', 'BIGINT') THEN true
+            WHEN active_col.source_type = 'SMALLINT' AND target.target_type IN ('INTEGER', 'BIGINT') THEN true
+            WHEN active_col.source_type = 'INTEGER' AND target.target_type = 'BIGINT' THEN true
+            WHEN active_col.source_type = 'UTINYINT' AND target.target_type IN ('USMALLINT', 'UINTEGER', 'UBIGINT') THEN true
+            WHEN active_col.source_type = 'USMALLINT' AND target.target_type IN ('UINTEGER', 'UBIGINT') THEN true
+            WHEN active_col.source_type = 'UINTEGER' AND target.target_type = 'UBIGINT' THEN true
+            WHEN active_col.source_type IN ('FLOAT', 'REAL') AND target.target_type = 'DOUBLE' THEN true
+            ELSE false
+          END
+          FROM active_col, target
+        )
+      END AS can_promote
+  )
+  SELECT 1 /
+    CASE
+      WHEN (SELECT column_exists FROM validation) AND (SELECT can_promote FROM validation) THEN 1
+      ELSE 0
+    END
+  """
+
+  @schema_change_type_close_column_sql """
+  WITH current_snapshot AS (
+    SELECT snapshot_id
+    FROM ducklake_metadata.ducklake_snapshot
+    ORDER BY snapshot_id DESC
+    LIMIT 1
+  ),
+  table_ref AS (
     SELECT batches.designated_table_id AS table_id
     FROM duckfeeder_meta.batches batches
     WHERE batches.batch_id = $1
   )
   UPDATE ducklake_metadata.ducklake_column col
-  SET column_type = $3::varchar
-  FROM table_ref
+  SET end_snapshot = current_snapshot.snapshot_id
+  FROM current_snapshot, table_ref
   WHERE col.table_id = table_ref.table_id
     AND col.column_name = $2::varchar
     AND col.end_snapshot IS NULL
+  """
+
+  @schema_change_type_insert_column_sql """
+  WITH current_snapshot AS (
+    SELECT snapshot_id
+    FROM ducklake_metadata.ducklake_snapshot
+    ORDER BY snapshot_id DESC
+    LIMIT 1
+  ),
+  table_ref AS (
+    SELECT batches.designated_table_id AS table_id
+    FROM duckfeeder_meta.batches batches
+    WHERE batches.batch_id = $1
+  ),
+  previous AS (
+    SELECT col.*
+    FROM ducklake_metadata.ducklake_column col
+    JOIN table_ref ON col.table_id = table_ref.table_id
+    JOIN current_snapshot ON true
+    WHERE col.column_name = $2::varchar
+      AND col.end_snapshot = current_snapshot.snapshot_id
+    ORDER BY col.begin_snapshot DESC
+    LIMIT 1
+  )
+  INSERT INTO ducklake_metadata.ducklake_column
+    (
+      column_id,
+      begin_snapshot,
+      end_snapshot,
+      table_id,
+      column_order,
+      column_name,
+      column_type,
+      initial_default,
+      default_value,
+      nulls_allowed,
+      parent_column
+    )
+  SELECT
+    previous.column_id,
+    current_snapshot.snapshot_id,
+    NULL,
+    previous.table_id,
+    previous.column_order,
+    previous.column_name,
+    $3::varchar,
+    previous.initial_default,
+    previous.default_value,
+    previous.nulls_allowed,
+    previous.parent_column
+  FROM previous
+  JOIN current_snapshot ON true
   """
 
   @record_schema_version_sql """
@@ -769,14 +1027,12 @@ defmodule DuckFeeder.DuckLake.SQL do
 
       [
         {@insert_snapshot_sql, [batch_id, column_names, file_id_increment, force_schema_change?]},
-        {@ensure_table_sql, [batch_id]}
+        {@ensure_table_sql, [batch_id]},
+        {@ensure_mapping_sql, [batch_id]}
       ] ++
-        column_statements(batch_id, column_descriptors) ++
-        [
-          {@ensure_mapping_sql, [batch_id]}
-        ] ++
-        name_mapping_statements(batch_id, column_descriptors) ++
         schema_change_statements(batch_id, schema_changes) ++
+        column_statements(batch_id, column_descriptors) ++
+        name_mapping_statements(batch_id, column_descriptors) ++
         [
           {@record_schema_version_sql, []},
           {@insert_data_file_sql, [batch_id, object_key, row_count, file_size, delete_file_count]}
@@ -884,19 +1140,26 @@ defmodule DuckFeeder.DuckLake.SQL do
     Enum.flat_map(schema_changes, fn
       %{op: :rename_column, from: from_name, to: to_name} ->
         [
-          {@schema_change_rename_column_sql, [batch_id, from_name, to_name]},
+          {@schema_change_validate_rename_sql, [batch_id, from_name, to_name]},
+          {@schema_change_rename_close_column_sql, [batch_id, from_name]},
+          {@schema_change_rename_insert_column_sql, [batch_id, from_name, to_name]},
           {@schema_change_rename_mapping_sql, [batch_id, from_name, to_name]}
         ]
 
       %{op: :drop_column, column: column_name} ->
         [
+          {@schema_change_validate_drop_sql, [batch_id, column_name]},
           {@schema_change_drop_column_sql, [batch_id, column_name]},
-          {@schema_change_drop_mapping_sql, [batch_id, column_name]}
+          {@schema_change_drop_mapping_sql, [batch_id, column_name]},
+          {@schema_change_drop_table_column_stats_sql, [batch_id, column_name]},
+          {@schema_change_drop_file_column_stats_sql, [batch_id, column_name]}
         ]
 
       %{op: :alter_column_type, column: column_name, type: column_type} ->
         [
-          {@schema_change_type_sql, [batch_id, column_name, column_type]}
+          {@schema_change_validate_type_sql, [batch_id, column_name, column_type]},
+          {@schema_change_type_close_column_sql, [batch_id, column_name]},
+          {@schema_change_type_insert_column_sql, [batch_id, column_name, column_type]}
         ]
 
       _ ->
@@ -922,7 +1185,7 @@ defmodule DuckFeeder.DuckLake.SQL do
         from_name = normalize_non_empty_string(descriptor_get(descriptor, :from))
         to_name = normalize_non_empty_string(descriptor_get(descriptor, :to))
 
-        if is_binary(from_name) and is_binary(to_name) do
+        if is_binary(from_name) and is_binary(to_name) and from_name != to_name do
           %{op: :rename_column, from: from_name, to: to_name}
         else
           nil

@@ -321,11 +321,11 @@ defmodule DuckFeeder.DuckLake.Committer.PostgresIntegrationTest do
              Postgres.commit_batch(meta_conn, batch_2_id,
                object_key: "raw/#{target_table}/schema-change-2.parquet",
                write_result: %{row_count: 1, file_size_bytes: 65},
-               batch: %{rows: [%{"kind" => "second", "value" => 2}]},
+               batch: %{rows: [%{"event_kind" => "second", "value" => 2}]},
                schema_changes: [
                  %{op: :rename_column, from: "kind", to: "event_kind"},
                  %{op: :drop_column, column: "legacy"},
-                 %{op: :alter_column_type, column: "value", type: "DOUBLE"}
+                 %{op: :alter_column_type, column: "value", type: "BIGINT"}
                ]
              )
 
@@ -343,6 +343,21 @@ defmodule DuckFeeder.DuckLake.Committer.PostgresIntegrationTest do
              )
 
     assert kind_active_count == 0
+
+    assert {:ok, %{rows: [[kind_historical_count]]}} =
+             Postgrex.query(
+               meta_conn,
+               """
+               SELECT count(*)
+               FROM ducklake_metadata.ducklake_column
+               WHERE table_id = $1
+                 AND column_name = 'kind'
+                 AND end_snapshot IS NOT NULL
+               """,
+               [designated_table_id]
+             )
+
+    assert kind_historical_count >= 1
 
     assert {:ok, %{rows: [[event_kind_active_count]]}} =
              Postgrex.query(
@@ -388,7 +403,46 @@ defmodule DuckFeeder.DuckLake.Committer.PostgresIntegrationTest do
                [designated_table_id]
              )
 
-    assert value_type == "DOUBLE"
+    assert value_type == "BIGINT"
+
+    assert {:ok, %{rows: [[kind_column_id, event_kind_column_id]]}} =
+             Postgrex.query(
+               meta_conn,
+               """
+               SELECT
+                 (SELECT column_id
+                  FROM ducklake_metadata.ducklake_column
+                  WHERE table_id = $1
+                    AND column_name = 'kind'
+                  ORDER BY begin_snapshot DESC
+                  LIMIT 1),
+                 (SELECT column_id
+                  FROM ducklake_metadata.ducklake_column
+                  WHERE table_id = $1
+                    AND column_name = 'event_kind'
+                    AND end_snapshot IS NULL
+                  LIMIT 1)
+               """,
+               [designated_table_id]
+             )
+
+    assert kind_column_id == event_kind_column_id
+
+    assert {:ok, %{rows: [[value_version_count, value_historical_count]]}} =
+             Postgrex.query(
+               meta_conn,
+               """
+               SELECT count(*),
+                      count(*) FILTER (WHERE end_snapshot IS NOT NULL)
+               FROM ducklake_metadata.ducklake_column
+               WHERE table_id = $1
+                 AND column_name = 'value'
+               """,
+               [designated_table_id]
+             )
+
+    assert value_version_count >= 2
+    assert value_historical_count >= 1
 
     assert {:ok, %{rows: [[name_mapping_count]]}} =
              Postgrex.query(
@@ -417,6 +471,63 @@ defmodule DuckFeeder.DuckLake.Committer.PostgresIntegrationTest do
              )
 
     assert changes_made =~ "altered_table:#{designated_table_id}"
+  end
+
+  test "schema_changes rejects non-promotable type changes", %{meta_conn: meta_conn} do
+    unique =
+      "#{System.system_time(:microsecond)}_#{System.unique_integer([:positive, :monotonic])}"
+
+    source_name = "ducklake_schema_conflict_source_#{unique}"
+    target_table = "ducklake_schema_conflict_table_#{unique}"
+
+    assert {:ok, source_id} =
+             Meta.register_source(meta_conn, %{
+               name: source_name,
+               connection_info: %{"dsn" => "schema-conflict://local"},
+               slot_name: "slot_schema_conflict_#{unique}",
+               publication_name: "pub_schema_conflict_#{unique}",
+               status: "active"
+             })
+
+    assert {:ok, designated_table_id} =
+             Meta.register_designated_table(meta_conn, %{
+               source_id: source_id,
+               source_schema: "public",
+               source_table: "events",
+               target_schema: "raw",
+               target_table: target_table,
+               mode: "cdc_changelog"
+             })
+
+    batch_1_id = "batch_schema_conflict_1_#{unique}"
+
+    assert :ok =
+             insert_uploaded_batch(meta_conn, batch_1_id, designated_table_id, "0/30", "0/30")
+
+    assert {:ok, %{batch_id: ^batch_1_id, committed?: true}} =
+             Postgres.commit_batch(meta_conn, batch_1_id,
+               object_key: "raw/#{target_table}/schema-conflict-1.parquet",
+               write_result: %{row_count: 1, file_size_bytes: 60},
+               batch: %{rows: [%{"value" => 100}]}
+             )
+
+    batch_2_id = "batch_schema_conflict_2_#{unique}"
+
+    assert :ok =
+             insert_uploaded_batch(meta_conn, batch_2_id, designated_table_id, "0/31", "0/31")
+
+    assert {:error, {:ducklake_sql_failed, sql, _postgres_error}} =
+             Postgres.commit_batch(meta_conn, batch_2_id,
+               object_key: "raw/#{target_table}/schema-conflict-2.parquet",
+               write_result: %{row_count: 1, file_size_bytes: 60},
+               batch: %{rows: [%{"value" => 1}]},
+               schema_changes: [
+                 %{op: :alter_column_type, column: "value", type: "INTEGER"}
+               ]
+             )
+
+    assert sql =~ "can_promote"
+    assert {:ok, :uploaded} = Meta.get_batch_state(meta_conn, batch_2_id)
   end
 
   defp insert_uploaded_batch(meta_conn, batch_id, designated_table_id, lsn_start, lsn_end) do

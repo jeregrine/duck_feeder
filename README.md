@@ -175,6 +175,19 @@ If no explicit `snapshot_row_handler` is provided, snapshot rows are replayed in
 service ingest path by default (`snapshot_ingest?: true`). Set `snapshot_ingest?: false`
 to require an explicit row handler.
 
+### Migration ordering contract (important)
+
+For schema-evolution semantics (`schema_changes`, snapshot conflict markers, and WAL handoff),
+start DuckFeeder replication/runtime **before** running source DB migrations.
+
+Recommended rollout order:
+1. Start DuckFeeder (`start_stream/4` / runtime supervisor/manager) and confirm replication is live.
+2. Apply DB migrations.
+3. Ensure matching `committer_opts[:schema_changes]` directives are emitted during the same rollout window.
+
+This avoids losing schema-intent context around rename/drop/type-change operations that may not be
+recoverable from row-shape inference alone after the fact.
+
 Replication connection tuning options include:
 - `auto_reconnect: true | false`
 - `reconnect_backoff: milliseconds` (defaults to `1000` when unset)

@@ -269,7 +269,12 @@ defmodule DuckFeeder.DuckLake.Committer.PostgresTest do
       |> Enum.take_while(&(&1 != :done))
 
     assert Enum.any?(queries, fn {sql, _} ->
-             sql =~ "UPDATE ducklake_metadata.ducklake_column col" and sql =~ "SET column_name ="
+             sql =~ "SELECT 1 /" and sql =~ "from_exists"
+           end)
+
+    assert Enum.any?(queries, fn {sql, _} ->
+             sql =~ "INSERT INTO ducklake_metadata.ducklake_column" and
+               sql =~ "previous.column_id"
            end)
 
     assert Enum.any?(queries, fn {sql, _} ->
@@ -277,7 +282,7 @@ defmodule DuckFeeder.DuckLake.Committer.PostgresTest do
            end)
 
     assert Enum.any?(queries, fn {sql, _} ->
-             sql =~ "SET column_type ="
+             sql =~ "SELECT 1 /" and sql =~ "can_promote"
            end)
   end
 
