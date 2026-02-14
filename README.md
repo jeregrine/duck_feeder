@@ -386,6 +386,7 @@ Optional provider-backed integration tests are tagged `:provider_integration`
 and excluded by default. They currently cover:
 - direct storage adapter roundtrips (put/head/delete)
 - append-stream end-to-end write/upload/commit path against provider storage
+- runtime CDC end-to-end path (wal->parquet->provider object->DuckLake metadata commit)
 
 Run them with:
 
