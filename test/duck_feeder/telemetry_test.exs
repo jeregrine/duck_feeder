@@ -107,7 +107,7 @@ defmodule DuckFeeder.TelemetryTest do
     assert metadata.table == "users"
   end
 
-  test "emits cdc connection/frame/lag telemetry" do
+  test "emits cdc connection/frame/lag/backpressure telemetry" do
     handler_id = "duck-feeder-test-cdc-conn-#{System.unique_integer([:positive])}"
 
     :ok =
@@ -116,7 +116,8 @@ defmodule DuckFeeder.TelemetryTest do
         [
           [:duck_feeder, :cdc, :connection],
           [:duck_feeder, :cdc, :frame],
-          [:duck_feeder, :cdc, :lag]
+          [:duck_feeder, :cdc, :lag],
+          [:duck_feeder, :cdc, :backpressure]
         ],
         &__MODULE__.handle_event/4,
         self()
@@ -130,6 +131,10 @@ defmodule DuckFeeder.TelemetryTest do
     DuckFeeder.Telemetry.cdc_frame(:keepalive, :ack_requested, %{wal_end: 1})
     DuckFeeder.Telemetry.cdc_lag(%{lag_bytes: 42}, %{source: :test})
 
+    DuckFeeder.Telemetry.cdc_backpressure(%{lag_bytes: 84, threshold_bytes: 40}, %{
+      status: :entered
+    })
+
     assert_receive {:telemetry, [:duck_feeder, :cdc, :connection], %{count: 1}, metadata}, 300
     assert metadata.status == :stream_starting
     assert metadata.slot_name == "slot"
@@ -142,6 +147,13 @@ defmodule DuckFeeder.TelemetryTest do
                    300
 
     assert lag_meta.source == :test
+
+    assert_receive {:telemetry, [:duck_feeder, :cdc, :backpressure], backpressure_measurements,
+                    backpressure_meta},
+                   300
+
+    assert backpressure_measurements.threshold_bytes == 40
+    assert backpressure_meta.status == :entered
   end
 
   test "emits reconciler run telemetry" do

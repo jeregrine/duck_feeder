@@ -208,7 +208,51 @@ defmodule DuckFeeder.CDC.ConnectionTest do
     assert metadata.slot_name == "duck_slot"
   end
 
-  test "handle_disconnect emits noreply" do
+  test "backpressure telemetry emits entered and cleared transitions" do
+    handler_id = "duck-feeder-connection-backpressure-#{System.unique_integer([:positive])}"
+
+    :ok =
+      :telemetry.attach(
+        handler_id,
+        [:duck_feeder, :cdc, :backpressure],
+        &__MODULE__.handle_event/4,
+        self()
+      )
+
+    on_exit(fn ->
+      :telemetry.detach(handler_id)
+    end)
+
+    {:ok, state} =
+      Connection.init(
+        slot_name: "duck_slot",
+        publication_name: "duck_pub",
+        start_lsn: "0/0",
+        event_sink: self(),
+        backpressure_lag_bytes: 5,
+        status_interval_ms: 0
+      )
+
+    {:stream, _query, [], state} = Connection.handle_connect(state)
+
+    assert {:noreply, [], %State{backpressure_active: true} = state} =
+             Connection.handle_data(<<?k, 10::64, 0::64-signed, 0::8>>, state)
+
+    assert_receive {:telemetry, [:duck_feeder, :cdc, :backpressure], measurements, metadata}, 300
+    assert measurements.lag_bytes == 10
+    assert measurements.threshold_bytes == 5
+    assert metadata.status == :entered
+
+    assert {:noreply, [_ack], %State{backpressure_active: false}} =
+             Connection.handle_data(<<?k, 10::64, 0::64-signed, 1::8>>, state)
+
+    assert_receive {:telemetry, [:duck_feeder, :cdc, :backpressure], measurements, metadata}, 300
+    assert measurements.lag_bytes == 0
+    assert measurements.threshold_bytes == 5
+    assert metadata.status == :cleared
+  end
+
+  test "handle_disconnect increments reconnect count for reconnect telemetry" do
     {:ok, state} =
       Connection.init(
         slot_name: "duck_slot",
@@ -218,7 +262,8 @@ defmodule DuckFeeder.CDC.ConnectionTest do
         status_interval_ms: 0
       )
 
-    assert {:noreply, %State{slot_name: "duck_slot"}} = Connection.handle_disconnect(state)
+    assert {:noreply, %State{slot_name: "duck_slot", reconnect_count: 1, step: :disconnected}} =
+             Connection.handle_disconnect(state)
   end
 
   defp xlog(wal_start, wal_end, payload) do

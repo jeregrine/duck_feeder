@@ -213,6 +213,15 @@ defmodule DuckFeeder.Runtime do
         :error -> @default_reconnect_backoff
       end
 
+    reconnect_backoff =
+      normalize_reconnect_backoff(
+        reconnect_backoff,
+        Keyword.get(opts, :reconnect_backoff_min_ms),
+        Keyword.get(opts, :reconnect_backoff_max_ms),
+        Keyword.get(opts, :reconnect_backoff_jitter_ms, 0),
+        Keyword.get(opts, :reconnect_backoff_jitter_fun)
+      )
+
     [
       name: Keyword.get(opts, :cdc_name),
       connection_opts: connection_opts,
@@ -221,6 +230,7 @@ defmodule DuckFeeder.Runtime do
       start_lsn: start_lsn,
       status_interval_ms: Keyword.get(opts, :status_interval_ms, 10_000),
       max_lag_bytes: Keyword.get(opts, :max_lag_bytes),
+      backpressure_lag_bytes: Keyword.get(opts, :backpressure_lag_bytes),
       decoder_module: Keyword.get(opts, :decoder_module),
       converter_module: Keyword.get(opts, :converter_module),
       event_sink: event_sink,
@@ -763,6 +773,66 @@ defmodule DuckFeeder.Runtime do
   catch
     _, _ -> :ok
   end
+
+  defp normalize_reconnect_backoff(base_backoff, min_ms, max_ms, jitter_ms, jitter_fun)
+       when is_integer(base_backoff) do
+    {min_ms, max_ms} = normalize_reconnect_backoff_bounds(min_ms, max_ms)
+    jitter_ms = normalize_non_neg_integer(jitter_ms, 0)
+
+    bounded = clamp_reconnect_backoff(base_backoff, min_ms, max_ms)
+
+    jitter =
+      case jitter_fun do
+        fun when is_function(fun, 2) ->
+          fun.(bounded, jitter_ms)
+          |> normalize_reconnect_jitter(jitter_ms)
+
+        _ ->
+          if jitter_ms > 0, do: :rand.uniform(jitter_ms * 2 + 1) - (jitter_ms + 1), else: 0
+      end
+
+    bounded
+    |> Kernel.+(jitter)
+    |> clamp_reconnect_backoff(min_ms, max_ms)
+  end
+
+  defp normalize_reconnect_backoff(_base_backoff, _min_ms, _max_ms, _jitter_ms, _jitter_fun),
+    do: @default_reconnect_backoff
+
+  defp normalize_reconnect_backoff_bounds(min_ms, max_ms) do
+    min_ms = normalize_non_neg_integer(min_ms, 0)
+
+    max_ms =
+      case max_ms do
+        value when is_integer(value) and value >= min_ms -> value
+        _ -> nil
+      end
+
+    {min_ms, max_ms}
+  end
+
+  defp clamp_reconnect_backoff(value, min_ms, nil) when is_integer(value), do: max(value, min_ms)
+
+  defp clamp_reconnect_backoff(value, min_ms, max_ms)
+       when is_integer(value) and is_integer(max_ms),
+       do: value |> max(min_ms) |> min(max_ms)
+
+  defp normalize_reconnect_jitter(value, jitter_ms)
+       when is_integer(value) and is_integer(jitter_ms) and jitter_ms >= 0 do
+    cond do
+      value < -jitter_ms -> -jitter_ms
+      value > jitter_ms -> jitter_ms
+      true -> value
+    end
+  end
+
+  defp normalize_reconnect_jitter(_value, _jitter_ms), do: 0
+
+  defp normalize_non_neg_integer(value, _default)
+       when is_integer(value) and value >= 0,
+       do: value
+
+  defp normalize_non_neg_integer(_value, default), do: default
 
   defp require_source_field(source, key) do
     case Map.get(source, key) do

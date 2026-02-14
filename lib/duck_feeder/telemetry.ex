@@ -76,6 +76,16 @@ defmodule DuckFeeder.Telemetry do
     )
   end
 
+  @spec cdc_backpressure(map(), map()) :: :ok
+  def cdc_backpressure(measurements, metadata \\ %{})
+      when is_map(measurements) and is_map(metadata) do
+    execute(
+      [:cdc, :backpressure],
+      Map.put_new(measurements, :count, 1),
+      metadata
+    )
+  end
+
   @spec reconciler_run({:ok, map()} | {:error, term()}) :: :ok
   def reconciler_run({:ok, summary}) when is_map(summary) do
     execute(

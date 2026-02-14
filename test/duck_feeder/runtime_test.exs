@@ -477,6 +477,41 @@ defmodule DuckFeeder.RuntimeTest do
     Process.exit(cdc_pid, :normal)
   end
 
+  test "start_stream supports reconnect backoff bounds and jitter" do
+    storage = %{provider: :s3, bucket: "bucket", adapter: DuckFeeder.Storage.S3}
+
+    jitter_fun = fn base_ms, jitter_ms ->
+      send(self(), {:fake_reconnect_jitter, base_ms, jitter_ms})
+      -200
+    end
+
+    assert {:ok, %{service_pid: service_pid, cdc_pid: cdc_pid, start_lsn: "0/20"}} =
+             Runtime.start_stream(:meta_conn, "source-a", storage,
+               meta_module: FakeMeta,
+               service_module: FakeService,
+               cdc_module: FakeCDC,
+               connection_options_module: FakeConnectionOptions,
+               bootstrap_replication?: false,
+               reconnect_backoff: 1_000,
+               reconnect_backoff_min_ms: 900,
+               reconnect_backoff_max_ms: 1_100,
+               reconnect_backoff_jitter_ms: 150,
+               reconnect_backoff_jitter_fun: jitter_fun,
+               backpressure_lag_bytes: 2_048,
+               observer_pid: self(),
+               service_name: nil,
+               cdc_name: nil
+             )
+
+    assert_receive {:fake_reconnect_jitter, 1_000, 150}
+    assert_receive {:fake_cdc_start, cdc_opts}
+    assert cdc_opts[:reconnect_backoff] == 900
+    assert cdc_opts[:backpressure_lag_bytes] == 2_048
+
+    GenServer.stop(service_pid)
+    Process.exit(cdc_pid, :normal)
+  end
+
   test "start_stream can bootstrap publication/slot and adjust start lsn" do
     storage = %{provider: :s3, bucket: "bucket", adapter: DuckFeeder.Storage.S3}
 

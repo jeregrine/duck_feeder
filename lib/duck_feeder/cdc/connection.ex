@@ -39,11 +39,16 @@ defmodule DuckFeeder.CDC.Connection do
       :converter_state,
       :status_interval_ms,
       :max_lag_bytes,
+      :backpressure_lag_bytes,
       :status_timer_ref,
+      :last_disconnect_monotonic_ms,
+      :connected_at_monotonic_ms,
       step: :disconnected,
       received_lsn: 0,
       flushed_lsn: 0,
-      applied_lsn: 0
+      applied_lsn: 0,
+      reconnect_count: 0,
+      backpressure_active: false
     ]
 
     @type t :: %__MODULE__{
@@ -56,11 +61,16 @@ defmodule DuckFeeder.CDC.Connection do
             converter_state: term(),
             status_interval_ms: non_neg_integer(),
             max_lag_bytes: non_neg_integer() | nil,
+            backpressure_lag_bytes: non_neg_integer() | nil,
             status_timer_ref: reference() | nil,
+            last_disconnect_monotonic_ms: integer() | nil,
+            connected_at_monotonic_ms: integer() | nil,
             step: :disconnected | :streaming,
             received_lsn: non_neg_integer(),
             flushed_lsn: non_neg_integer(),
-            applied_lsn: non_neg_integer()
+            applied_lsn: non_neg_integer(),
+            reconnect_count: non_neg_integer(),
+            backpressure_active: boolean()
           }
   end
 
@@ -76,6 +86,7 @@ defmodule DuckFeeder.CDC.Connection do
           | {:converter_state, term()}
           | {:status_interval_ms, non_neg_integer()}
           | {:max_lag_bytes, non_neg_integer()}
+          | {:backpressure_lag_bytes, non_neg_integer()}
           | {:auto_reconnect, boolean()}
           | {:reconnect_backoff, non_neg_integer()}
           | {:sync_connect, boolean()}
@@ -123,6 +134,7 @@ defmodule DuckFeeder.CDC.Connection do
 
     status_interval_ms = Keyword.get(opts, :status_interval_ms, 10_000)
     max_lag_bytes = Keyword.get(opts, :max_lag_bytes)
+    backpressure_lag_bytes = Keyword.get(opts, :backpressure_lag_bytes)
 
     {:ok,
      %State{
@@ -135,6 +147,7 @@ defmodule DuckFeeder.CDC.Connection do
        converter_state: converter_state,
        status_interval_ms: status_interval_ms,
        max_lag_bytes: max_lag_bytes,
+       backpressure_lag_bytes: backpressure_lag_bytes,
        received_lsn: start_lsn_int,
        flushed_lsn: start_lsn_int,
        applied_lsn: start_lsn_int
@@ -150,13 +163,29 @@ defmodule DuckFeeder.CDC.Connection do
         state.publication_name
       )
 
+    now_ms = System.monotonic_time(:millisecond)
+
     DuckFeeder.Telemetry.cdc_connection(:stream_starting, %{
       slot_name: state.slot_name,
       publication_name: state.publication_name,
-      start_lsn: state.start_lsn
+      start_lsn: state.start_lsn,
+      reconnect_count: state.reconnect_count
     })
 
-    {:stream, query, [], state |> Map.put(:step, :streaming) |> schedule_status_tick()}
+    if state.reconnect_count > 0 and is_integer(state.last_disconnect_monotonic_ms) do
+      DuckFeeder.Telemetry.cdc_connection(:reconnected, %{
+        slot_name: state.slot_name,
+        publication_name: state.publication_name,
+        reconnect_count: state.reconnect_count,
+        downtime_ms: max(now_ms - state.last_disconnect_monotonic_ms, 0)
+      })
+    end
+
+    {:stream, query, [],
+     state
+     |> Map.put(:step, :streaming)
+     |> Map.put(:connected_at_monotonic_ms, now_ms)
+     |> schedule_status_tick()}
   end
 
   @impl true
@@ -167,9 +196,11 @@ defmodule DuckFeeder.CDC.Connection do
       if reply == 1 do
         DuckFeeder.Telemetry.cdc_frame(:keepalive, :ack_requested, %{wal_end: wal_end})
         state = maybe_advance_flush_from_keepalive(state, wal_end)
+        state = maybe_track_backpressure(state, :keepalive)
         {:noreply, [standby_status_update(state)], state}
       else
         DuckFeeder.Telemetry.cdc_frame(:keepalive, :noop, %{wal_end: wal_end})
+        state = maybe_track_backpressure(state, :keepalive)
         {:noreply, [], state}
       end
     else
@@ -190,6 +221,7 @@ defmodule DuckFeeder.CDC.Connection do
 
         with :ok <- maybe_enforce_lag(state) do
           DuckFeeder.Telemetry.cdc_frame(:xlog, :ignored, %{wal_end: wal_end})
+          state = maybe_track_backpressure(state, :xlog)
           {:noreply, [], state}
         else
           {:error, reason} -> disconnect_with_reason(state, reason)
@@ -209,6 +241,7 @@ defmodule DuckFeeder.CDC.Connection do
             })
 
             {acks, state} = maybe_ack_event(state, event)
+            state = maybe_track_backpressure(state, :xlog)
             {:noreply, acks, state}
           else
             {:error, reason} -> disconnect_with_reason(state, reason)
@@ -247,6 +280,8 @@ defmodule DuckFeeder.CDC.Connection do
       }
     )
 
+    state = maybe_track_backpressure(state, :status_tick)
+
     {:noreply, [standby_status_update(state)], schedule_status_tick(state)}
   end
 
@@ -254,15 +289,32 @@ defmodule DuckFeeder.CDC.Connection do
 
   @impl true
   def handle_disconnect(%State{} = state) do
+    now_ms = System.monotonic_time(:millisecond)
+    reconnect_count = state.reconnect_count + 1
+
     DuckFeeder.Telemetry.cdc_connection(:disconnected, %{
       slot_name: state.slot_name,
       publication_name: state.publication_name,
       applied_lsn: state.applied_lsn,
       lag_bytes: lag_bytes(state),
-      max_lag_bytes: state.max_lag_bytes
+      max_lag_bytes: state.max_lag_bytes,
+      reconnect_count: reconnect_count,
+      uptime_ms:
+        if(is_integer(state.connected_at_monotonic_ms),
+          do: max(now_ms - state.connected_at_monotonic_ms, 0),
+          else: nil
+        )
     })
 
-    {:noreply, state}
+    {:noreply,
+     %{
+       state
+       | reconnect_count: reconnect_count,
+         last_disconnect_monotonic_ms: now_ms,
+         connected_at_monotonic_ms: nil,
+         backpressure_active: false,
+         step: :disconnected
+     }}
   end
 
   defp maybe_ack_event(state, %Event.Commit{end_lsn: end_lsn}) do
@@ -335,13 +387,55 @@ defmodule DuckFeeder.CDC.Connection do
     end
   end
 
+  defp maybe_track_backpressure(%State{backpressure_lag_bytes: nil} = state, _source), do: state
+
+  defp maybe_track_backpressure(
+         %State{backpressure_lag_bytes: threshold, backpressure_active: active?} = state,
+         source
+       )
+       when is_integer(threshold) and threshold >= 0 and is_atom(source) do
+    lag = lag_bytes(state)
+
+    cond do
+      lag >= threshold and not active? ->
+        DuckFeeder.Telemetry.cdc_backpressure(
+          %{lag_bytes: lag, threshold_bytes: threshold},
+          %{
+            status: :entered,
+            source: source,
+            slot_name: state.slot_name,
+            publication_name: state.publication_name
+          }
+        )
+
+        %{state | backpressure_active: true}
+
+      lag < threshold and active? ->
+        DuckFeeder.Telemetry.cdc_backpressure(
+          %{lag_bytes: lag, threshold_bytes: threshold},
+          %{
+            status: :cleared,
+            source: source,
+            slot_name: state.slot_name,
+            publication_name: state.publication_name
+          }
+        )
+
+        %{state | backpressure_active: false}
+
+      true ->
+        state
+    end
+  end
+
   defp disconnect_with_reason(%State{} = state, reason) do
     DuckFeeder.Telemetry.cdc_connection(:disconnecting, %{
       reason: reason,
       slot_name: state.slot_name,
       publication_name: state.publication_name,
       lag_bytes: lag_bytes(state),
-      max_lag_bytes: state.max_lag_bytes
+      max_lag_bytes: state.max_lag_bytes,
+      reconnect_count: state.reconnect_count
     })
 
     {:disconnect, reason}

@@ -59,8 +59,10 @@ This is the single source of truth task list for project status and next work.
   - [x] CDC disconnect telemetry now includes lag/reason context for reconnect tuning (`:disconnecting`, `:disconnected`)
   - [x] runtime bootstrap integration (`DuckFeeder.Runtime.start_stream/4` + `DuckFeeder.CDC.Bootstrap`)
   - [x] reconnect-backoff passthrough for replication startup (`reconnect_backoff`)
+  - [x] reconnect-backoff tuning knobs for runtime startup (`reconnect_backoff_min_ms`, `reconnect_backoff_max_ms`, `reconnect_backoff_jitter_ms`, `reconnect_backoff_jitter_fun`)
   - [x] default reconnect-backoff applied for CDC stream startup (`1_000ms` when unset)
   - [x] max replication lag guard (`max_lag_bytes`)
+  - [x] backpressure threshold instrumentation (`backpressure_lag_bytes` with enter/clear telemetry transitions)
   - [x] configurable CDC event sink mode (`event_sink_mode: :pid | :call`)
   - [x] `DuckFeeder.CDC.Pipeline`
 
@@ -107,6 +109,7 @@ This is the single source of truth task list for project status and next work.
   - [x] telemetry helper module (`DuckFeeder.Telemetry`)
   - [x] CDC event telemetry (`[:duck_feeder, :cdc, :event]`)
   - [x] CDC lag telemetry (`[:duck_feeder, :cdc, :lag]`)
+  - [x] CDC backpressure telemetry (`[:duck_feeder, :cdc, :backpressure]`)
   - [x] batch flush telemetry (`[:duck_feeder, :batch, :flushed]`)
   - [x] batch processed telemetry (`[:duck_feeder, :batch, :processed]`)
 
@@ -218,7 +221,7 @@ using DuckLake SQLLogicTests as inspiration for metadata/write-path coverage.
    - expand provider-backed S3/GCS from storage roundtrips into broader runtime/commit matrix coverage
 
 2. **Replication client hardening (phase 2)**
-   - reconnect policy tuning and richer backpressure instrumentation/alerts
+   - reconnect policy tuning refinements and reconnect/backpressure alerting policy
 
 3. **Parquet writer hardening (phase 2)**
    - add more precise typing for temporal/decimal-like fields where practical
