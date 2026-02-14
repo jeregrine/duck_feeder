@@ -173,6 +173,7 @@ defmodule DuckFeeder.RuntimeStreamIntegrationTest do
 
     assert result.status in [:committed, :already_committed]
     assert batch.row_count == 1
+    assert [%{_op: "I", _record: %{"id" => "1", "name" => "duck"}}] = batch.rows
 
     assert {:ok, checkpoint} = Meta.fetch_checkpoint(meta_conn, designated_table_id)
     assert checkpoint != "0/0"
@@ -288,13 +289,21 @@ defmodule DuckFeeder.RuntimeStreamIntegrationTest do
         "');",
         "SELECT count(*) AS row_count FROM dl.main.",
         trace_table,
-        ";"
+        ";",
+        "COPY (",
+        "SELECT _op, _record FROM dl.main.",
+        trace_table,
+        " ORDER BY _op",
+        ") TO STDOUT (FORMAT CSV, HEADER);"
       ]
       |> IO.iodata_to_binary()
 
     assert {duckdb_output, 0} = System.cmd("duckdb", ["-c", ducklake_sql], stderr_to_stdout: true)
     assert duckdb_output =~ "row_count"
     assert duckdb_output =~ "1"
+    assert duckdb_output =~ "_op,_record"
+    assert duckdb_output =~ "I,"
+    assert duckdb_output =~ "goose"
 
     GenServer.stop(cdc_pid)
     GenServer.stop(service_pid)
