@@ -371,8 +371,14 @@ config :duck_feeder, :integration,
   gcs_storage: nil
 ```
 
-Optional provider-backed storage integration tests can be enabled via env vars read by
-`config/test.exs`:
+Optional provider-backed storage integration tests are tagged `:provider_integration`
+and excluded by default. Run them with:
+
+```bash
+mix test --only provider_integration
+```
+
+They can be enabled via env vars read by `config/test.exs`:
 
 - S3-compatible:
   - `DUCK_FEEDER_ITEST_S3_BUCKET`

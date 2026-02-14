@@ -1,1 +1,1 @@
-ExUnit.start()
+ExUnit.start(exclude: [provider_integration: true])

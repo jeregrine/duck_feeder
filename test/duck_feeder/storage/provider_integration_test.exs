@@ -3,14 +3,14 @@ defmodule DuckFeeder.Storage.ProviderIntegrationTest do
 
   alias DuckFeeder.Storage
 
-  @moduletag :integration
+  @moduletag :provider_integration
 
   @integration_config Application.compile_env(:duck_feeder, :integration, [])
   @s3_storage Keyword.get(@integration_config, :s3_storage)
   @gcs_storage Keyword.get(@integration_config, :gcs_storage)
 
-  @tag skip: if(is_map(@s3_storage), do: false, else: "configure DUCK_FEEDER_ITEST_S3_* env vars")
   test "s3 provider roundtrip put/head/delete" do
+    assert is_map(@s3_storage), "configure DUCK_FEEDER_ITEST_S3_* env vars"
     key = "duck_feeder/provider_itest/s3_#{System.unique_integer([:positive])}.txt"
     path = write_temp_file("s3-provider-itest")
 
@@ -26,9 +26,8 @@ defmodule DuckFeeder.Storage.ProviderIntegrationTest do
     File.rm(path)
   end
 
-  @tag skip:
-         if(is_map(@gcs_storage), do: false, else: "configure DUCK_FEEDER_ITEST_GCS_* env vars")
   test "gcs provider roundtrip put/head/delete" do
+    assert is_map(@gcs_storage), "configure DUCK_FEEDER_ITEST_GCS_* env vars"
     key = "duck_feeder/provider_itest/gcs_#{System.unique_integer([:positive])}.txt"
     path = write_temp_file("gcs-provider-itest")
 
