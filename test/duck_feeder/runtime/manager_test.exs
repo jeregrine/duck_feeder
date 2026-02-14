@@ -70,6 +70,28 @@ defmodule DuckFeeder.Runtime.ManagerTest do
     refute Map.has_key?(Manager.list_sources(manager), "source_a")
   end
 
+  test "can start source again after runtime process exits" do
+    {:ok, manager} =
+      Manager.start_link(
+        meta_conn: :meta,
+        storage_config: %{provider: :s3, bucket: "bucket"},
+        runtime_supervisor_module: FakeRuntimeSupervisor,
+        base_opts: [observer_pid: self()]
+      )
+
+    assert {:ok, source_pid_1} = Manager.start_source(manager, "source_a")
+    assert_receive {:fake_runtime_supervisor_start, _}
+
+    Process.exit(source_pid_1, :kill)
+    Process.sleep(50)
+
+    assert {:ok, source_pid_2} = Manager.start_source(manager, "source_a")
+    assert_receive {:fake_runtime_supervisor_start, _}
+
+    refute source_pid_1 == source_pid_2
+    assert Manager.list_sources(manager)["source_a"] == source_pid_2
+  end
+
   test "propagates runtime startup errors" do
     {:ok, manager} =
       Manager.start_link(

@@ -130,6 +130,83 @@ defmodule DuckFeeder.BootstrapTest do
     assert start_opts[:meta_module] == FakeMeta
   end
 
+  test "supports explicit table selection and target remapping from Elixir opts" do
+    config = %{
+      source: %{
+        postgres_url: "postgres://source",
+        slot_name: "duck_slot",
+        publication_name: "duck_pub",
+        designated_tables: [
+          %{
+            source_schema: "public",
+            source_table: "users",
+            target_schema: "raw",
+            target_table: "users",
+            mode: "cdc_changelog",
+            primary_keys: ["id"]
+          },
+          %{
+            source_schema: "public",
+            source_table: "orders",
+            target_schema: "raw",
+            target_table: "orders",
+            mode: "cdc_changelog",
+            primary_keys: ["id"]
+          }
+        ]
+      },
+      storage: %{
+        provider: :s3,
+        bucket: "bucket",
+        access_key_id: "key",
+        secret_access_key: "secret"
+      },
+      metadata: %{postgres_url: "postgres://meta"}
+    }
+
+    assert {:ok, %{source_id: 10, source_name: "source-a"}} =
+             Bootstrap.seed_meta(:meta_conn, config,
+               meta_module: FakeMeta,
+               source_name: "source-a",
+               tables: [
+                 "users",
+                 {"orders_iceberg", "orders"}
+               ]
+             )
+
+    assert_received {:meta_register_designated_table, users_attrs}
+    assert users_attrs.source_table == "users"
+    assert users_attrs.target_table == "users"
+
+    assert_received {:meta_register_designated_table, orders_attrs}
+    assert orders_attrs.source_table == "orders"
+    assert orders_attrs.target_table == "orders_iceberg"
+  end
+
+  test "returns error for invalid table selection opts" do
+    config = %{
+      source: %{
+        postgres_url: "postgres://source",
+        slot_name: "duck_slot",
+        publication_name: "duck_pub",
+        designated_tables: []
+      },
+      storage: %{
+        provider: :s3,
+        bucket: "bucket",
+        access_key_id: "key",
+        secret_access_key: "secret"
+      },
+      metadata: %{postgres_url: "postgres://meta"}
+    }
+
+    assert {:error, {:invalid_table_selection, 123}} =
+             Bootstrap.seed_meta(:meta_conn, config,
+               meta_module: FakeMeta,
+               tables: [123]
+             )
+  end
+
   test "returns errors when designated table registration fails" do
     config = %{
       source: %{

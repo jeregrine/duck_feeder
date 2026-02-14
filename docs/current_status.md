@@ -19,6 +19,8 @@ This tracks progress against `docs/plan_compact.md`.
   - [x] idempotent `commit_uploaded_batch/2` checkpoint advancement
   - [x] config-driven metadata seeding helper (`DuckFeeder.Bootstrap.seed_meta/3`)
   - [x] seed-and-start convenience (`DuckFeeder.Bootstrap.seed_and_start_stream/3`)
+  - [x] explicit Elixir table-selection for seeding (`seed_meta/3` `tables:` option)
+  - [x] per-table target remapping (`{"target_table", "source_table"}` selection form)
 
 - [x] **CDC foundations**
   - [x] `DuckFeeder.CDC.Event`
@@ -68,6 +70,7 @@ This tracks progress against `docs/plan_compact.md`.
   - [x] `DuckFeeder.Runtime.StreamWorker` managed stream lifecycle wrapper
   - [x] `DuckFeeder.Runtime.Supervisor` stream+reconciler lifecycle wrapper
   - [x] `DuckFeeder.Runtime.Manager` dynamic multi-source runtime manager
+  - [x] runtime restart behavior coverage (stream worker restart on child failure, manager re-start after source exit)
   - [x] existing-app supervision integration runbook (`docs/existing_app_supervision.md`)
   - [x] existing-app runtime child-spec helpers (`DuckFeeder.Integration`)
 
@@ -89,6 +92,8 @@ This tracks progress against `docs/plan_compact.md`.
   - [x] integration test file for meta store (test-config-gated)
   - [x] integration test file for CDC connection stream (test-config-gated)
   - [x] integration test file for runtime start_stream end-to-end flow (test-config-gated)
+  - [x] tracer-shot assertions include row-level values and parquet type checks via DuckDB
+  - [x] failure-injection integration scenario for reconcile cleanup (`failed` -> `pending` + file deletion)
   - [x] helper script for integration runs (local pg + duckdb prerequisites)
 
 - [x] **Third-party license compliance (ElectricSQL LSN reference)**
@@ -115,34 +120,20 @@ This tracks progress against `docs/plan_compact.md`.
 
 ## Next steps (soft plan)
 
-1. **Stabilize tracer-shot E2E gate**
-   - keep `mix test --only integration` green as a release gate
-   - add value-level assertions (not only row counts) on DuckDB DuckLake reads
-
-2. **Parquet typing hardening**
-   - improve scalar type fidelity (int/float/bool/timestamp) in parquet output
-   - keep safe fallback behavior for mixed or ambiguous columns
-
-3. **DuckLake metadata maturation**
+1. **DuckLake metadata maturation**
    - incrementally align metadata writes toward fuller DuckLake spec coverage
    - preserve current ingest path while expanding snapshot/history/table metadata depth
 
-4. **Recovery/reconcile hardening**
-   - add failure-injection integration scenarios (write/upload/commit boundaries)
-   - verify orphan cleanup and state convergence under retries
+2. **Parquet writer hardening (phase 2)**
+   - add more precise typing for temporal/decimal-like fields where practical
+   - tune performance and compatibility across DuckDB/object-store readers
 
-5. **Runtime reliability tuning**
-   - tune reconnect/backoff/lag guard defaults under sustained load
-   - add long-run restart/reconnect behavior tests
+3. **Recovery/reconcile hardening (phase 2)**
+   - add orphan-detection integration cases and larger-batch cleanup safety checks
 
-6. **Developer ergonomics**
-   - keep `config/test.exs` as the default integration harness config surface
-   - document local Postgres logical-replication prerequisites clearly in README
-
-7. **Explicit table-selection config/API**
-   - add a clear Elixir-first table registration surface ("sync these tables")
-   - support per-table mapping from Postgres source table to DuckLake target table
-   - document parity goals with tools that provide table-creation/sync helpers (e.g. Moonlink-style workflows)
+4. **Full integration matrix expansion**
+   - extend local integration beyond postgres/localfs to provider-backed S3/GCS paths
+   - keep `mix test --only integration` as the required release gate
 
 ## Local test status
 

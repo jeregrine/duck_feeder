@@ -21,6 +21,18 @@ You can seed `duckfeeder_meta` source + designated table rows from runtime confi
 {:ok, %{source_id: _id, designated_table_ids: _ids}} =
   DuckFeeder.seed_meta(meta_conn, validated, source_name: "primary")
 
+# Optional: select exactly which tables to sync from Elixir opts
+# - "users" keeps default users->users mapping
+# - {"orders_iceberg", "orders"} remaps source orders -> target orders_iceberg
+{:ok, _} =
+  DuckFeeder.seed_meta(meta_conn, validated,
+    source_name: "primary",
+    tables: [
+      "users",
+      {"orders_iceberg", "orders"}
+    ]
+  )
+
 # Convenience: seed metadata and immediately start stream runtime
 {:ok, %{runtime: %{service_pid: _service, cdc_pid: _cdc}}} =
   DuckFeeder.seed_and_start_stream(meta_conn, validated,
@@ -110,7 +122,7 @@ Optional snapshot-before-stream mode is available via:
 
 Replication connection tuning options include:
 - `auto_reconnect: true | false`
-- `reconnect_backoff: milliseconds`
+- `reconnect_backoff: milliseconds` (defaults to `1000` when unset)
 - `max_lag_bytes: non_neg_integer()` (disconnect guard for unacked lag growth)
 - `event_sink_mode: :pid | :call` (default `:pid`)
 
@@ -256,8 +268,17 @@ Requirements:
 - local Postgres instances available for:
   - metadata DB (`meta_database_url`)
   - source DB with logical replication enabled (`source_database_url`)
+- source DB must support logical replication (`wal_level=logical`, replication slot/publication privileges)
 - `duckdb` CLI on PATH
 - integration DB URLs configured in `config/test.exs` under `:duck_feeder, :integration`
+
+Example `config/test.exs`:
+
+```elixir
+config :duck_feeder, :integration,
+  meta_database_url: "postgres://postgres:postgres@localhost:5432/duck_feeder_meta_test",
+  source_database_url: "postgres://postgres:postgres@localhost:5432/duck_feeder_source_test"
+```
 
 Helper script:
 - `scripts/test_integration.sh`
