@@ -294,6 +294,11 @@ defmodule DuckFeeder.RuntimeStreamIntegrationTest do
         "SELECT _op, _record FROM dl.main.",
         trace_table,
         " ORDER BY _op",
+        ") TO STDOUT (FORMAT CSV, HEADER);",
+        "COPY (",
+        "SELECT typeof(_xid) AS xid_type, typeof(_op) AS op_type FROM dl.main.",
+        trace_table,
+        " LIMIT 1",
         ") TO STDOUT (FORMAT CSV, HEADER);"
       ]
       |> IO.iodata_to_binary()
@@ -304,6 +309,8 @@ defmodule DuckFeeder.RuntimeStreamIntegrationTest do
     assert duckdb_output =~ "_op,_record"
     assert duckdb_output =~ "I,"
     assert duckdb_output =~ "goose"
+    assert duckdb_output =~ "xid_type,op_type"
+    assert duckdb_output =~ "BIGINT,VARCHAR"
 
     GenServer.stop(cdc_pid)
     GenServer.stop(service_pid)
