@@ -371,6 +371,17 @@ config :duck_feeder, :integration,
   gcs_storage: nil
 ```
 
+Ecto-based demo integration (typical B2B SaaS schemas/writes) is available under
+`test/duck_feeder/ecto_integration`, tagged `:ecto_integration`, and excluded by default.
+Run it with:
+
+```bash
+mix test --only ecto_integration
+```
+
+It uses ADBC with DuckDB (no Elixir DuckDB client package), and exercises insert/update/delete
+through Ecto schemas before verifying produced parquet files through ADBC queries.
+
 Optional provider-backed storage integration tests are tagged `:provider_integration`
 and excluded by default. Run them with:
 

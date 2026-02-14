@@ -25,6 +25,8 @@ defmodule DuckFeeder.MixProject do
       {:postgrex, "~> 0.20"},
       {:nimble_options, "~> 1.1"},
       {:rustler, "~> 0.36", runtime: false},
+      {:ecto_sql, "~> 3.12", only: :test},
+      {:adbc, "~> 0.8", only: :test},
       {:benchee, "~> 1.3", only: :dev, runtime: false}
     ]
   end

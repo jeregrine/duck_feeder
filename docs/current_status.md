@@ -147,6 +147,7 @@ This is the single source of truth task list for project status and next work.
   - [x] failure-injection integration scenario for reconcile cleanup (`failed` -> `pending` + file deletion)
   - [x] strict failed-cleanup integration scenario for missing file metadata (`require_failed_batch_files?`)
   - [x] optional provider-backed storage integration roundtrips (S3-compatible + GCS, env-gated)
+  - [x] Ecto demo integration for B2B SaaS-style schemas/writes (insert/update/delete) with ADBC DuckDB parquet verification (`:ecto_integration` tag)
   - [x] baseline Benchee suite (single-writer CDC tx benchmarks + multi-writer append-stream benchmarks)
   - [x] helper script for integration runs (local pg + duckdb prerequisites)
 
