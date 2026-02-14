@@ -95,6 +95,26 @@ Runtime/service startup accepts `committer_module` and `committer_opts` passthro
 {:ok, result} = DuckFeeder.process_batch(context, {"raw", "users"}, batch)
 ```
 
+## Append event stream pipeline (non-CDC producers)
+
+`DuckFeeder.AppendStream` reuses the same batching/writer/upload/commit flow for
+non-CDC event producers (e.g. `:telemetry`, logs, error streams), keyed by target
+table name.
+
+```elixir
+{:ok, stream} =
+  DuckFeeder.start_append_stream(
+    designated_tables: [%{id: 1, target_schema: "raw", target_table: "events"}],
+    meta_conn: meta_conn,
+    storage: storage_config,
+    writer: %{format: :parquet},
+    pipeline_opts: %{max_rows: 5_000, max_bytes: 64 * 1_024 * 1_024, flush_interval_ms: 2_000}
+  )
+
+:ok = DuckFeeder.append_event(stream, "events", %{"kind" => "telemetry", "value" => 1})
+{:ok, _batch} = DuckFeeder.flush_append_table(stream, "events")
+```
+
 ## Runtime service wiring
 
 `DuckFeeder.Runtime` builds and starts `DuckFeeder.Service` using metadata rows.

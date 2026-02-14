@@ -37,6 +37,14 @@ defmodule DuckFeeder do
   defdelegate start_stream(meta_conn, source_name, storage_config, opts \\ []),
     to: DuckFeeder.Runtime
 
+  defdelegate start_append_stream(opts), to: DuckFeeder.AppendStream, as: :start_link
+
+  defdelegate append_event(server, table, row, opts \\ []),
+    to: DuckFeeder.AppendStream,
+    as: :append
+
+  defdelegate flush_append_table(server, table), to: DuckFeeder.AppendStream, as: :flush_table
+
   defdelegate start_stream_worker(opts), to: DuckFeeder.Runtime.StreamWorker, as: :start_link
   defdelegate stream_worker_info(server), to: DuckFeeder.Runtime.StreamWorker, as: :stream_info
   defdelegate start_runtime_supervisor(opts), to: DuckFeeder.Runtime.Supervisor, as: :start_link

@@ -55,6 +55,7 @@ This is the single source of truth task list for project status and next work.
   - [x] `DuckFeeder.Ingest.BatchBuffer`
   - [x] `DuckFeeder.TablePipeline`
   - [x] `DuckFeeder.Ingest` orchestrator
+  - [x] `DuckFeeder.AppendStream` generic append-event batching pipeline (table-name keyed)
 
 - [x] **Write/upload/commit orchestration foundation**
   - [x] `DuckFeeder.Writer` adapter interface
@@ -118,6 +119,7 @@ This is the single source of truth task list for project status and next work.
 
 - [ ] **Replication client hardening** (bootstrap lifecycle, reconnect policy tuning, backpressure/metrics)
 - [ ] **Production initial snapshot + WAL handoff path** (direct ingest integration + replay validation)
+- [ ] **Append event stream integrations** (`:telemetry`/Logger/error adapters over `DuckFeeder.AppendStream`)
 - [ ] **Parquet writer hardening** (type fidelity, performance tuning, and compatibility validation)
 - [ ] **DuckLake metadata SQL commit phase 2** (delete-file flows, file/column stats richness, schema-evolution conflict semantics, compaction-oriented metadata)
 - [ ] **Advanced recovery/reconciler loop** (orphan detection, policy tuning, large-scale cleanup safety)
