@@ -371,6 +371,34 @@ defmodule DuckFeeder.DuckLake.SQL do
     AND delete_file.end_snapshot IS NULL
   """
 
+  @schedule_files_for_deletion_sql """
+  WITH table_ref AS (
+    SELECT batches.designated_table_id AS table_id
+    FROM duckfeeder_meta.batches batches
+    WHERE batches.batch_id = $1
+  ),
+  target_files AS (
+    SELECT unnest($2::bigint[]) AS data_file_id
+  )
+  INSERT INTO ducklake_metadata.ducklake_files_scheduled_for_deletion
+    (data_file_id, path, path_is_relative, schedule_start)
+  SELECT
+    data_file.data_file_id,
+    data_file.path,
+    data_file.path_is_relative,
+    now()
+  FROM ducklake_metadata.ducklake_data_file data_file
+  JOIN table_ref ON data_file.table_id = table_ref.table_id
+  JOIN target_files ON target_files.data_file_id = data_file.data_file_id
+  WHERE data_file.end_snapshot IS NOT NULL
+    AND NOT EXISTS (
+      SELECT 1
+      FROM ducklake_metadata.ducklake_files_scheduled_for_deletion scheduled
+      WHERE scheduled.data_file_id = data_file.data_file_id
+        AND scheduled.path = data_file.path
+    )
+  """
+
   @upsert_table_stats_sql """
   INSERT INTO ducklake_metadata.ducklake_table_stats
     (table_id, record_count, next_row_id, file_size_bytes)
@@ -471,20 +499,61 @@ defmodule DuckFeeder.DuckLake.SQL do
     LIMIT 1
   ),
   table_ref AS (
-    SELECT batches.designated_table_id AS table_id
+    SELECT
+      batches.designated_table_id AS table_id,
+      designated_tables.target_table AS table_name
     FROM duckfeeder_meta.batches batches
+    JOIN duckfeeder_meta.designated_tables designated_tables
+      ON designated_tables.id = batches.designated_table_id
     WHERE batches.batch_id = $1
+  ),
+  derived AS (
+    SELECT
+      CASE
+        WHEN EXISTS (
+          SELECT 1
+          FROM ducklake_metadata.ducklake_table table_entry
+          WHERE table_entry.table_id = table_ref.table_id
+            AND table_entry.begin_snapshot = current_snapshot.snapshot_id
+        ) THEN
+          'created_table:' || '"' || replace(table_ref.table_name, '"', '""') || '"'
+      END AS created_change,
+      CASE
+        WHEN EXISTS (
+          SELECT 1
+          FROM ducklake_metadata.ducklake_column col
+          WHERE col.table_id = table_ref.table_id
+            AND col.begin_snapshot = current_snapshot.snapshot_id
+        )
+        AND NOT EXISTS (
+          SELECT 1
+          FROM ducklake_metadata.ducklake_table table_entry
+          WHERE table_entry.table_id = table_ref.table_id
+            AND table_entry.begin_snapshot = current_snapshot.snapshot_id
+        ) THEN
+          'altered_table:' || table_ref.table_id::text
+      END AS altered_change
+    FROM current_snapshot
+    JOIN table_ref ON true
   )
   INSERT INTO ducklake_metadata.ducklake_snapshot_changes
     (snapshot_id, changes_made, author, commit_message, commit_extra_info)
   SELECT
     current_snapshot.snapshot_id,
-    replace($2::varchar, '{table_id}', table_ref.table_id::text),
+    trim(
+      BOTH ',' FROM concat_ws(
+        ',',
+        NULLIF(replace($2::varchar, '{table_id}', table_ref.table_id::text), ''),
+        derived.created_change,
+        derived.altered_change
+      )
+    ),
     'duck_feeder',
     'cdc commit ' || $1,
     NULL
   FROM current_snapshot
   JOIN table_ref ON true
+  JOIN derived ON true
   ON CONFLICT (snapshot_id) DO UPDATE SET
     changes_made = EXCLUDED.changes_made,
     author = EXCLUDED.author,
@@ -706,7 +775,8 @@ defmodule DuckFeeder.DuckLake.SQL do
   defp maybe_retire_data_files_statements(batch_id, replaced_data_file_ids) do
     [
       {@retire_data_files_sql, [batch_id, replaced_data_file_ids]},
-      {@retire_delete_files_sql, [batch_id, replaced_data_file_ids]}
+      {@retire_delete_files_sql, [batch_id, replaced_data_file_ids]},
+      {@schedule_files_for_deletion_sql, [batch_id, replaced_data_file_ids]}
     ]
   end
 

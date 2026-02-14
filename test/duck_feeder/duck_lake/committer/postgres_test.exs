@@ -220,6 +220,10 @@ defmodule DuckFeeder.DuckLake.Committer.PostgresTest do
     assert Enum.any?(queries, fn {sql, _} ->
              sql =~ "UPDATE ducklake_metadata.ducklake_delete_file"
            end)
+
+    assert Enum.any?(queries, fn {sql, _} ->
+             sql =~ "INSERT INTO ducklake_metadata.ducklake_files_scheduled_for_deletion"
+           end)
   end
 
   test "returns error for invalid statement shape" do

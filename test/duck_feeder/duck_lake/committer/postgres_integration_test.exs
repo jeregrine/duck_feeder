@@ -153,6 +153,125 @@ defmodule DuckFeeder.DuckLake.Committer.PostgresIntegrationTest do
 
     assert changes_made =~ "compacted_table:#{designated_table_id}"
     refute changes_made =~ "deleted_from_table:#{designated_table_id}"
+
+    assert {:ok, %{rows: [[scheduled_file_id, scheduled_path, scheduled_relative]]}} =
+             Postgrex.query(
+               meta_conn,
+               """
+               SELECT data_file_id, path, path_is_relative
+               FROM ducklake_metadata.ducklake_files_scheduled_for_deletion
+               WHERE data_file_id = $1
+               LIMIT 1
+               """,
+               [first_data_file_id]
+             )
+
+    assert scheduled_file_id == first_data_file_id
+    assert scheduled_path == "raw/#{target_table}/data-1.parquet"
+    assert scheduled_relative == true
+  end
+
+  test "snapshot changes include created_table and altered_table markers for schema evolution", %{
+    meta_conn: meta_conn
+  } do
+    unique =
+      "#{System.system_time(:microsecond)}_#{System.unique_integer([:positive, :monotonic])}"
+
+    source_name = "ducklake_schema_source_#{unique}"
+    target_table = "ducklake_schema_table_#{unique}"
+
+    assert {:ok, source_id} =
+             Meta.register_source(meta_conn, %{
+               name: source_name,
+               connection_info: %{"dsn" => "schema://local"},
+               slot_name: "slot_schema_#{unique}",
+               publication_name: "pub_schema_#{unique}",
+               status: "active"
+             })
+
+    assert {:ok, designated_table_id} =
+             Meta.register_designated_table(meta_conn, %{
+               source_id: source_id,
+               source_schema: "public",
+               source_table: "events",
+               target_schema: "raw",
+               target_table: target_table,
+               mode: "cdc_changelog"
+             })
+
+    batch_1_id = "batch_schema_1_#{unique}"
+    assert :ok = insert_uploaded_batch(meta_conn, batch_1_id, designated_table_id, "0/10", "0/10")
+
+    assert {:ok, %{batch_id: ^batch_1_id, committed?: true}} =
+             Postgres.commit_batch(meta_conn, batch_1_id,
+               object_key: "raw/#{target_table}/schema-1.parquet",
+               write_result: %{row_count: 1, file_size_bytes: 50},
+               batch: %{rows: [%{"kind" => "first", "value" => 1}]}
+             )
+
+    assert {:ok, %{rows: [[first_changes]]}} =
+             Postgrex.query(
+               meta_conn,
+               """
+               SELECT changes_made
+               FROM ducklake_metadata.ducklake_snapshot_changes
+               ORDER BY snapshot_id DESC
+               LIMIT 1
+               """,
+               []
+             )
+
+    assert first_changes =~ ~s(created_table:"#{target_table}")
+
+    assert {:ok, %{rows: [[schema_version_after_first]]}} =
+             Postgrex.query(
+               meta_conn,
+               """
+               SELECT schema_version
+               FROM ducklake_metadata.ducklake_snapshot
+               ORDER BY snapshot_id DESC
+               LIMIT 1
+               """,
+               []
+             )
+
+    batch_2_id = "batch_schema_2_#{unique}"
+    assert :ok = insert_uploaded_batch(meta_conn, batch_2_id, designated_table_id, "0/11", "0/11")
+
+    assert {:ok, %{batch_id: ^batch_2_id, committed?: true}} =
+             Postgres.commit_batch(meta_conn, batch_2_id,
+               object_key: "raw/#{target_table}/schema-2.parquet",
+               write_result: %{row_count: 1, file_size_bytes: 50},
+               batch: %{rows: [%{"kind" => "second", "value" => 2, "extra" => "new-column"}]}
+             )
+
+    assert {:ok, %{rows: [[second_changes]]}} =
+             Postgrex.query(
+               meta_conn,
+               """
+               SELECT changes_made
+               FROM ducklake_metadata.ducklake_snapshot_changes
+               ORDER BY snapshot_id DESC
+               LIMIT 1
+               """,
+               []
+             )
+
+    assert second_changes =~ "altered_table:#{designated_table_id}"
+
+    assert {:ok, %{rows: [[schema_version_after_second]]}} =
+             Postgrex.query(
+               meta_conn,
+               """
+               SELECT schema_version
+               FROM ducklake_metadata.ducklake_snapshot
+               ORDER BY snapshot_id DESC
+               LIMIT 1
+               """,
+               []
+             )
+
+    assert schema_version_after_second > schema_version_after_first
   end
 
   defp insert_uploaded_batch(meta_conn, batch_id, designated_table_id, lsn_start, lsn_end) do

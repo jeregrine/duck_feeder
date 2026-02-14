@@ -45,6 +45,14 @@ defmodule DuckFeeder.DuckLake.SQLTest do
              sql =~ "INSERT INTO ducklake_metadata.ducklake_snapshot_changes"
            end)
 
+    {snapshot_changes_sql, _} =
+      Enum.find(statements, fn {sql, _params} ->
+        sql =~ "INSERT INTO ducklake_metadata.ducklake_snapshot_changes"
+      end)
+
+    assert snapshot_changes_sql =~ "created_table:"
+    assert snapshot_changes_sql =~ "altered_table:"
+
     assert Enum.any?(statements, fn {sql, _params} ->
              sql =~ "INSERT INTO duckfeeder_meta.schema_history"
            end)
@@ -99,6 +107,10 @@ defmodule DuckFeeder.DuckLake.SQLTest do
 
     assert Enum.any?(statements, fn {sql, _params} ->
              sql =~ "UPDATE ducklake_metadata.ducklake_delete_file"
+           end)
+
+    assert Enum.any?(statements, fn {sql, _params} ->
+             sql =~ "INSERT INTO ducklake_metadata.ducklake_files_scheduled_for_deletion"
            end)
 
     {snapshot_sql, snapshot_params} =

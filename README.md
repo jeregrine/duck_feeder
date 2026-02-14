@@ -91,6 +91,9 @@ history/audit rows in `duckfeeder_meta.schema_history` and `duckfeeder_meta.duck
 It also supports optional delete-file/compaction transitions via `committer_opts`:
 `:delete_files`, `:delete_files_fun`, `:replace_data_file_ids`, and
 `:validate_delete_files?` (for storage `head_object` verification).
+Replacement flows also mark retired files in
+`ducklake_files_scheduled_for_deletion`, and snapshot summaries include
+`created_table`/`altered_table` conflict hints.
 (override via `committer_opts[:ducklake_sql]`).
 Runtime/service startup accepts `committer_module` and `committer_opts` passthrough.
 
