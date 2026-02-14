@@ -53,7 +53,7 @@ defmodule DuckFeeder.DuckLake.SQL do
     now(),
     CASE WHEN has_new.changed THEN latest.schema_version + 1 ELSE latest.schema_version END,
     latest.next_catalog_id,
-    latest.next_file_id + 1
+    latest.next_file_id + $3::bigint
   FROM latest, has_new
   """
 
@@ -248,7 +248,7 @@ defmodule DuckFeeder.DuckLake.SQL do
       mapping_id
     )
   SELECT
-    current_snapshot.next_file_id - 1,
+    current_snapshot.next_file_id - ($5::bigint + 1),
     table_ref.table_id,
     current_snapshot.snapshot_id,
     NULL,
@@ -269,6 +269,106 @@ defmodule DuckFeeder.DuckLake.SQL do
   LEFT JOIN ducklake_metadata.ducklake_table_stats table_stats
     ON table_stats.table_id = table_ref.table_id
   ON CONFLICT (data_file_id) DO NOTHING
+  """
+
+  @insert_delete_file_sql """
+  WITH current_snapshot AS (
+    SELECT snapshot_id, next_file_id
+    FROM ducklake_metadata.ducklake_snapshot
+    ORDER BY snapshot_id DESC
+    LIMIT 1
+  ),
+  table_ref AS (
+    SELECT batches.designated_table_id AS table_id
+    FROM duckfeeder_meta.batches batches
+    WHERE batches.batch_id = $1
+  ),
+  fallback_data_file AS (
+    SELECT data_file.data_file_id
+    FROM ducklake_metadata.ducklake_data_file data_file
+    JOIN table_ref ON data_file.table_id = table_ref.table_id
+    WHERE data_file.end_snapshot IS NULL
+    ORDER BY data_file.begin_snapshot DESC, data_file.data_file_id DESC
+    LIMIT 1
+  )
+  INSERT INTO ducklake_metadata.ducklake_delete_file
+    (
+      delete_file_id,
+      table_id,
+      begin_snapshot,
+      end_snapshot,
+      data_file_id,
+      path,
+      path_is_relative,
+      format,
+      delete_count,
+      file_size_bytes,
+      footer_size,
+      encryption_key
+    )
+  SELECT
+    current_snapshot.next_file_id - $3::bigint + ($4::bigint - 1),
+    table_ref.table_id,
+    current_snapshot.snapshot_id,
+    NULL,
+    COALESCE($5::bigint, (SELECT data_file_id FROM fallback_data_file)),
+    $2::varchar,
+    $6::boolean,
+    $7::varchar,
+    $8::bigint,
+    $9::bigint,
+    $10::bigint,
+    $11::varchar
+  FROM current_snapshot
+  JOIN table_ref ON true
+  WHERE COALESCE($5::bigint, (SELECT data_file_id FROM fallback_data_file)) IS NOT NULL
+  ON CONFLICT (delete_file_id) DO NOTHING
+  """
+
+  @retire_data_files_sql """
+  WITH current_snapshot AS (
+    SELECT snapshot_id
+    FROM ducklake_metadata.ducklake_snapshot
+    ORDER BY snapshot_id DESC
+    LIMIT 1
+  ),
+  table_ref AS (
+    SELECT batches.designated_table_id AS table_id
+    FROM duckfeeder_meta.batches batches
+    WHERE batches.batch_id = $1
+  ),
+  target_files AS (
+    SELECT unnest($2::bigint[]) AS data_file_id
+  )
+  UPDATE ducklake_metadata.ducklake_data_file data_file
+  SET end_snapshot = current_snapshot.snapshot_id
+  FROM current_snapshot, table_ref, target_files
+  WHERE data_file.data_file_id = target_files.data_file_id
+    AND data_file.table_id = table_ref.table_id
+    AND data_file.end_snapshot IS NULL
+  """
+
+  @retire_delete_files_sql """
+  WITH current_snapshot AS (
+    SELECT snapshot_id
+    FROM ducklake_metadata.ducklake_snapshot
+    ORDER BY snapshot_id DESC
+    LIMIT 1
+  ),
+  table_ref AS (
+    SELECT batches.designated_table_id AS table_id
+    FROM duckfeeder_meta.batches batches
+    WHERE batches.batch_id = $1
+  ),
+  target_files AS (
+    SELECT unnest($2::bigint[]) AS data_file_id
+  )
+  UPDATE ducklake_metadata.ducklake_delete_file delete_file
+  SET end_snapshot = current_snapshot.snapshot_id
+  FROM current_snapshot, table_ref, target_files
+  WHERE delete_file.data_file_id = target_files.data_file_id
+    AND delete_file.table_id = table_ref.table_id
+    AND delete_file.end_snapshot IS NULL
   """
 
   @upsert_table_stats_sql """
@@ -337,7 +437,7 @@ defmodule DuckFeeder.DuckLake.SQL do
   INSERT INTO ducklake_metadata.ducklake_file_column_stats
     (data_file_id, table_id, column_id, column_size_bytes, value_count, null_count, min_value, max_value, contains_nan, extra_stats)
   SELECT
-    current_snapshot.next_file_id - 1,
+    current_snapshot.next_file_id - ($8::bigint + 1),
     table_ref.table_id,
     col.column_id,
     NULL,
@@ -379,7 +479,7 @@ defmodule DuckFeeder.DuckLake.SQL do
     (snapshot_id, changes_made, author, commit_message, commit_extra_info)
   SELECT
     current_snapshot.snapshot_id,
-    'inserted_into_table:' || table_ref.table_id::text,
+    replace($2::varchar, '{table_id}', table_ref.table_id::text),
     'duck_feeder',
     'cdc commit ' || $1,
     NULL
@@ -474,16 +574,33 @@ defmodule DuckFeeder.DuckLake.SQL do
     write_result = Keyword.get(opts, :write_result, %{}) |> Map.new()
     include_commit_log? = Keyword.get(opts, :include_commit_log?, true)
     batch = Keyword.get(opts, :batch, %{}) |> Map.new()
+    delete_files = delete_file_descriptors(opts)
+    replaced_data_file_ids = bigint_list(opts, :replace_data_file_ids)
 
     if is_binary(object_key) and object_key != "" do
-      row_count = Map.get(write_result, :row_count, 0)
-      file_size = Map.get(write_result, :file_size_bytes, 0)
+      row_count = normalize_non_neg_integer(Map.get(write_result, :row_count, 0), 0)
+      file_size = normalize_non_neg_integer(Map.get(write_result, :file_size_bytes, 0), 0)
+
+      table_stats_row_delta =
+        normalize_non_neg_integer(Keyword.get(opts, :table_stats_row_delta, row_count), row_count)
+
+      table_stats_file_size_delta =
+        normalize_non_neg_integer(
+          Keyword.get(opts, :table_stats_file_size_delta, file_size),
+          file_size
+        )
+
+      delete_file_count = length(delete_files)
+      file_id_increment = 1 + delete_file_count
 
       column_descriptors = extract_column_descriptors(batch)
       column_names_json = JSON.encode!(Enum.map(column_descriptors, & &1.name))
 
+      snapshot_changes =
+        snapshot_changes(table_stats_row_delta, delete_file_count, replaced_data_file_ids)
+
       [
-        {@insert_snapshot_sql, [batch_id, column_names_json]},
+        {@insert_snapshot_sql, [batch_id, column_names_json, file_id_increment]},
         {@ensure_table_sql, [batch_id]}
       ] ++
         column_statements(batch_id, column_descriptors) ++
@@ -493,13 +610,18 @@ defmodule DuckFeeder.DuckLake.SQL do
         name_mapping_statements(batch_id, column_descriptors) ++
         [
           {@record_schema_version_sql, []},
-          {@insert_data_file_sql, [batch_id, object_key, row_count, file_size]},
-          {@upsert_table_stats_sql, [batch_id, row_count, file_size]}
+          {@insert_data_file_sql, [batch_id, object_key, row_count, file_size, delete_file_count]}
+        ] ++
+        delete_file_statements(batch_id, delete_files) ++
+        maybe_retire_data_files_statements(batch_id, replaced_data_file_ids) ++
+        [
+          {@upsert_table_stats_sql,
+           [batch_id, table_stats_row_delta, table_stats_file_size_delta]}
         ] ++
         table_column_stats_statements(batch_id, column_descriptors) ++
-        file_column_stats_statements(batch_id, column_descriptors) ++
+        file_column_stats_statements(batch_id, column_descriptors, delete_file_count) ++
         [
-          {@insert_snapshot_changes_sql, [batch_id]},
+          {@insert_snapshot_changes_sql, [batch_id, snapshot_changes]},
           {@default_schema_history_sql, [batch_id, object_key, row_count, file_size]}
           | maybe_commit_log_statement(include_commit_log?, [
               batch_id,
@@ -540,7 +662,7 @@ defmodule DuckFeeder.DuckLake.SQL do
     end)
   end
 
-  defp file_column_stats_statements(batch_id, column_descriptors) do
+  defp file_column_stats_statements(batch_id, column_descriptors, delete_file_count) do
     Enum.map(column_descriptors, fn %{name: name, stats: stats} ->
       {@insert_file_column_stats_sql,
        [
@@ -550,10 +672,137 @@ defmodule DuckFeeder.DuckLake.SQL do
          stats.null_count,
          stats.min_value,
          stats.max_value,
-         stats.contains_nan
+         stats.contains_nan,
+         delete_file_count
        ]}
     end)
   end
+
+  defp delete_file_statements(batch_id, delete_files) when is_list(delete_files) do
+    total = length(delete_files)
+
+    delete_files
+    |> Enum.with_index(1)
+    |> Enum.map(fn {delete_file, index} ->
+      {@insert_delete_file_sql,
+       [
+         batch_id,
+         delete_file.path,
+         total,
+         index,
+         delete_file.data_file_id,
+         delete_file.path_is_relative,
+         delete_file.format,
+         delete_file.delete_count,
+         delete_file.file_size_bytes,
+         delete_file.footer_size,
+         delete_file.encryption_key
+       ]}
+    end)
+  end
+
+  defp maybe_retire_data_files_statements(_batch_id, []), do: []
+
+  defp maybe_retire_data_files_statements(batch_id, replaced_data_file_ids) do
+    [
+      {@retire_data_files_sql, [batch_id, replaced_data_file_ids]},
+      {@retire_delete_files_sql, [batch_id, replaced_data_file_ids]}
+    ]
+  end
+
+  defp delete_file_descriptors(opts) do
+    opts
+    |> Keyword.get(:delete_files, [])
+    |> List.wrap()
+    |> Enum.flat_map(fn descriptor ->
+      case normalize_delete_file_descriptor(descriptor) do
+        nil -> []
+        normalized -> [normalized]
+      end
+    end)
+  end
+
+  defp normalize_delete_file_descriptor(%{} = descriptor) do
+    path = descriptor_get(descriptor, :path)
+
+    if is_binary(path) and path != "" do
+      %{
+        path: path,
+        data_file_id: normalize_optional_integer(descriptor_get(descriptor, :data_file_id)),
+        path_is_relative: descriptor_get(descriptor, :path_is_relative, true),
+        format: descriptor_get(descriptor, :format, "parquet") |> to_string(),
+        delete_count: normalize_non_neg_integer(descriptor_get(descriptor, :delete_count, 0), 0),
+        file_size_bytes:
+          normalize_non_neg_integer(descriptor_get(descriptor, :file_size_bytes, 0), 0),
+        footer_size: normalize_non_neg_integer(descriptor_get(descriptor, :footer_size, 0), 0),
+        encryption_key: normalize_optional_string(descriptor_get(descriptor, :encryption_key))
+      }
+    else
+      nil
+    end
+  end
+
+  defp normalize_delete_file_descriptor(_descriptor), do: nil
+
+  defp descriptor_get(map, key, default \\ nil) when is_map(map) and is_atom(key) do
+    Map.get(map, key, Map.get(map, Atom.to_string(key), default))
+  end
+
+  defp bigint_list(opts, key) do
+    opts
+    |> Keyword.get(key, [])
+    |> List.wrap()
+    |> Enum.flat_map(fn id ->
+      case normalize_optional_integer(id) do
+        nil -> []
+        value -> [value]
+      end
+    end)
+    |> Enum.uniq()
+  end
+
+  defp normalize_non_neg_integer(value, _default)
+       when is_integer(value) and value >= 0,
+       do: value
+
+  defp normalize_non_neg_integer(value, default) when is_binary(value) do
+    case Integer.parse(value) do
+      {integer, ""} when integer >= 0 -> integer
+      _ -> default
+    end
+  end
+
+  defp normalize_non_neg_integer(_value, default), do: default
+
+  defp normalize_optional_integer(value) when is_integer(value) and value >= 0, do: value
+
+  defp normalize_optional_integer(value) when is_binary(value) do
+    case Integer.parse(value) do
+      {integer, ""} when integer >= 0 -> integer
+      _ -> nil
+    end
+  end
+
+  defp normalize_optional_integer(_value), do: nil
+
+  defp normalize_optional_string(value) when is_binary(value) and value != "", do: value
+  defp normalize_optional_string(_value), do: nil
+
+  defp snapshot_changes(table_stats_row_delta, delete_file_count, replaced_data_file_ids) do
+    change_parts =
+      []
+      |> maybe_add_change(table_stats_row_delta > 0, "inserted_into_table")
+      |> maybe_add_change(delete_file_count > 0, "deleted_from_table")
+      |> maybe_add_change(replaced_data_file_ids != [], "compacted_table")
+
+    case change_parts do
+      [] -> "inserted_into_table:{table_id}"
+      parts -> Enum.join(parts, ",")
+    end
+  end
+
+  defp maybe_add_change(changes, false, _change), do: changes
+  defp maybe_add_change(changes, true, change), do: changes ++ [change <> ":{table_id}"]
 
   defp extract_column_descriptors(batch) do
     rows = Map.get(batch, :rows, [])

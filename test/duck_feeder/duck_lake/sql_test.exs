@@ -72,6 +72,54 @@ defmodule DuckFeeder.DuckLake.SQLTest do
            end)
   end
 
+  test "adds delete-file and replacement metadata statements when configured" do
+    statements =
+      SQL.commit_statements("batch-1",
+        object_key: "raw/users/file-1.parquet",
+        write_result: %{row_count: 10, file_size_bytes: 1024},
+        batch: %{rows: [%{"id" => 1, "name" => "duck"}]},
+        delete_files: [
+          %{
+            path: "raw/users/file-1-deletes.parquet",
+            data_file_id: 77,
+            delete_count: 3,
+            file_size_bytes: 64
+          }
+        ],
+        replace_data_file_ids: [77, 55]
+      )
+
+    assert Enum.any?(statements, fn {sql, _params} ->
+             sql =~ "INSERT INTO ducklake_metadata.ducklake_delete_file"
+           end)
+
+    assert Enum.any?(statements, fn {sql, _params} ->
+             sql =~ "UPDATE ducklake_metadata.ducklake_data_file"
+           end)
+
+    assert Enum.any?(statements, fn {sql, _params} ->
+             sql =~ "UPDATE ducklake_metadata.ducklake_delete_file"
+           end)
+
+    {snapshot_sql, snapshot_params} =
+      Enum.find(statements, fn {sql, _params} ->
+        sql =~ "INSERT INTO ducklake_metadata.ducklake_snapshot"
+      end)
+
+    assert snapshot_sql =~ "latest.next_file_id + $3::bigint"
+    assert ["batch-1", _column_names_json, 2] = snapshot_params
+
+    {_changes_sql, changes_params} =
+      Enum.find(statements, fn {sql, _params} ->
+        sql =~ "INSERT INTO ducklake_metadata.ducklake_snapshot_changes"
+      end)
+
+    assert ["batch-1", changes_made] = changes_params
+    assert changes_made =~ "inserted_into_table:{table_id}"
+    assert changes_made =~ "deleted_from_table:{table_id}"
+    assert changes_made =~ "compacted_table:{table_id}"
+  end
+
   test "respects custom statement list and function" do
     assert ["SELECT 1"] == SQL.commit_statements("batch-1", ducklake_sql: ["SELECT 1"])
 

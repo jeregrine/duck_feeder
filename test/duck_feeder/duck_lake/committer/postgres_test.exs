@@ -168,6 +168,60 @@ defmodule DuckFeeder.DuckLake.Committer.PostgresTest do
            end)
   end
 
+  test "executes delete-file and replacement metadata SQL when configured" do
+    tx_fun = fn _conn, fun ->
+      try do
+        {:ok, fun.(:tx_conn)}
+      catch
+        {:rollback, reason} -> {:error, reason}
+      end
+    end
+
+    query_fun = fn _conn, sql, params ->
+      send(self(), {:query, sql, params})
+      {:ok, %Postgrex.Result{rows: []}}
+    end
+
+    rollback_fun = fn _conn, reason -> throw({:rollback, reason}) end
+
+    assert {:ok, %{batch_id: "batch-1"}} =
+             Postgres.commit_batch(:meta_conn, "batch-1",
+               meta_module: FakeMeta,
+               transaction_fun: tx_fun,
+               query_fun: query_fun,
+               rollback_fun: rollback_fun,
+               object_key: "raw/users/file-1.parquet",
+               write_result: %{row_count: 10, file_size_bytes: 99},
+               batch: %{rows: [%{"id" => 1, "name" => "duck"}]},
+               delete_files: [
+                 %{path: "raw/users/file-1-deletes.parquet", data_file_id: 77, delete_count: 1}
+               ],
+               replace_data_file_ids: [77]
+             )
+
+    queries =
+      Stream.repeatedly(fn ->
+        receive do
+          {:query, sql, params} -> {sql, params}
+        after
+          10 -> :done
+        end
+      end)
+      |> Enum.take_while(&(&1 != :done))
+
+    assert Enum.any?(queries, fn {sql, _} ->
+             sql =~ "INSERT INTO ducklake_metadata.ducklake_delete_file"
+           end)
+
+    assert Enum.any?(queries, fn {sql, _} ->
+             sql =~ "UPDATE ducklake_metadata.ducklake_data_file"
+           end)
+
+    assert Enum.any?(queries, fn {sql, _} ->
+             sql =~ "UPDATE ducklake_metadata.ducklake_delete_file"
+           end)
+  end
+
   test "returns error for invalid statement shape" do
     tx_fun = fn _conn, fun ->
       try do
