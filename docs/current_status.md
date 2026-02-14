@@ -56,6 +56,7 @@ This is the single source of truth task list for project status and next work.
   - [x] `DuckFeeder.CDC.Connection` (`Postgrex.ReplicationConnection` stream client)
   - [x] replication setup hardening for bootstrap races (duplicate publication/slot create treated as `:exists`)
   - [x] replication slot lifecycle validation (existing slot type/plugin checks in `ensure_slot`)
+  - [x] CDC disconnect telemetry now includes lag/reason context for reconnect tuning (`:disconnecting`, `:disconnected`)
   - [x] runtime bootstrap integration (`DuckFeeder.Runtime.start_stream/4` + `DuckFeeder.CDC.Bootstrap`)
   - [x] reconnect-backoff passthrough for replication startup (`reconnect_backoff`)
   - [x] default reconnect-backoff applied for CDC stream startup (`1_000ms` when unset)
@@ -146,6 +147,7 @@ This is the single source of truth task list for project status and next work.
   - [x] failure-injection integration scenario for reconcile cleanup (`failed` -> `pending` + file deletion)
   - [x] strict failed-cleanup integration scenario for missing file metadata (`require_failed_batch_files?`)
   - [x] optional provider-backed storage integration roundtrips (S3-compatible + GCS, env-gated)
+  - [x] baseline Benchee suite (single-writer CDC tx benchmarks + multi-writer append-stream benchmarks)
   - [x] helper script for integration runs (local pg + duckdb prerequisites)
 
 - [x] **Third-party license compliance (ElectricSQL LSN reference)**
@@ -163,7 +165,6 @@ This is the single source of truth task list for project status and next work.
 ## Remaining to reach target architecture
 
 - [ ] **Full integration suite** (Postgres + S3 + GCS + metadata DB)
-- [ ] **Benchee performance benchmarks** (single-writer CDC throughput + multi-writer append-stream latency/memory pressure)
 - [ ] **Replication client hardening** (bootstrap lifecycle, reconnect policy tuning, backpressure/metrics)
 - [ ] **Parquet writer hardening** (type fidelity, performance tuning, and compatibility validation)
 - [ ] **Advanced recovery/reconciler loop** (orphan detection, policy tuning, large-scale cleanup safety)
@@ -213,33 +214,28 @@ using DuckLake SQLLogicTests as inspiration for metadata/write-path coverage.
 
 1. **Full integration suite expansion**
    - keep local filesystem-backed integration as the primary gate now
-   - add provider-backed S3/GCS matrix after core semantics are stable
+   - expand provider-backed S3/GCS from storage roundtrips into broader runtime/commit matrix coverage
 
-2. **Benchee performance suite**
-   - single-writer benchmark: high-volume Postgres CDC path (batch throughput, flush latency)
-   - multi-writer benchmark: concurrent append-stream producers (analytics/logs/errors/telemetry)
-   - capture memory pressure + latency percentiles to guide batching defaults
+2. **Replication client hardening (phase 2)**
+   - reconnect policy tuning and richer backpressure instrumentation/alerts
 
-3. **Replication client hardening (phase 2)**
-   - bootstrap lifecycle edge cases, reconnect policy tuning, and backpressure instrumentation
-
-4. **Parquet writer hardening (phase 2)**
+3. **Parquet writer hardening (phase 2)**
    - add more precise typing for temporal/decimal-like fields where practical
    - tune performance and compatibility across DuckDB/object-store readers
    - prefer Elixir-side normalization/casting for temporal values to keep Rust deps minimal
 
-5. **Recovery/reconcile hardening (phase 2)**
+4. **Recovery/reconcile hardening (phase 2)**
    - add orphan-detection integration cases and larger-batch cleanup safety checks
 
-6. **Append event stream integrations**
+5. **Append event stream integrations**
    - implement `:telemetry` / Logger / error adapters over `DuckFeeder.AppendStream`
 
-7. **DuckLake metadata maturation (phase 2, deep-parity)**
+6. **DuckLake metadata maturation (phase 2, deep-parity)**
    - expand from ingest-writer subset to full DuckLake nested parent/child field-tree semantics
    - extend conflict/concurrency matrix toward DuckLake extension breadth
    - complete compaction policy/tiered maintenance hardening and related integration assertions
 
-8. **Dependency footprint minimization (Elixir + Rust)**
+7. **Dependency footprint minimization (Elixir + Rust)**
    - keep runtime deps minimal and avoid heavy crates unless required
    - bias toward Elixir-side transforms over Rust parsing when both are viable
 

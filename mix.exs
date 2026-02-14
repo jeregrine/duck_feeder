@@ -24,7 +24,8 @@ defmodule DuckFeeder.MixProject do
       {:req, "~> 0.5"},
       {:postgrex, "~> 0.20"},
       {:nimble_options, "~> 1.1"},
-      {:rustler, "~> 0.36", runtime: false}
+      {:rustler, "~> 0.36", runtime: false},
+      {:benchee, "~> 1.3", only: :dev, runtime: false}
     ]
   end
 end

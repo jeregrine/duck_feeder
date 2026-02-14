@@ -394,6 +394,27 @@ Run:
 scripts/test_integration.sh
 ```
 
+## Performance benchmarking (Benchee)
+
+Run synthetic benchmarks for ingest-path throughput/latency:
+
+```bash
+mix deps.get
+mix run bench/cdc_single_writer.exs
+mix run bench/append_stream_multi_writer.exs
+```
+
+Quick smoke mode:
+
+```bash
+DUCK_FEEDER_BENCH_QUICK=1 mix run bench/cdc_single_writer.exs
+DUCK_FEEDER_BENCH_QUICK=1 mix run bench/append_stream_multi_writer.exs
+```
+
+Notes:
+- These benchmarks use in-memory fake meta/storage/writer components to stress pipeline mechanics.
+- They are intended for regression tracking and relative tuning, not absolute production sizing.
+
 ## Telemetry
 
 Core events currently emitted:
