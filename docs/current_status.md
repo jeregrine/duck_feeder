@@ -146,10 +146,54 @@ This is the single source of truth task list for project status and next work.
 - [ ] **Advanced recovery/reconciler loop** (orphan detection, policy tuning, large-scale cleanup safety)
 - [ ] **Append event stream integrations** (`:telemetry`/Logger/error adapters over `DuckFeeder.AppendStream`)
 
+## DuckLake write-path parity checklist (reference: `/tmp/ducklake/test/sql`)
+
+Scope note: this checklist compares **write semantics only** (not read/query planner behavior),
+using DuckLake SQLLogicTests as inspiration for metadata/write-path coverage.
+
+- [x] **Top-level schema evolution directives** (`rename_table`, `rename_column`, `drop_column`, `alter_column_type`)
+  - Status: **covered**
+  - Our tests: `test/duck_feeder/duck_lake/committer/postgres_integration_test.exs`, `sql_test.exs`, `postgres_test.exs`
+
+- [ ] **Nested-field schema evolution** (struct/list/map field add/rename/drop/type)
+  - Status: **missing**
+  - DuckLake inspiration: `alter/struct_*`, `alter/add_column_nested.test`, `alter/drop_column_nested.test`
+  - Planned tests: new integration cases under `test/duck_feeder/duck_lake/committer/postgres_integration_test.exs`
+
+- [ ] **Delete/replacement lifecycle semantics** (delete files, end_snapshot transitions, scheduled cleanup)
+  - Status: **partial-to-strong** (core flows covered; broad edge matrix still open)
+  - Covered: delete metadata, physical delete-file production, replacement retirement, scheduled deletion rows
+  - Gaps: larger edge matrix (multi-step chains, policy-heavy cleanup behavior)
+
+- [ ] **Compaction maintenance semantics** (expire snapshots, cleanup policies, rewrite/merge file workflows)
+  - Status: **partial**
+  - Covered: replacement scheduling baseline (`ducklake_files_scheduled_for_deletion`)
+  - Missing: policy/tiered/limit/global-option matrix comparable to DuckLake `compaction/*`
+
+- [ ] **Transaction conflict/concurrency write semantics**
+  - Status: **partial**
+  - Covered: some conflict guards for schema directives
+  - Missing: broader concurrent/conflict scenarios inspired by `transaction/*`, `concurrent/*`
+
+- [ ] **Add-files style compatibility matrix** (missing/extra columns, type-check variants, nested compatibility)
+  - Status: **partial**
+  - Covered: baseline metadata commit + schema-change directives
+  - Missing: richer compatibility matrix inspired by `add_files/*`
+
+- [ ] **Partition-aware write metadata semantics**
+  - Status: **missing**
+  - Missing coverage for partition metadata tables and partition-specific write/delete interactions
+
+- [ ] **Stats robustness matrix**
+  - Status: **partial**
+  - Covered: table/file column stats writes and basic assertions
+  - Missing: broader stress/edge cases inspired by DuckLake `stats/*`
+
 ## Next steps (soft plan)
 
 1. **DuckLake metadata maturation (phase 2)**
-   - extend schema-evolution semantics to nested fields and tighten remaining conflict-rule edge cases
+   - implement nested-field schema evolution semantics and tests
+   - expand conflict/concurrency matrix for schema + replacement operations
    - complete compaction-oriented metadata maintenance hardening and related integration assertions
 
 2. **Full integration suite expansion**
