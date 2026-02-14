@@ -93,7 +93,7 @@ This is the single source of truth task list for project status and next work.
   - [x] integration test file for meta store (test-config-gated)
   - [x] integration test file for CDC connection stream (test-config-gated)
   - [x] integration test file for runtime start_stream end-to-end flow (test-config-gated)
-  - [x] tracer-shot assertions include row-level values and parquet type checks via DuckDB
+  - [x] tracer-shot assertions include row-level values, parquet type checks, and DuckLake metadata row verification
   - [x] failure-injection integration scenario for reconcile cleanup (`failed` -> `pending` + file deletion)
   - [x] helper script for integration runs (local pg + duckdb prerequisites)
 

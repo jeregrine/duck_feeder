@@ -286,6 +286,38 @@ defmodule DuckFeeder.RuntimeStreamIntegrationTest do
 
     assert commit_count >= 1
 
+    assert {:ok, %{rows: [[ducklake_object_key, ducklake_file_size, ducklake_row_count]]}} =
+             Postgrex.query(
+               meta_conn,
+               """
+               SELECT data_file.object_key, data_file.file_size, data_file.row_count
+               FROM ducklake_metadata.ducklake_data_file data_file
+               JOIN ducklake_metadata.ducklake_snapshot snapshot
+                 ON snapshot.id = data_file.snapshot_id
+               WHERE snapshot.table_id = $1
+               ORDER BY data_file.id DESC
+               LIMIT 1
+               """,
+               [designated_table_id]
+             )
+
+    assert ducklake_object_key == object_key
+    assert ducklake_file_size > 0
+    assert ducklake_row_count == 1
+
+    assert {:ok, %{rows: [[stats_row_count]]}} =
+             Postgrex.query(
+               meta_conn,
+               """
+               SELECT row_count
+               FROM ducklake_metadata.ducklake_table_stats
+               WHERE table_id = $1
+               """,
+               [designated_table_id]
+             )
+
+    assert stats_row_count >= 1
+
     trace_schema = "ducklake_trace_#{designated_table_id}"
     trace_catalog = "metadata_trace_#{designated_table_id}"
     trace_table = "users_trace_#{designated_table_id}"
