@@ -1,6 +1,14 @@
 defmodule DuckFeeder.Postgrex.Extensions.PgLsn do
   @moduledoc false
 
+  # Reference implementation source (Apache-2.0):
+  # https://github.com/electric-sql/electric
+  # packages/sync-service/lib/pg_interop/postgrex/extensions/pg_lsn.ex
+  #
+  # Modifications in DuckFeeder:
+  # - decode returns DuckFeeder LSN string format
+  # - encode accepts either LSN string or parsed integer WAL offset
+
   use Postgrex.BinaryExtension, send: "pg_lsn_send"
   import Postgrex.BinaryUtils, warn: false
 

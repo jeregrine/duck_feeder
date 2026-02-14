@@ -282,6 +282,11 @@ Core events currently emitted:
 
 See `docs/current_status.md` for implemented modules vs remaining target architecture work.
 
+## Third-party licensing notes
+
+See `docs/third_party_licenses.md` for Apache-2.0 attribution/compliance notes for
+referenced ElectricSQL LSN extension patterns.
+
 For embedding DuckFeeder in an existing OTP app, see:
 - `docs/existing_app_supervision.md`
 

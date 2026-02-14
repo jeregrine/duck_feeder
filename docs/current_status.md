@@ -85,10 +85,23 @@ This tracks progress against `docs/plan_compact.md`.
 
 - [x] **Test harness foundations**
   - [x] unit tests for all current modules
-  - [x] integration test file for meta store (env-gated)
-  - [x] integration test file for CDC connection stream (env-gated)
-  - [x] integration test file for runtime start_stream end-to-end flow (env-gated)
+  - [x] integration test file for meta store (test-config-gated)
+  - [x] integration test file for CDC connection stream (test-config-gated)
+  - [x] integration test file for runtime start_stream end-to-end flow (test-config-gated)
   - [x] helper script for integration runs (local pg + duckdb prerequisites)
+
+- [x] **Third-party license compliance (ElectricSQL LSN reference)**
+  - [x] added source attribution + modification notes in `lib/duck_feeder/postgrex/extensions/pg_lsn.ex`
+  - [x] vendored Apache-2.0 text at `third_party/electric/LICENSE`
+  - [x] documented compliance notes in `docs/third_party_licenses.md`
+  - [x] linked third-party licensing notes from `README.md`
+
+## Ongoing Apache-2.0 obligations (ElectricSQL LSN-derived code)
+
+- Keep attribution/modification comments in `lib/duck_feeder/postgrex/extensions/pg_lsn.ex`.
+- Keep Apache-2.0 license text in `third_party/electric/LICENSE` in redistributions.
+- If additional ElectricSQL code is copied/adapted, document file-level provenance in `docs/third_party_licenses.md`.
+- If upstream adds a NOTICE file and we distribute covered code, include applicable NOTICE content.
 
 ## Remaining to reach target architecture
 
@@ -98,6 +111,32 @@ This tracks progress against `docs/plan_compact.md`.
 - [ ] **Full DuckLake metadata SQL commit implementation** (table metadata/stats/history beyond snapshot+file append path)
 - [ ] **Advanced recovery/reconciler loop** (orphan detection, policy tuning, large-scale cleanup safety)
 - [ ] **Full integration suite** (Postgres + S3 + GCS + metadata DB)
+
+## Next steps (soft plan)
+
+1. **Stabilize tracer-shot E2E gate**
+   - keep `mix test --only integration` green as a release gate
+   - add value-level assertions (not only row counts) on DuckDB DuckLake reads
+
+2. **Parquet typing hardening**
+   - improve scalar type fidelity (int/float/bool/timestamp) in parquet output
+   - keep safe fallback behavior for mixed or ambiguous columns
+
+3. **DuckLake metadata maturation**
+   - incrementally align metadata writes toward fuller DuckLake spec coverage
+   - preserve current ingest path while expanding snapshot/history/table metadata depth
+
+4. **Recovery/reconcile hardening**
+   - add failure-injection integration scenarios (write/upload/commit boundaries)
+   - verify orphan cleanup and state convergence under retries
+
+5. **Runtime reliability tuning**
+   - tune reconnect/backoff/lag guard defaults under sustained load
+   - add long-run restart/reconnect behavior tests
+
+6. **Developer ergonomics**
+   - keep `config/test.exs` as the default integration harness config surface
+   - document local Postgres logical-replication prerequisites clearly in README
 
 ## Local test status
 
