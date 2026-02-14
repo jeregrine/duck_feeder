@@ -382,8 +382,12 @@ mix test --only ecto_integration
 It uses ADBC with DuckDB (no Elixir DuckDB client package), and exercises insert/update/delete
 through Ecto schemas before verifying produced parquet files through ADBC queries.
 
-Optional provider-backed storage integration tests are tagged `:provider_integration`
-and excluded by default. Run them with:
+Optional provider-backed integration tests are tagged `:provider_integration`
+and excluded by default. They currently cover:
+- direct storage adapter roundtrips (put/head/delete)
+- append-stream end-to-end write/upload/commit path against provider storage
+
+Run them with:
 
 ```bash
 mix test --only provider_integration
