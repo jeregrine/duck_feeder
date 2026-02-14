@@ -152,6 +152,7 @@ This is the single source of truth task list for project status and next work.
   - [x] optional provider-backed storage integration roundtrips (S3-compatible + GCS, env-gated)
   - [x] optional provider-backed append-stream end-to-end commit path checks (S3-compatible + GCS, env-gated)
   - [x] optional provider-backed runtime CDC end-to-end commit path checks (S3-compatible + GCS, env-gated)
+  - [x] optional provider-backed runtime snapshot-handoff recovery checks (pending -> explicit resume -> WAL continuation; S3-compatible + GCS, env-gated)
   - [x] Ecto demo integration for B2B SaaS-style schemas/writes (insert/update/delete) with ADBC DuckDB parquet verification (`:ecto_integration` tag)
   - [x] baseline Benchee suite (single-writer CDC tx benchmarks + multi-writer append-stream benchmarks)
   - [x] helper script for integration runs (local pg + duckdb prerequisites)
@@ -220,7 +221,7 @@ using DuckLake SQLLogicTests as inspiration for metadata/write-path coverage.
 
 1. **Full integration suite expansion**
    - keep local filesystem-backed integration as the primary gate now
-   - expand provider-backed S3/GCS into deeper matrix scenarios (restart/recovery/failure semantics) now that storage + append-stream + runtime CDC paths are covered
+   - expand provider-backed S3/GCS into deeper failure/reconcile semantics now that storage + append-stream + runtime CDC + snapshot-recovery paths are covered
 
 2. **Replication client hardening (phase 2)**
    - reconnect policy tuning refinements and reconnect/backpressure alerting policy
