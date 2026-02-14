@@ -274,6 +274,151 @@ defmodule DuckFeeder.DuckLake.Committer.PostgresIntegrationTest do
     assert schema_version_after_second > schema_version_after_first
   end
 
+  test "schema_changes supports rename/drop/type-change metadata updates", %{meta_conn: meta_conn} do
+    unique =
+      "#{System.system_time(:microsecond)}_#{System.unique_integer([:positive, :monotonic])}"
+
+    source_name = "ducklake_schema_change_source_#{unique}"
+    target_table = "ducklake_schema_change_table_#{unique}"
+
+    assert {:ok, source_id} =
+             Meta.register_source(meta_conn, %{
+               name: source_name,
+               connection_info: %{"dsn" => "schema-change://local"},
+               slot_name: "slot_schema_change_#{unique}",
+               publication_name: "pub_schema_change_#{unique}",
+               status: "active"
+             })
+
+    assert {:ok, designated_table_id} =
+             Meta.register_designated_table(meta_conn, %{
+               source_id: source_id,
+               source_schema: "public",
+               source_table: "events",
+               target_schema: "raw",
+               target_table: target_table,
+               mode: "cdc_changelog"
+             })
+
+    batch_1_id = "batch_schema_change_1_#{unique}"
+
+    assert :ok =
+             insert_uploaded_batch(meta_conn, batch_1_id, designated_table_id, "0/20", "0/20")
+
+    assert {:ok, %{batch_id: ^batch_1_id, committed?: true}} =
+             Postgres.commit_batch(meta_conn, batch_1_id,
+               object_key: "raw/#{target_table}/schema-change-1.parquet",
+               write_result: %{row_count: 1, file_size_bytes: 60},
+               batch: %{rows: [%{"kind" => "first", "value" => 1, "legacy" => "x"}]}
+             )
+
+    batch_2_id = "batch_schema_change_2_#{unique}"
+
+    assert :ok =
+             insert_uploaded_batch(meta_conn, batch_2_id, designated_table_id, "0/21", "0/21")
+
+    assert {:ok, %{batch_id: ^batch_2_id, committed?: true}} =
+             Postgres.commit_batch(meta_conn, batch_2_id,
+               object_key: "raw/#{target_table}/schema-change-2.parquet",
+               write_result: %{row_count: 1, file_size_bytes: 65},
+               batch: %{rows: [%{"kind" => "second", "value" => 2}]},
+               schema_changes: [
+                 %{op: :rename_column, from: "kind", to: "event_kind"},
+                 %{op: :drop_column, column: "legacy"},
+                 %{op: :alter_column_type, column: "value", type: "DOUBLE"}
+               ]
+             )
+
+    assert {:ok, %{rows: [[kind_active_count]]}} =
+             Postgrex.query(
+               meta_conn,
+               """
+               SELECT count(*)
+               FROM ducklake_metadata.ducklake_column
+               WHERE table_id = $1
+                 AND column_name = 'kind'
+                 AND end_snapshot IS NULL
+               """,
+               [designated_table_id]
+             )
+
+    assert kind_active_count == 0
+
+    assert {:ok, %{rows: [[event_kind_active_count]]}} =
+             Postgrex.query(
+               meta_conn,
+               """
+               SELECT count(*)
+               FROM ducklake_metadata.ducklake_column
+               WHERE table_id = $1
+                 AND column_name = 'event_kind'
+                 AND end_snapshot IS NULL
+               """,
+               [designated_table_id]
+             )
+
+    assert event_kind_active_count == 1
+
+    assert {:ok, %{rows: [[legacy_active_count]]}} =
+             Postgrex.query(
+               meta_conn,
+               """
+               SELECT count(*)
+               FROM ducklake_metadata.ducklake_column
+               WHERE table_id = $1
+                 AND column_name = 'legacy'
+                 AND end_snapshot IS NULL
+               """,
+               [designated_table_id]
+             )
+
+    assert legacy_active_count == 0
+
+    assert {:ok, %{rows: [[value_type]]}} =
+             Postgrex.query(
+               meta_conn,
+               """
+               SELECT column_type
+               FROM ducklake_metadata.ducklake_column
+               WHERE table_id = $1
+                 AND column_name = 'value'
+                 AND end_snapshot IS NULL
+               LIMIT 1
+               """,
+               [designated_table_id]
+             )
+
+    assert value_type == "DOUBLE"
+
+    assert {:ok, %{rows: [[name_mapping_count]]}} =
+             Postgrex.query(
+               meta_conn,
+               """
+               SELECT count(*)
+               FROM ducklake_metadata.ducklake_name_mapping
+               WHERE mapping_id = $1
+                 AND source_name = 'event_kind'
+               """,
+               [designated_table_id]
+             )
+
+    assert name_mapping_count == 1
+
+    assert {:ok, %{rows: [[changes_made]]}} =
+             Postgrex.query(
+               meta_conn,
+               """
+               SELECT changes_made
+               FROM ducklake_metadata.ducklake_snapshot_changes
+               ORDER BY snapshot_id DESC
+               LIMIT 1
+               """,
+               []
+             )
+
+    assert changes_made =~ "altered_table:#{designated_table_id}"
+  end
+
   defp insert_uploaded_batch(meta_conn, batch_id, designated_table_id, lsn_start, lsn_end) do
     with {:ok, _} <-
            Meta.insert_batch(meta_conn, %{

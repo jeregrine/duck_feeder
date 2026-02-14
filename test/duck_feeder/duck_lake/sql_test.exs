@@ -119,7 +119,7 @@ defmodule DuckFeeder.DuckLake.SQLTest do
       end)
 
     assert snapshot_sql =~ "latest.next_file_id + $3::bigint"
-    assert ["batch-1", _column_names_json, 2] = snapshot_params
+    assert ["batch-1", _column_names, 2, false] = snapshot_params
 
     {_changes_sql, changes_params} =
       Enum.find(statements, fn {sql, _params} ->
@@ -130,6 +130,47 @@ defmodule DuckFeeder.DuckLake.SQLTest do
     assert changes_made =~ "inserted_into_table:{table_id}"
     assert changes_made =~ "deleted_from_table:{table_id}"
     assert changes_made =~ "compacted_table:{table_id}"
+  end
+
+  test "adds schema-change statements and forces schema version bump" do
+    statements =
+      SQL.commit_statements("batch-1",
+        object_key: "raw/users/file-1.parquet",
+        write_result: %{row_count: 1, file_size_bytes: 10},
+        batch: %{rows: [%{"value" => 1}]},
+        schema_changes: [
+          %{op: :alter_column_type, column: "value", type: "double"},
+          %{op: :drop_column, column: "legacy"},
+          %{op: :rename_column, from: "value", to: "metric"}
+        ]
+      )
+
+    assert Enum.any?(statements, fn {sql, _params} ->
+             sql =~ "UPDATE ducklake_metadata.ducklake_column col" and sql =~ "SET column_type ="
+           end)
+
+    assert Enum.any?(statements, fn {sql, _params} ->
+             sql =~ "UPDATE ducklake_metadata.ducklake_column col" and sql =~ "SET end_snapshot ="
+           end)
+
+    assert Enum.any?(statements, fn {sql, _params} ->
+             sql =~ "UPDATE ducklake_metadata.ducklake_name_mapping" and sql =~ "SET source_name"
+           end)
+
+    {snapshot_sql, snapshot_params} =
+      Enum.find(statements, fn {sql, _params} ->
+        sql =~ "INSERT INTO ducklake_metadata.ducklake_snapshot"
+      end)
+
+    assert snapshot_sql =~ "OR $4::boolean"
+    assert ["batch-1", _column_names, 1, true] = snapshot_params
+
+    {_changes_sql, ["batch-1", changes_made]} =
+      Enum.find(statements, fn {sql, _params} ->
+        sql =~ "INSERT INTO ducklake_metadata.ducklake_snapshot_changes"
+      end)
+
+    assert changes_made =~ "altered_table:{table_id}"
   end
 
   test "respects custom statement list and function" do

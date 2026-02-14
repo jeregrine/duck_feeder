@@ -51,7 +51,7 @@ defmodule DuckFeeder.DuckLake.SQL do
   SELECT
     latest.snapshot_id + 1,
     now(),
-    CASE WHEN has_new.changed THEN latest.schema_version + 1 ELSE latest.schema_version END,
+    CASE WHEN has_new.changed OR $4::boolean THEN latest.schema_version + 1 ELSE latest.schema_version END,
     latest.next_catalog_id,
     latest.next_file_id + $3::bigint
   FROM latest, has_new
@@ -190,6 +190,95 @@ defmodule DuckFeeder.DuckLake.SQL do
       AND name_mapping.source_name = $2::varchar
       AND COALESCE(name_mapping.parent_column, -1) = -1
   )
+  """
+
+  @schema_change_rename_column_sql """
+  WITH table_ref AS (
+    SELECT batches.designated_table_id AS table_id
+    FROM duckfeeder_meta.batches batches
+    WHERE batches.batch_id = $1
+  )
+  UPDATE ducklake_metadata.ducklake_column col
+  SET column_name = $3::varchar
+  FROM table_ref
+  WHERE col.table_id = table_ref.table_id
+    AND col.column_name = $2::varchar
+    AND col.end_snapshot IS NULL
+    AND NOT EXISTS (
+      SELECT 1
+      FROM ducklake_metadata.ducklake_column existing
+      WHERE existing.table_id = table_ref.table_id
+        AND existing.column_name = $3::varchar
+        AND existing.end_snapshot IS NULL
+    )
+  """
+
+  @schema_change_rename_mapping_sql """
+  WITH table_ref AS (
+    SELECT batches.designated_table_id AS table_id
+    FROM duckfeeder_meta.batches batches
+    WHERE batches.batch_id = $1
+  )
+  UPDATE ducklake_metadata.ducklake_name_mapping mapping
+  SET source_name = $3::varchar
+  FROM table_ref
+  WHERE mapping.mapping_id = table_ref.table_id
+    AND mapping.source_name = $2::varchar
+    AND COALESCE(mapping.parent_column, -1) = -1
+    AND NOT EXISTS (
+      SELECT 1
+      FROM ducklake_metadata.ducklake_name_mapping existing
+      WHERE existing.mapping_id = table_ref.table_id
+        AND existing.source_name = $3::varchar
+        AND COALESCE(existing.parent_column, -1) = -1
+    )
+  """
+
+  @schema_change_drop_column_sql """
+  WITH current_snapshot AS (
+    SELECT snapshot_id
+    FROM ducklake_metadata.ducklake_snapshot
+    ORDER BY snapshot_id DESC
+    LIMIT 1
+  ),
+  table_ref AS (
+    SELECT batches.designated_table_id AS table_id
+    FROM duckfeeder_meta.batches batches
+    WHERE batches.batch_id = $1
+  )
+  UPDATE ducklake_metadata.ducklake_column col
+  SET end_snapshot = current_snapshot.snapshot_id
+  FROM current_snapshot, table_ref
+  WHERE col.table_id = table_ref.table_id
+    AND col.column_name = $2::varchar
+    AND col.end_snapshot IS NULL
+  """
+
+  @schema_change_drop_mapping_sql """
+  WITH table_ref AS (
+    SELECT batches.designated_table_id AS table_id
+    FROM duckfeeder_meta.batches batches
+    WHERE batches.batch_id = $1
+  )
+  DELETE FROM ducklake_metadata.ducklake_name_mapping mapping
+  USING table_ref
+  WHERE mapping.mapping_id = table_ref.table_id
+    AND mapping.source_name = $2::varchar
+    AND COALESCE(mapping.parent_column, -1) = -1
+  """
+
+  @schema_change_type_sql """
+  WITH table_ref AS (
+    SELECT batches.designated_table_id AS table_id
+    FROM duckfeeder_meta.batches batches
+    WHERE batches.batch_id = $1
+  )
+  UPDATE ducklake_metadata.ducklake_column col
+  SET column_type = $3::varchar
+  FROM table_ref
+  WHERE col.table_id = table_ref.table_id
+    AND col.column_name = $2::varchar
+    AND col.end_snapshot IS NULL
   """
 
   @record_schema_version_sql """
@@ -530,7 +619,8 @@ defmodule DuckFeeder.DuckLake.SQL do
           FROM ducklake_metadata.ducklake_table table_entry
           WHERE table_entry.table_id = table_ref.table_id
             AND table_entry.begin_snapshot = current_snapshot.snapshot_id
-        ) THEN
+        )
+        AND position('altered_table:' in $2::varchar) = 0 THEN
           'altered_table:' || table_ref.table_id::text
       END AS altered_change
     FROM current_snapshot
@@ -645,6 +735,7 @@ defmodule DuckFeeder.DuckLake.SQL do
     batch = Keyword.get(opts, :batch, %{}) |> Map.new()
     delete_files = delete_file_descriptors(opts)
     replaced_data_file_ids = bigint_list(opts, :replace_data_file_ids)
+    schema_changes = schema_change_descriptors(opts)
 
     if is_binary(object_key) and object_key != "" do
       row_count = normalize_non_neg_integer(Map.get(write_result, :row_count, 0), 0)
@@ -660,16 +751,24 @@ defmodule DuckFeeder.DuckLake.SQL do
         )
 
       delete_file_count = length(delete_files)
+      schema_change_count = length(schema_changes)
       file_id_increment = 1 + delete_file_count
 
       column_descriptors = extract_column_descriptors(batch)
       column_names = Enum.map(column_descriptors, & &1.name)
 
       snapshot_changes =
-        snapshot_changes(table_stats_row_delta, delete_file_count, replaced_data_file_ids)
+        snapshot_changes(
+          table_stats_row_delta,
+          delete_file_count,
+          replaced_data_file_ids,
+          schema_change_count
+        )
+
+      force_schema_change? = schema_change_count > 0
 
       [
-        {@insert_snapshot_sql, [batch_id, column_names, file_id_increment]},
+        {@insert_snapshot_sql, [batch_id, column_names, file_id_increment, force_schema_change?]},
         {@ensure_table_sql, [batch_id]}
       ] ++
         column_statements(batch_id, column_descriptors) ++
@@ -677,6 +776,7 @@ defmodule DuckFeeder.DuckLake.SQL do
           {@ensure_mapping_sql, [batch_id]}
         ] ++
         name_mapping_statements(batch_id, column_descriptors) ++
+        schema_change_statements(batch_id, schema_changes) ++
         [
           {@record_schema_version_sql, []},
           {@insert_data_file_sql, [batch_id, object_key, row_count, file_size, delete_file_count]}
@@ -780,6 +880,119 @@ defmodule DuckFeeder.DuckLake.SQL do
     ]
   end
 
+  defp schema_change_statements(batch_id, schema_changes) when is_list(schema_changes) do
+    Enum.flat_map(schema_changes, fn
+      %{op: :rename_column, from: from_name, to: to_name} ->
+        [
+          {@schema_change_rename_column_sql, [batch_id, from_name, to_name]},
+          {@schema_change_rename_mapping_sql, [batch_id, from_name, to_name]}
+        ]
+
+      %{op: :drop_column, column: column_name} ->
+        [
+          {@schema_change_drop_column_sql, [batch_id, column_name]},
+          {@schema_change_drop_mapping_sql, [batch_id, column_name]}
+        ]
+
+      %{op: :alter_column_type, column: column_name, type: column_type} ->
+        [
+          {@schema_change_type_sql, [batch_id, column_name, column_type]}
+        ]
+
+      _ ->
+        []
+    end)
+  end
+
+  defp schema_change_descriptors(opts) do
+    opts
+    |> Keyword.get(:schema_changes, [])
+    |> List.wrap()
+    |> Enum.flat_map(fn descriptor ->
+      case normalize_schema_change_descriptor(descriptor) do
+        nil -> []
+        normalized -> [normalized]
+      end
+    end)
+  end
+
+  defp normalize_schema_change_descriptor(%{} = descriptor) do
+    case normalize_schema_change_op(descriptor_get(descriptor, :op)) do
+      :rename_column ->
+        from_name = normalize_non_empty_string(descriptor_get(descriptor, :from))
+        to_name = normalize_non_empty_string(descriptor_get(descriptor, :to))
+
+        if is_binary(from_name) and is_binary(to_name) do
+          %{op: :rename_column, from: from_name, to: to_name}
+        else
+          nil
+        end
+
+      :drop_column ->
+        column_name = normalize_non_empty_string(descriptor_get(descriptor, :column))
+
+        if is_binary(column_name) do
+          %{op: :drop_column, column: column_name}
+        else
+          nil
+        end
+
+      :alter_column_type ->
+        column_name = normalize_non_empty_string(descriptor_get(descriptor, :column))
+
+        column_type =
+          descriptor_get(descriptor, :type)
+          |> normalize_non_empty_string()
+          |> normalize_column_type()
+
+        if is_binary(column_name) and is_binary(column_type) do
+          %{op: :alter_column_type, column: column_name, type: column_type}
+        else
+          nil
+        end
+
+      _ ->
+        nil
+    end
+  end
+
+  defp normalize_schema_change_descriptor(_descriptor), do: nil
+
+  defp normalize_schema_change_op(value) when is_binary(value) do
+    value
+    |> String.trim()
+    |> String.downcase()
+    |> case do
+      "rename_column" -> :rename_column
+      "drop_column" -> :drop_column
+      "alter_column_type" -> :alter_column_type
+      _ -> nil
+    end
+  end
+
+  defp normalize_schema_change_op(value) when is_atom(value) do
+    value
+    |> Atom.to_string()
+    |> normalize_schema_change_op()
+  end
+
+  defp normalize_schema_change_op(_value), do: nil
+
+  defp normalize_non_empty_string(value) when is_binary(value) do
+    case String.trim(value) do
+      "" -> nil
+      trimmed -> trimmed
+    end
+  end
+
+  defp normalize_non_empty_string(value) when is_atom(value),
+    do: value |> Atom.to_string() |> normalize_non_empty_string()
+
+  defp normalize_non_empty_string(_value), do: nil
+
+  defp normalize_column_type(value) when is_binary(value), do: String.upcase(value)
+  defp normalize_column_type(_value), do: nil
+
   defp delete_file_descriptors(opts) do
     opts
     |> Keyword.get(:delete_files, [])
@@ -858,12 +1071,18 @@ defmodule DuckFeeder.DuckLake.SQL do
   defp normalize_optional_string(value) when is_binary(value) and value != "", do: value
   defp normalize_optional_string(_value), do: nil
 
-  defp snapshot_changes(table_stats_row_delta, delete_file_count, replaced_data_file_ids) do
+  defp snapshot_changes(
+         table_stats_row_delta,
+         delete_file_count,
+         replaced_data_file_ids,
+         schema_change_count
+       ) do
     change_parts =
       []
       |> maybe_add_change(table_stats_row_delta > 0, "inserted_into_table")
       |> maybe_add_change(delete_file_count > 0, "deleted_from_table")
       |> maybe_add_change(replaced_data_file_ids != [], "compacted_table")
+      |> maybe_add_change(schema_change_count > 0, "altered_table")
 
     case change_parts do
       [] -> "inserted_into_table:{table_id}"

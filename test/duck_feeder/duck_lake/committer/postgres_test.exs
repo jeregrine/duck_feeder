@@ -226,6 +226,61 @@ defmodule DuckFeeder.DuckLake.Committer.PostgresTest do
            end)
   end
 
+  test "executes schema-change SQL when configured" do
+    tx_fun = fn _conn, fun ->
+      try do
+        {:ok, fun.(:tx_conn)}
+      catch
+        {:rollback, reason} -> {:error, reason}
+      end
+    end
+
+    query_fun = fn _conn, sql, params ->
+      send(self(), {:query, sql, params})
+      {:ok, %Postgrex.Result{rows: []}}
+    end
+
+    rollback_fun = fn _conn, reason -> throw({:rollback, reason}) end
+
+    assert {:ok, %{batch_id: "batch-1"}} =
+             Postgres.commit_batch(:meta_conn, "batch-1",
+               meta_module: FakeMeta,
+               transaction_fun: tx_fun,
+               query_fun: query_fun,
+               rollback_fun: rollback_fun,
+               object_key: "raw/users/file-1.parquet",
+               write_result: %{row_count: 1, file_size_bytes: 99},
+               batch: %{rows: [%{"value" => 1}]},
+               schema_changes: [
+                 %{op: :rename_column, from: "value", to: "metric"},
+                 %{op: :drop_column, column: "legacy"},
+                 %{op: :alter_column_type, column: "metric", type: "DOUBLE"}
+               ]
+             )
+
+    queries =
+      Stream.repeatedly(fn ->
+        receive do
+          {:query, sql, params} -> {sql, params}
+        after
+          10 -> :done
+        end
+      end)
+      |> Enum.take_while(&(&1 != :done))
+
+    assert Enum.any?(queries, fn {sql, _} ->
+             sql =~ "UPDATE ducklake_metadata.ducklake_column col" and sql =~ "SET column_name ="
+           end)
+
+    assert Enum.any?(queries, fn {sql, _} ->
+             sql =~ "DELETE FROM ducklake_metadata.ducklake_name_mapping"
+           end)
+
+    assert Enum.any?(queries, fn {sql, _} ->
+             sql =~ "SET column_type ="
+           end)
+  end
+
   test "returns error for invalid statement shape" do
     tx_fun = fn _conn, fun ->
       try do

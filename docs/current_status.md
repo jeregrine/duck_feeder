@@ -73,6 +73,7 @@ This is the single source of truth task list for project status and next work.
   - [x] default spec commit path supports optional delete-file metadata + replacement end-snapshot transitions (`ducklake_delete_file`, retire prior `ducklake_data_file`/`ducklake_delete_file` rows)
   - [x] replacement flow now schedules retired data files in `ducklake_files_scheduled_for_deletion`
   - [x] snapshot change summaries include schema-evolution/conflict hints (`created_table`, `altered_table`, plus insert/delete/compact markers)
+  - [x] optional schema-change directives in commit path (`schema_changes`: `rename_column`/`drop_column`/`alter_column_type`)
   - [x] batch processor supports optional physical delete-file production/upload/validation (`committer_opts[:delete_files_fun]` / `committer_opts[:delete_files]` + `validate_delete_files?`)
   - [x] default schema/commit history record (`duckfeeder_meta.schema_history`)
   - [x] default commit-log SQL target (`duckfeeder_meta.ducklake_commits`)
@@ -112,6 +113,7 @@ This is the single source of truth task list for project status and next work.
   - [x] integration coverage for replacement/end-snapshot transitions (retire prior `ducklake_data_file` + `ducklake_delete_file` rows)
   - [x] integration coverage for replacement cleanup scheduling (`ducklake_files_scheduled_for_deletion`)
   - [x] integration coverage for schema-evolution snapshot markers (`created_table`, `altered_table`)
+  - [x] integration coverage for schema-change directives (`rename_column`, `drop_column`, `alter_column_type`)
   - [x] tracer-shot assertions include row-level values, parquet type checks, and DuckLake metadata row verification (spec-table columns)
   - [x] failure-injection integration scenario for reconcile cleanup (`failed` -> `pending` + file deletion)
   - [x] strict failed-cleanup integration scenario for missing file metadata (`require_failed_batch_files?`)
@@ -131,7 +133,7 @@ This is the single source of truth task list for project status and next work.
 
 ## Remaining to reach target architecture
 
-- [ ] **DuckLake metadata SQL commit phase 2** (broader schema-evolution conflict semantics for rename/drop/type changes, compaction-oriented metadata maintenance hardening)
+- [ ] **DuckLake metadata SQL commit phase 2** (history-preserving schema-evolution semantics + stricter conflict validation for rename/drop/type changes, compaction-oriented metadata maintenance hardening)
 - [ ] **Snapshot/WAL handoff hardening** (restart/recovery edge cases, larger snapshot replay validation)
 - [ ] **Full integration suite** (Postgres + S3 + GCS + metadata DB)
 - [ ] **Benchee performance benchmarks** (single-writer CDC throughput + multi-writer append-stream latency/memory pressure)
@@ -143,7 +145,7 @@ This is the single source of truth task list for project status and next work.
 ## Next steps (soft plan)
 
 1. **DuckLake metadata maturation (phase 2)**
-   - extend schema-evolution conflict semantics beyond add-column (`rename/drop/type-change` paths)
+   - evolve schema-change directives to history-preserving semantics + stricter conflict checks (`rename/drop/type-change`)
    - complete compaction-oriented metadata maintenance hardening and related integration assertions
 
 2. **Full integration suite expansion**
