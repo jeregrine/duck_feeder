@@ -95,7 +95,8 @@ Replacement flows also mark retired files in
 `ducklake_files_scheduled_for_deletion`, and snapshot summaries include
 `created_table`/`altered_table` conflict hints.
 Optional `:schema_changes` directives are supported for metadata evolution
-(`rename_column`, `drop_column`, `alter_column_type`).
+(`rename_table`, `rename_column`, `drop_column`, `alter_column_type`).
+(Currently focused on top-level fields/tables.)
 (override via `committer_opts[:ducklake_sql]`).
 Runtime/service startup accepts `committer_module` and `committer_opts` passthrough.
 

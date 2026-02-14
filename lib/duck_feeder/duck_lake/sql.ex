@@ -192,6 +192,117 @@ defmodule DuckFeeder.DuckLake.SQL do
   )
   """
 
+  @schema_change_validate_rename_table_sql """
+  WITH table_ref AS (
+    SELECT batches.designated_table_id AS table_id
+    FROM duckfeeder_meta.batches batches
+    WHERE batches.batch_id = $1
+  ),
+  active_table AS (
+    SELECT table_entry.*
+    FROM ducklake_metadata.ducklake_table table_entry
+    JOIN table_ref ON table_entry.table_id = table_ref.table_id
+    WHERE table_entry.end_snapshot IS NULL
+    ORDER BY table_entry.begin_snapshot DESC
+    LIMIT 1
+  ),
+  checks AS (
+    SELECT
+      EXISTS (SELECT 1 FROM active_table) AS active_exists,
+      EXISTS (
+        SELECT 1
+        FROM active_table
+        WHERE $2::varchar IS NULL OR active_table.table_name = $2::varchar
+      ) AS from_matches,
+      EXISTS (
+        SELECT 1
+        FROM active_table
+        WHERE active_table.table_name = $3::varchar
+      ) AS already_renamed,
+      EXISTS (
+        SELECT 1
+        FROM ducklake_metadata.ducklake_table existing
+        JOIN active_table ON existing.schema_id = active_table.schema_id
+        WHERE existing.table_name = $3::varchar
+          AND existing.end_snapshot IS NULL
+      ) AS to_exists
+  )
+  SELECT 1 /
+    CASE
+      WHEN (SELECT active_exists FROM checks)
+        AND (
+          ((SELECT from_matches FROM checks) AND NOT (SELECT to_exists FROM checks))
+          OR (SELECT already_renamed FROM checks)
+        ) THEN 1
+      ELSE 0
+    END
+  """
+
+  @schema_change_rename_table_close_sql """
+  WITH current_snapshot AS (
+    SELECT snapshot_id
+    FROM ducklake_metadata.ducklake_snapshot
+    ORDER BY snapshot_id DESC
+    LIMIT 1
+  ),
+  table_ref AS (
+    SELECT batches.designated_table_id AS table_id
+    FROM duckfeeder_meta.batches batches
+    WHERE batches.batch_id = $1
+  )
+  UPDATE ducklake_metadata.ducklake_table table_entry
+  SET end_snapshot = current_snapshot.snapshot_id
+  FROM current_snapshot, table_ref
+  WHERE table_entry.table_id = table_ref.table_id
+    AND table_entry.end_snapshot IS NULL
+    AND ($2::varchar IS NULL OR table_entry.table_name = $2::varchar)
+    AND table_entry.table_name <> $3::varchar
+  """
+
+  @schema_change_rename_table_insert_sql """
+  WITH current_snapshot AS (
+    SELECT snapshot_id
+    FROM ducklake_metadata.ducklake_snapshot
+    ORDER BY snapshot_id DESC
+    LIMIT 1
+  ),
+  table_ref AS (
+    SELECT batches.designated_table_id AS table_id
+    FROM duckfeeder_meta.batches batches
+    WHERE batches.batch_id = $1
+  ),
+  previous AS (
+    SELECT table_entry.*
+    FROM ducklake_metadata.ducklake_table table_entry
+    JOIN table_ref ON table_entry.table_id = table_ref.table_id
+    JOIN current_snapshot ON true
+    WHERE table_entry.end_snapshot = current_snapshot.snapshot_id
+      AND ($2::varchar IS NULL OR table_entry.table_name = $2::varchar)
+    ORDER BY table_entry.begin_snapshot DESC
+    LIMIT 1
+  )
+  INSERT INTO ducklake_metadata.ducklake_table
+    (table_id, table_uuid, begin_snapshot, end_snapshot, schema_id, table_name, path, path_is_relative)
+  SELECT
+    previous.table_id,
+    previous.table_uuid,
+    current_snapshot.snapshot_id,
+    NULL,
+    previous.schema_id,
+    $3::varchar,
+    previous.path,
+    previous.path_is_relative
+  FROM previous
+  JOIN current_snapshot ON true
+  WHERE NOT EXISTS (
+    SELECT 1
+    FROM ducklake_metadata.ducklake_table active
+    WHERE active.table_id = previous.table_id
+      AND active.table_name = $3::varchar
+      AND active.end_snapshot IS NULL
+  )
+  """
+
   @schema_change_validate_rename_sql """
   WITH table_ref AS (
     SELECT batches.designated_table_id AS table_id
@@ -1138,6 +1249,13 @@ defmodule DuckFeeder.DuckLake.SQL do
 
   defp schema_change_statements(batch_id, schema_changes) when is_list(schema_changes) do
     Enum.flat_map(schema_changes, fn
+      %{op: :rename_table, from: from_name, to: to_name} ->
+        [
+          {@schema_change_validate_rename_table_sql, [batch_id, from_name, to_name]},
+          {@schema_change_rename_table_close_sql, [batch_id, from_name, to_name]},
+          {@schema_change_rename_table_insert_sql, [batch_id, from_name, to_name]}
+        ]
+
       %{op: :rename_column, from: from_name, to: to_name} ->
         [
           {@schema_change_validate_rename_sql, [batch_id, from_name, to_name]},
@@ -1181,6 +1299,16 @@ defmodule DuckFeeder.DuckLake.SQL do
 
   defp normalize_schema_change_descriptor(%{} = descriptor) do
     case normalize_schema_change_op(descriptor_get(descriptor, :op)) do
+      :rename_table ->
+        from_name = normalize_non_empty_string(descriptor_get(descriptor, :from))
+        to_name = normalize_non_empty_string(descriptor_get(descriptor, :to))
+
+        if is_binary(to_name) and (is_nil(from_name) or from_name != to_name) do
+          %{op: :rename_table, from: from_name, to: to_name}
+        else
+          nil
+        end
+
       :rename_column ->
         from_name = normalize_non_empty_string(descriptor_get(descriptor, :from))
         to_name = normalize_non_empty_string(descriptor_get(descriptor, :to))
@@ -1226,6 +1354,7 @@ defmodule DuckFeeder.DuckLake.SQL do
     |> String.trim()
     |> String.downcase()
     |> case do
+      "rename_table" -> :rename_table
       "rename_column" -> :rename_column
       "drop_column" -> :drop_column
       "alter_column_type" -> :alter_column_type

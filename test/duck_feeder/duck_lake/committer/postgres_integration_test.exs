@@ -473,6 +473,92 @@ defmodule DuckFeeder.DuckLake.Committer.PostgresIntegrationTest do
     assert changes_made =~ "altered_table:#{designated_table_id}"
   end
 
+  test "schema_changes supports table rename history semantics", %{meta_conn: meta_conn} do
+    unique =
+      "#{System.system_time(:microsecond)}_#{System.unique_integer([:positive, :monotonic])}"
+
+    source_name = "ducklake_table_rename_source_#{unique}"
+    target_table = "ducklake_table_rename_table_#{unique}"
+    renamed_table = "#{target_table}_renamed"
+
+    assert {:ok, source_id} =
+             Meta.register_source(meta_conn, %{
+               name: source_name,
+               connection_info: %{"dsn" => "table-rename://local"},
+               slot_name: "slot_table_rename_#{unique}",
+               publication_name: "pub_table_rename_#{unique}",
+               status: "active"
+             })
+
+    assert {:ok, designated_table_id} =
+             Meta.register_designated_table(meta_conn, %{
+               source_id: source_id,
+               source_schema: "public",
+               source_table: "events",
+               target_schema: "raw",
+               target_table: target_table,
+               mode: "cdc_changelog"
+             })
+
+    batch_1_id = "batch_table_rename_1_#{unique}"
+
+    assert :ok =
+             insert_uploaded_batch(meta_conn, batch_1_id, designated_table_id, "0/40", "0/40")
+
+    assert {:ok, %{batch_id: ^batch_1_id, committed?: true}} =
+             Postgres.commit_batch(meta_conn, batch_1_id,
+               object_key: "raw/#{target_table}/table-rename-1.parquet",
+               write_result: %{row_count: 1, file_size_bytes: 60},
+               batch: %{rows: [%{"value" => 1}]}
+             )
+
+    batch_2_id = "batch_table_rename_2_#{unique}"
+
+    assert :ok =
+             insert_uploaded_batch(meta_conn, batch_2_id, designated_table_id, "0/41", "0/41")
+
+    assert {:ok, %{batch_id: ^batch_2_id, committed?: true}} =
+             Postgres.commit_batch(meta_conn, batch_2_id,
+               object_key: "raw/#{target_table}/table-rename-2.parquet",
+               write_result: %{row_count: 1, file_size_bytes: 60},
+               batch: %{rows: [%{"value" => 2}]},
+               schema_changes: [
+                 %{op: :rename_table, from: target_table, to: renamed_table}
+               ]
+             )
+
+    assert {:ok, %{rows: [[old_active_count, old_historical_count]]}} =
+             Postgrex.query(
+               meta_conn,
+               """
+               SELECT
+                 count(*) FILTER (WHERE table_name = $2 AND end_snapshot IS NULL),
+                 count(*) FILTER (WHERE table_name = $2 AND end_snapshot IS NOT NULL)
+               FROM ducklake_metadata.ducklake_table
+               WHERE table_id = $1
+               """,
+               [designated_table_id, target_table]
+             )
+
+    assert old_active_count == 0
+    assert old_historical_count >= 1
+
+    assert {:ok, %{rows: [[renamed_active_count]]}} =
+             Postgrex.query(
+               meta_conn,
+               """
+               SELECT count(*)
+               FROM ducklake_metadata.ducklake_table
+               WHERE table_id = $1
+                 AND table_name = $2
+                 AND end_snapshot IS NULL
+               """,
+               [designated_table_id, renamed_table]
+             )
+
+    assert renamed_active_count == 1
+  end
+
   test "schema_changes rejects non-promotable type changes", %{meta_conn: meta_conn} do
     unique =
       "#{System.system_time(:microsecond)}_#{System.unique_integer([:positive, :monotonic])}"

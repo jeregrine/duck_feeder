@@ -252,6 +252,7 @@ defmodule DuckFeeder.DuckLake.Committer.PostgresTest do
                write_result: %{row_count: 1, file_size_bytes: 99},
                batch: %{rows: [%{"value" => 1}]},
                schema_changes: [
+                 %{op: :rename_table, from: "users", to: "users_v2"},
                  %{op: :rename_column, from: "value", to: "metric"},
                  %{op: :drop_column, column: "legacy"},
                  %{op: :alter_column_type, column: "metric", type: "DOUBLE"}
@@ -269,7 +270,11 @@ defmodule DuckFeeder.DuckLake.Committer.PostgresTest do
       |> Enum.take_while(&(&1 != :done))
 
     assert Enum.any?(queries, fn {sql, _} ->
-             sql =~ "SELECT 1 /" and sql =~ "from_exists"
+             sql =~ "SELECT 1 /" and sql =~ "active_table"
+           end)
+
+    assert Enum.any?(queries, fn {sql, _} ->
+             sql =~ "UPDATE ducklake_metadata.ducklake_table table_entry"
            end)
 
     assert Enum.any?(queries, fn {sql, _} ->

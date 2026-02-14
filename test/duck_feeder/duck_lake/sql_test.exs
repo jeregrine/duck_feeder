@@ -139,11 +139,17 @@ defmodule DuckFeeder.DuckLake.SQLTest do
         write_result: %{row_count: 1, file_size_bytes: 10},
         batch: %{rows: [%{"value" => 1}]},
         schema_changes: [
+          %{op: :rename_table, from: "users", to: "users_v2"},
           %{op: :alter_column_type, column: "value", type: "double"},
           %{op: :drop_column, column: "legacy"},
           %{op: :rename_column, from: "value", to: "metric"}
         ]
       )
+
+    assert Enum.any?(statements, fn {sql, _params} ->
+             sql =~ "UPDATE ducklake_metadata.ducklake_table table_entry" and
+               sql =~ "table_entry.table_name <>"
+           end)
 
     assert Enum.any?(statements, fn {sql, _params} ->
              sql =~ "SELECT 1 /" and sql =~ "can_promote"
