@@ -616,6 +616,447 @@ defmodule DuckFeeder.DuckLake.Committer.PostgresIntegrationTest do
     assert {:ok, :uploaded} = Meta.get_batch_state(meta_conn, batch_2_id)
   end
 
+  test "partition metadata rows are written when partition options are provided", %{
+    meta_conn: meta_conn
+  } do
+    unique =
+      "#{System.system_time(:microsecond)}_#{System.unique_integer([:positive, :monotonic])}"
+
+    source_name = "ducklake_partition_source_#{unique}"
+    target_table = "ducklake_partition_table_#{unique}"
+
+    assert {:ok, source_id} =
+             Meta.register_source(meta_conn, %{
+               name: source_name,
+               connection_info: %{"dsn" => "partition://local"},
+               slot_name: "slot_partition_#{unique}",
+               publication_name: "pub_partition_#{unique}",
+               status: "active"
+             })
+
+    assert {:ok, designated_table_id} =
+             Meta.register_designated_table(meta_conn, %{
+               source_id: source_id,
+               source_schema: "public",
+               source_table: "events",
+               target_schema: "raw",
+               target_table: target_table,
+               mode: "cdc_changelog"
+             })
+
+    batch_id = "batch_partition_#{unique}"
+    assert :ok = insert_uploaded_batch(meta_conn, batch_id, designated_table_id, "0/50", "0/50")
+
+    assert {:ok, %{batch_id: ^batch_id, committed?: true}} =
+             Postgres.commit_batch(meta_conn, batch_id,
+               object_key: "raw/#{target_table}/partition.parquet",
+               write_result: %{row_count: 1, file_size_bytes: 40},
+               batch: %{rows: [%{"tenant_id" => "acme", "value" => 1}]},
+               partition_by: ["tenant_id"],
+               partition_values: %{"tenant_id" => "acme"}
+             )
+
+    assert {:ok, %{rows: [[partition_count]]}} =
+             Postgrex.query(
+               meta_conn,
+               """
+               SELECT count(*)
+               FROM ducklake_metadata.ducklake_partition_info
+               WHERE table_id = $1
+                 AND end_snapshot IS NULL
+               """,
+               [designated_table_id]
+             )
+
+    assert partition_count == 1
+
+    assert {:ok, %{rows: [[partition_column_count]]}} =
+             Postgrex.query(
+               meta_conn,
+               """
+               SELECT count(*)
+               FROM ducklake_metadata.ducklake_partition_column
+               WHERE table_id = $1
+               """,
+               [designated_table_id]
+             )
+
+    assert partition_column_count >= 1
+
+    assert {:ok, %{rows: [[partition_value_count]]}} =
+             Postgrex.query(
+               meta_conn,
+               """
+               SELECT count(*)
+               FROM ducklake_metadata.ducklake_file_partition_value
+               WHERE table_id = $1
+               """,
+               [designated_table_id]
+             )
+
+    assert partition_value_count >= 1
+  end
+
+  test "schema_changes supports nested-field style path aliases", %{meta_conn: meta_conn} do
+    unique =
+      "#{System.system_time(:microsecond)}_#{System.unique_integer([:positive, :monotonic])}"
+
+    source_name = "ducklake_nested_source_#{unique}"
+    target_table = "ducklake_nested_table_#{unique}"
+
+    assert {:ok, source_id} =
+             Meta.register_source(meta_conn, %{
+               name: source_name,
+               connection_info: %{"dsn" => "nested://local"},
+               slot_name: "slot_nested_#{unique}",
+               publication_name: "pub_nested_#{unique}",
+               status: "active"
+             })
+
+    assert {:ok, designated_table_id} =
+             Meta.register_designated_table(meta_conn, %{
+               source_id: source_id,
+               source_schema: "public",
+               source_table: "events",
+               target_schema: "raw",
+               target_table: target_table,
+               mode: "cdc_changelog"
+             })
+
+    batch_1_id = "batch_nested_1_#{unique}"
+    assert :ok = insert_uploaded_batch(meta_conn, batch_1_id, designated_table_id, "0/60", "0/60")
+
+    assert {:ok, %{batch_id: ^batch_1_id, committed?: true}} =
+             Postgres.commit_batch(meta_conn, batch_1_id,
+               object_key: "raw/#{target_table}/nested-1.parquet",
+               write_result: %{row_count: 1, file_size_bytes: 40},
+               batch: %{
+                 rows: [
+                   %{"payload.user_name" => "alice", "payload.age" => 21, "payload.legacy" => "x"}
+                 ]
+               }
+             )
+
+    batch_2_id = "batch_nested_2_#{unique}"
+    assert :ok = insert_uploaded_batch(meta_conn, batch_2_id, designated_table_id, "0/61", "0/61")
+
+    assert {:ok, %{batch_id: ^batch_2_id, committed?: true}} =
+             Postgres.commit_batch(meta_conn, batch_2_id,
+               object_key: "raw/#{target_table}/nested-2.parquet",
+               write_result: %{row_count: 1, file_size_bytes: 40},
+               batch: %{rows: [%{"payload.name" => "alice", "payload.age" => 22}]},
+               schema_changes: [
+                 %{
+                   op: :rename_field,
+                   from_path: "payload.user_name",
+                   to_path: "payload.name"
+                 },
+                 %{op: :drop_field, path: "payload.legacy"},
+                 %{op: :alter_field_type, path: "payload.age", type: "BIGINT"}
+               ]
+             )
+
+    assert {:ok, %{rows: [[renamed_active_count]]}} =
+             Postgrex.query(
+               meta_conn,
+               """
+               SELECT count(*)
+               FROM ducklake_metadata.ducklake_column
+               WHERE table_id = $1
+                 AND column_name = 'payload.name'
+                 AND end_snapshot IS NULL
+               """,
+               [designated_table_id]
+             )
+
+    assert renamed_active_count == 1
+
+    assert {:ok, %{rows: [[legacy_active_count]]}} =
+             Postgrex.query(
+               meta_conn,
+               """
+               SELECT count(*)
+               FROM ducklake_metadata.ducklake_column
+               WHERE table_id = $1
+                 AND column_name = 'payload.legacy'
+                 AND end_snapshot IS NULL
+               """,
+               [designated_table_id]
+             )
+
+    assert legacy_active_count == 0
+  end
+
+  test "rename conflicts across batches reject competing targets", %{meta_conn: meta_conn} do
+    unique =
+      "#{System.system_time(:microsecond)}_#{System.unique_integer([:positive, :monotonic])}"
+
+    source_name = "ducklake_conflict_source_#{unique}"
+    target_table = "ducklake_conflict_table_#{unique}"
+
+    assert {:ok, source_id} =
+             Meta.register_source(meta_conn, %{
+               name: source_name,
+               connection_info: %{"dsn" => "conflict://local"},
+               slot_name: "slot_conflict_#{unique}",
+               publication_name: "pub_conflict_#{unique}",
+               status: "active"
+             })
+
+    assert {:ok, designated_table_id} =
+             Meta.register_designated_table(meta_conn, %{
+               source_id: source_id,
+               source_schema: "public",
+               source_table: "events",
+               target_schema: "raw",
+               target_table: target_table,
+               mode: "cdc_changelog"
+             })
+
+    base_batch = "batch_conflict_base_#{unique}"
+    assert :ok = insert_uploaded_batch(meta_conn, base_batch, designated_table_id, "0/70", "0/70")
+
+    assert {:ok, %{batch_id: ^base_batch, committed?: true}} =
+             Postgres.commit_batch(meta_conn, base_batch,
+               object_key: "raw/#{target_table}/conflict-base.parquet",
+               write_result: %{row_count: 1, file_size_bytes: 20},
+               batch: %{rows: [%{"left" => 1, "right" => 2}]}
+             )
+
+    batch_a = "batch_conflict_a_#{unique}"
+    batch_b = "batch_conflict_b_#{unique}"
+    assert :ok = insert_uploaded_batch(meta_conn, batch_a, designated_table_id, "0/71", "0/71")
+    assert :ok = insert_uploaded_batch(meta_conn, batch_b, designated_table_id, "0/72", "0/72")
+
+    assert {:ok, %{batch_id: ^batch_a, committed?: true}} =
+             Postgres.commit_batch(meta_conn, batch_a,
+               object_key: "raw/#{target_table}/conflict-a.parquet",
+               write_result: %{row_count: 1, file_size_bytes: 20},
+               batch: %{rows: [%{"metric" => 1, "right" => 2}]},
+               schema_changes: [%{op: :rename_column, from: "left", to: "metric"}]
+             )
+
+    assert {:error, {:ducklake_sql_failed, sql, _}} =
+             Postgres.commit_batch(meta_conn, batch_b,
+               object_key: "raw/#{target_table}/conflict-b.parquet",
+               write_result: %{row_count: 1, file_size_bytes: 20},
+               batch: %{rows: [%{"metric" => 1, "right" => 2}]},
+               schema_changes: [%{op: :rename_column, from: "right", to: "metric"}]
+             )
+
+    assert sql =~ "from_exists"
+  end
+
+  test "replacement scheduling is idempotent for repeated cleanup attempts", %{
+    meta_conn: meta_conn
+  } do
+    unique =
+      "#{System.system_time(:microsecond)}_#{System.unique_integer([:positive, :monotonic])}"
+
+    source_name = "ducklake_cleanup_source_#{unique}"
+    target_table = "ducklake_cleanup_table_#{unique}"
+
+    assert {:ok, source_id} =
+             Meta.register_source(meta_conn, %{
+               name: source_name,
+               connection_info: %{"dsn" => "cleanup://local"},
+               slot_name: "slot_cleanup_#{unique}",
+               publication_name: "pub_cleanup_#{unique}",
+               status: "active"
+             })
+
+    assert {:ok, designated_table_id} =
+             Meta.register_designated_table(meta_conn, %{
+               source_id: source_id,
+               source_schema: "public",
+               source_table: "events",
+               target_schema: "raw",
+               target_table: target_table,
+               mode: "cdc_changelog"
+             })
+
+    batch_1 = "batch_cleanup_1_#{unique}"
+    assert :ok = insert_uploaded_batch(meta_conn, batch_1, designated_table_id, "0/80", "0/80")
+
+    assert {:ok, %{batch_id: ^batch_1, committed?: true}} =
+             Postgres.commit_batch(meta_conn, batch_1,
+               object_key: "raw/#{target_table}/cleanup-1.parquet",
+               write_result: %{row_count: 1, file_size_bytes: 25},
+               batch: %{rows: [%{"value" => 1}]}
+             )
+
+    assert {:ok, %{rows: [[data_file_id]]}} =
+             Postgrex.query(
+               meta_conn,
+               """
+               SELECT data_file_id
+               FROM ducklake_metadata.ducklake_data_file
+               WHERE table_id = $1
+               ORDER BY data_file_id DESC
+               LIMIT 1
+               """,
+               [designated_table_id]
+             )
+
+    for {batch_id, lsn, key} <- [
+          {"batch_cleanup_2_#{unique}", "0/81", "cleanup-2"},
+          {"batch_cleanup_3_#{unique}", "0/82", "cleanup-3"}
+        ] do
+      assert :ok = insert_uploaded_batch(meta_conn, batch_id, designated_table_id, lsn, lsn)
+
+      assert {:ok, %{batch_id: ^batch_id, committed?: true}} =
+               Postgres.commit_batch(meta_conn, batch_id,
+                 object_key: "raw/#{target_table}/#{key}.parquet",
+                 write_result: %{row_count: 1, file_size_bytes: 25},
+                 batch: %{rows: [%{"value" => 1}]},
+                 replace_data_file_ids: [data_file_id],
+                 table_stats_row_delta: 0
+               )
+    end
+
+    assert {:ok, %{rows: [[schedule_count]]}} =
+             Postgrex.query(
+               meta_conn,
+               """
+               SELECT count(*)
+               FROM ducklake_metadata.ducklake_files_scheduled_for_deletion
+               WHERE data_file_id = $1
+               """,
+               [data_file_id]
+             )
+
+    assert schedule_count == 1
+  end
+
+  test "add-files compatibility handles missing and extra columns across commits", %{
+    meta_conn: meta_conn
+  } do
+    unique =
+      "#{System.system_time(:microsecond)}_#{System.unique_integer([:positive, :monotonic])}"
+
+    source_name = "ducklake_addfiles_source_#{unique}"
+    target_table = "ducklake_addfiles_table_#{unique}"
+
+    assert {:ok, source_id} =
+             Meta.register_source(meta_conn, %{
+               name: source_name,
+               connection_info: %{"dsn" => "add-files://local"},
+               slot_name: "slot_addfiles_#{unique}",
+               publication_name: "pub_addfiles_#{unique}",
+               status: "active"
+             })
+
+    assert {:ok, designated_table_id} =
+             Meta.register_designated_table(meta_conn, %{
+               source_id: source_id,
+               source_schema: "public",
+               source_table: "events",
+               target_schema: "raw",
+               target_table: target_table,
+               mode: "cdc_changelog"
+             })
+
+    for {batch_id, lsn, row} <- [
+          {"batch_addfiles_1_#{unique}", "0/A0", %{"a" => 1, "b" => 2}},
+          {"batch_addfiles_2_#{unique}", "0/A1", %{"a" => 2}},
+          {"batch_addfiles_3_#{unique}", "0/A2", %{"a" => 3, "b" => 4, "c" => 5}}
+        ] do
+      assert :ok = insert_uploaded_batch(meta_conn, batch_id, designated_table_id, lsn, lsn)
+
+      assert {:ok, %{batch_id: ^batch_id, committed?: true}} =
+               Postgres.commit_batch(meta_conn, batch_id,
+                 object_key: "raw/#{target_table}/#{batch_id}.parquet",
+                 write_result: %{row_count: 1, file_size_bytes: 20},
+                 batch: %{rows: [row]}
+               )
+    end
+
+    assert {:ok, %{rows: [[active_columns]]}} =
+             Postgrex.query(
+               meta_conn,
+               """
+               SELECT array_agg(column_name ORDER BY column_name)
+               FROM ducklake_metadata.ducklake_column
+               WHERE table_id = $1
+                 AND end_snapshot IS NULL
+               """,
+               [designated_table_id]
+             )
+
+    assert active_columns == ["a", "b", "c"]
+  end
+
+  test "stats robustness keeps contains_null and contains_nan high-water marks", %{
+    meta_conn: meta_conn
+  } do
+    unique =
+      "#{System.system_time(:microsecond)}_#{System.unique_integer([:positive, :monotonic])}"
+
+    source_name = "ducklake_stats_source_#{unique}"
+    target_table = "ducklake_stats_table_#{unique}"
+
+    assert {:ok, source_id} =
+             Meta.register_source(meta_conn, %{
+               name: source_name,
+               connection_info: %{"dsn" => "stats://local"},
+               slot_name: "slot_stats_#{unique}",
+               publication_name: "pub_stats_#{unique}",
+               status: "active"
+             })
+
+    assert {:ok, designated_table_id} =
+             Meta.register_designated_table(meta_conn, %{
+               source_id: source_id,
+               source_schema: "public",
+               source_table: "events",
+               target_schema: "raw",
+               target_table: target_table,
+               mode: "cdc_changelog"
+             })
+
+    batch_1 = "batch_stats_1_#{unique}"
+    assert :ok = insert_uploaded_batch(meta_conn, batch_1, designated_table_id, "0/90", "0/90")
+
+    assert {:ok, %{batch_id: ^batch_1, committed?: true}} =
+             Postgres.commit_batch(meta_conn, batch_1,
+               object_key: "raw/#{target_table}/stats-1.parquet",
+               write_result: %{row_count: 2, file_size_bytes: 30},
+               batch: %{rows: [%{"metric" => 1.0}, %{"metric" => 3.0}]}
+             )
+
+    batch_2 = "batch_stats_2_#{unique}"
+    assert :ok = insert_uploaded_batch(meta_conn, batch_2, designated_table_id, "0/91", "0/91")
+
+    assert {:ok, %{batch_id: ^batch_2, committed?: true}} =
+             Postgres.commit_batch(meta_conn, batch_2,
+               object_key: "raw/#{target_table}/stats-2.parquet",
+               write_result: %{row_count: 2, file_size_bytes: 30},
+               batch: %{rows: [%{"metric" => nil}, %{"metric" => 2.0}]}
+             )
+
+    assert {:ok, %{rows: [[contains_null, contains_nan, min_value, max_value]]}} =
+             Postgrex.query(
+               meta_conn,
+               """
+               SELECT table_stats.contains_null, table_stats.contains_nan, table_stats.min_value, table_stats.max_value
+               FROM ducklake_metadata.ducklake_table_column_stats table_stats
+               JOIN ducklake_metadata.ducklake_column col
+                 ON col.table_id = table_stats.table_id
+                AND col.column_id = table_stats.column_id
+               WHERE table_stats.table_id = $1
+                 AND col.column_name = 'metric'
+                 AND col.end_snapshot IS NULL
+               LIMIT 1
+               """,
+               [designated_table_id]
+             )
+
+    assert contains_null == true
+    assert contains_nan == false
+    assert min_value == "1.0"
+    assert max_value == "3.0"
+  end
+
   defp insert_uploaded_batch(meta_conn, batch_id, designated_table_id, lsn_start, lsn_end) do
     with {:ok, _} <-
            Meta.insert_batch(meta_conn, %{

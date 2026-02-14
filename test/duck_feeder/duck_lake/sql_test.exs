@@ -184,6 +184,74 @@ defmodule DuckFeeder.DuckLake.SQLTest do
     assert changes_made =~ "altered_table:{table_id}"
   end
 
+  test "adds partition metadata statements when configured" do
+    statements =
+      SQL.commit_statements("batch-1",
+        object_key: "raw/users/file-1.parquet",
+        write_result: %{row_count: 2, file_size_bytes: 1024},
+        batch: %{rows: [%{"id" => 1, "tenant_id" => "acme"}]},
+        partition_by: ["tenant_id"],
+        partition_values: %{"tenant_id" => "acme"}
+      )
+
+    assert Enum.any?(statements, fn {sql, _params} ->
+             sql =~ "INSERT INTO ducklake_metadata.ducklake_partition_info"
+           end)
+
+    assert Enum.any?(statements, fn {sql, _params} ->
+             sql =~ "INSERT INTO ducklake_metadata.ducklake_partition_column"
+           end)
+
+    assert Enum.any?(statements, fn {sql, _params} ->
+             sql =~ "INSERT INTO ducklake_metadata.ducklake_file_partition_value"
+           end)
+
+    {_data_file_sql, data_file_params} =
+      Enum.find(statements, fn {sql, _params} ->
+        sql =~ "INSERT INTO ducklake_metadata.ducklake_data_file"
+      end)
+
+    assert ["batch-1", _object_key, _row_count, _file_size, _delete_count, partition_signature] =
+             data_file_params
+
+    assert is_binary(partition_signature)
+    assert String.contains?(partition_signature, "tenant_id")
+  end
+
+  test "supports nested-field style schema_changes aliases" do
+    statements =
+      SQL.commit_statements("batch-1",
+        object_key: "raw/users/file-1.parquet",
+        write_result: %{row_count: 1, file_size_bytes: 10},
+        batch: %{rows: [%{"payload.user_name" => "alice", "payload.age" => 20}]},
+        schema_changes: [
+          %{op: :rename_field, from_path: "payload.user_name", to_path: "payload.name"},
+          %{op: :drop_field, path: "payload.legacy"},
+          %{op: :alter_field_type, path: "payload.age", type: "BIGINT"}
+        ]
+      )
+
+    assert Enum.any?(statements, fn {_sql, params} ->
+             params == ["batch-1", "payload.user_name", "payload.name"]
+           end)
+
+    assert Enum.any?(statements, fn {_sql, params} ->
+             params == ["batch-1", "payload.legacy"]
+           end)
+
+    assert Enum.any?(statements, fn {_sql, params} ->
+             params == ["batch-1", "payload.age", "BIGINT"]
+           end)
+
+    {snapshot_sql, snapshot_params} =
+      Enum.find(statements, fn {sql, _params} ->
+        sql =~ "INSERT INTO ducklake_metadata.ducklake_snapshot"
+      end)
+
+    assert snapshot_sql =~ "OR $4::boolean"
+    assert ["batch-1", _column_names, 1, true] = snapshot_params
+  end
+
   test "respects custom statement list and function" do
     assert ["SELECT 1"] == SQL.commit_statements("batch-1", ducklake_sql: ["SELECT 1"])
 

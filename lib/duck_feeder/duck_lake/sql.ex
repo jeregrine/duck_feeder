@@ -718,7 +718,10 @@ defmodule DuckFeeder.DuckLake.SQL do
     $4::bigint,
     0,
     COALESCE(table_stats.next_row_id, 0),
-    NULL,
+    CASE
+      WHEN $6::text IS NULL THEN NULL
+      ELSE abs(('x' || substr(md5(table_ref.table_id::text || ':' || $6::text), 1, 16))::bit(64)::bigint)
+    END,
     NULL,
     NULL,
     table_ref.table_id
@@ -727,6 +730,114 @@ defmodule DuckFeeder.DuckLake.SQL do
   LEFT JOIN ducklake_metadata.ducklake_table_stats table_stats
     ON table_stats.table_id = table_ref.table_id
   ON CONFLICT (data_file_id) DO NOTHING
+  """
+
+  @ensure_partition_info_sql """
+  WITH current_snapshot AS (
+    SELECT snapshot_id
+    FROM ducklake_metadata.ducklake_snapshot
+    ORDER BY snapshot_id DESC
+    LIMIT 1
+  ),
+  table_ref AS (
+    SELECT batches.designated_table_id AS table_id
+    FROM duckfeeder_meta.batches batches
+    WHERE batches.batch_id = $1
+  ),
+  partition_ref AS (
+    SELECT
+      table_ref.table_id,
+      abs(('x' || substr(md5(table_ref.table_id::text || ':' || $2::text), 1, 16))::bit(64)::bigint) AS partition_id
+    FROM table_ref
+  )
+  INSERT INTO ducklake_metadata.ducklake_partition_info
+    (partition_id, table_id, begin_snapshot, end_snapshot)
+  SELECT
+    partition_ref.partition_id,
+    partition_ref.table_id,
+    current_snapshot.snapshot_id,
+    NULL
+  FROM partition_ref
+  JOIN current_snapshot ON true
+  WHERE NOT EXISTS (
+    SELECT 1
+    FROM ducklake_metadata.ducklake_partition_info existing
+    WHERE existing.partition_id = partition_ref.partition_id
+      AND existing.table_id = partition_ref.table_id
+      AND existing.end_snapshot IS NULL
+  )
+  """
+
+  @ensure_partition_column_sql """
+  WITH table_ref AS (
+    SELECT batches.designated_table_id AS table_id
+    FROM duckfeeder_meta.batches batches
+    WHERE batches.batch_id = $1
+  ),
+  partition_ref AS (
+    SELECT
+      table_ref.table_id,
+      abs(('x' || substr(md5(table_ref.table_id::text || ':' || $2::text), 1, 16))::bit(64)::bigint) AS partition_id
+    FROM table_ref
+  ),
+  column_ref AS (
+    SELECT col.column_id
+    FROM ducklake_metadata.ducklake_column col
+    JOIN table_ref ON col.table_id = table_ref.table_id
+    WHERE col.column_name = $4::varchar
+      AND col.end_snapshot IS NULL
+    LIMIT 1
+  )
+  INSERT INTO ducklake_metadata.ducklake_partition_column
+    (partition_id, table_id, partition_key_index, column_id, transform)
+  SELECT
+    partition_ref.partition_id,
+    partition_ref.table_id,
+    $3::bigint,
+    column_ref.column_id,
+    $5::varchar
+  FROM partition_ref
+  JOIN column_ref ON true
+  WHERE NOT EXISTS (
+    SELECT 1
+    FROM ducklake_metadata.ducklake_partition_column existing
+    WHERE existing.partition_id = partition_ref.partition_id
+      AND existing.table_id = partition_ref.table_id
+      AND existing.partition_key_index = $3::bigint
+  )
+  """
+
+  @insert_file_partition_value_sql """
+  WITH current_snapshot AS (
+    SELECT snapshot_id, next_file_id
+    FROM ducklake_metadata.ducklake_snapshot
+    ORDER BY snapshot_id DESC
+    LIMIT 1
+  ),
+  partition_ref AS (
+    SELECT $2::text AS signature
+  ),
+  table_ref AS (
+    SELECT batches.designated_table_id AS table_id
+    FROM duckfeeder_meta.batches batches
+    WHERE batches.batch_id = $1
+  )
+  INSERT INTO ducklake_metadata.ducklake_file_partition_value
+    (data_file_id, table_id, partition_key_index, partition_value)
+  SELECT
+    current_snapshot.next_file_id - ($3::bigint + 1),
+    table_ref.table_id,
+    $4::bigint,
+    $5::varchar
+  FROM current_snapshot
+  JOIN table_ref ON true
+  WHERE NOT EXISTS (
+    SELECT 1
+    FROM ducklake_metadata.ducklake_file_partition_value existing
+    WHERE existing.data_file_id = current_snapshot.next_file_id - ($3::bigint + 1)
+      AND existing.table_id = table_ref.table_id
+      AND existing.partition_key_index = $4::bigint
+  )
   """
 
   @insert_delete_file_sql """
@@ -1125,6 +1236,8 @@ defmodule DuckFeeder.DuckLake.SQL do
 
       column_descriptors = extract_column_descriptors(batch)
       column_names = Enum.map(column_descriptors, & &1.name)
+      partition_descriptors = partition_descriptors(opts, batch)
+      partition_signature = partition_signature(partition_descriptors)
 
       snapshot_changes =
         snapshot_changes(
@@ -1144,10 +1257,17 @@ defmodule DuckFeeder.DuckLake.SQL do
         schema_change_statements(batch_id, schema_changes) ++
         column_statements(batch_id, column_descriptors) ++
         name_mapping_statements(batch_id, column_descriptors) ++
+        partition_statements(batch_id, partition_signature, partition_descriptors) ++
         [
           {@record_schema_version_sql, []},
-          {@insert_data_file_sql, [batch_id, object_key, row_count, file_size, delete_file_count]}
+          {@insert_data_file_sql,
+           [batch_id, object_key, row_count, file_size, delete_file_count, partition_signature]}
         ] ++
+        file_partition_value_statements(
+          batch_id,
+          delete_file_count,
+          partition_descriptors
+        ) ++
         delete_file_statements(batch_id, delete_files) ++
         maybe_retire_data_files_statements(batch_id, replaced_data_file_ids) ++
         [
@@ -1237,6 +1357,117 @@ defmodule DuckFeeder.DuckLake.SQL do
     end)
   end
 
+  defp partition_statements(_batch_id, nil, _partition_descriptors), do: []
+
+  defp partition_statements(batch_id, partition_signature, partition_descriptors) do
+    [
+      {@ensure_partition_info_sql, [batch_id, partition_signature]}
+    ] ++
+      Enum.map(partition_descriptors, fn descriptor ->
+        {@ensure_partition_column_sql,
+         [
+           batch_id,
+           partition_signature,
+           descriptor.index,
+           descriptor.column,
+           descriptor.transform
+         ]}
+      end)
+  end
+
+  defp file_partition_value_statements(_batch_id, _delete_file_count, []), do: []
+
+  defp file_partition_value_statements(batch_id, delete_file_count, partition_descriptors) do
+    Enum.map(partition_descriptors, fn descriptor ->
+      {@insert_file_partition_value_sql,
+       [
+         batch_id,
+         partition_signature(partition_descriptors),
+         delete_file_count,
+         descriptor.index,
+         descriptor.value
+       ]}
+    end)
+  end
+
+  defp partition_descriptors(opts, batch) do
+    partition_by =
+      opts
+      |> Keyword.get(:partition_by, [])
+      |> List.wrap()
+      |> Enum.map(&normalize_partition_spec/1)
+      |> Enum.reject(&is_nil/1)
+
+    partition_values =
+      opts
+      |> Keyword.get(:partition_values, %{})
+      |> Map.new(fn {k, v} -> {to_string(k), v} end)
+
+    first_row =
+      batch
+      |> Map.get(:rows, [])
+      |> List.first()
+      |> case do
+        row when is_map(row) -> row
+        _ -> %{}
+      end
+
+    partition_by
+    |> Enum.with_index(1)
+    |> Enum.map(fn {spec, idx} ->
+      value =
+        Map.get(partition_values, spec.column, Map.get(first_row, spec.column))
+        |> partition_value_string()
+
+      %{index: idx, column: spec.column, transform: spec.transform, value: value}
+    end)
+  end
+
+  defp normalize_partition_spec(%{} = spec) do
+    column = normalize_non_empty_string(descriptor_get(spec, :column))
+
+    if is_binary(column) do
+      %{
+        column: column,
+        transform:
+          normalize_non_empty_string(descriptor_get(spec, :transform, "identity")) || "identity"
+      }
+    else
+      nil
+    end
+  end
+
+  defp normalize_partition_spec(column) when is_binary(column) do
+    %{column: column, transform: "identity"}
+  end
+
+  defp normalize_partition_spec(_), do: nil
+
+  defp partition_signature([]), do: nil
+
+  defp partition_signature(descriptors) when is_list(descriptors) do
+    descriptors
+    |> Enum.map(fn descriptor ->
+      %{
+        index: descriptor.index,
+        column: descriptor.column,
+        transform: descriptor.transform,
+        value: descriptor.value
+      }
+    end)
+    |> JSON.encode!()
+  end
+
+  defp partition_value_string(nil), do: "__null__"
+  defp partition_value_string(value) when is_binary(value), do: value
+  defp partition_value_string(value) when is_integer(value), do: Integer.to_string(value)
+
+  defp partition_value_string(value) when is_float(value),
+    do: :erlang.float_to_binary(value, [:compact, decimals: 16])
+
+  defp partition_value_string(value) when is_boolean(value), do: to_string(value)
+  defp partition_value_string(value), do: inspect(value)
+
   defp maybe_retire_data_files_statements(_batch_id, []), do: []
 
   defp maybe_retire_data_files_statements(batch_id, replaced_data_file_ids) do
@@ -1256,7 +1487,8 @@ defmodule DuckFeeder.DuckLake.SQL do
           {@schema_change_rename_table_insert_sql, [batch_id, from_name, to_name]}
         ]
 
-      %{op: :rename_column, from: from_name, to: to_name} ->
+      %{op: op, from: from_name, to: to_name}
+      when op in [:rename_column, :rename_field] ->
         [
           {@schema_change_validate_rename_sql, [batch_id, from_name, to_name]},
           {@schema_change_rename_close_column_sql, [batch_id, from_name]},
@@ -1264,7 +1496,7 @@ defmodule DuckFeeder.DuckLake.SQL do
           {@schema_change_rename_mapping_sql, [batch_id, from_name, to_name]}
         ]
 
-      %{op: :drop_column, column: column_name} ->
+      %{op: op, column: column_name} when op in [:drop_column, :drop_field] ->
         [
           {@schema_change_validate_drop_sql, [batch_id, column_name]},
           {@schema_change_drop_column_sql, [batch_id, column_name]},
@@ -1273,7 +1505,8 @@ defmodule DuckFeeder.DuckLake.SQL do
           {@schema_change_drop_file_column_stats_sql, [batch_id, column_name]}
         ]
 
-      %{op: :alter_column_type, column: column_name, type: column_type} ->
+      %{op: op, column: column_name, type: column_type}
+      when op in [:alter_column_type, :alter_field_type] ->
         [
           {@schema_change_validate_type_sql, [batch_id, column_name, column_type]},
           {@schema_change_type_close_column_sql, [batch_id, column_name]},
@@ -1309,27 +1542,52 @@ defmodule DuckFeeder.DuckLake.SQL do
           nil
         end
 
-      :rename_column ->
-        from_name = normalize_non_empty_string(descriptor_get(descriptor, :from))
-        to_name = normalize_non_empty_string(descriptor_get(descriptor, :to))
+      op when op in [:rename_column, :rename_field] ->
+        from_name =
+          descriptor_get(descriptor, :from)
+          |> case do
+            nil -> descriptor_get(descriptor, :from_path)
+            value -> value
+          end
+          |> normalize_non_empty_string()
+
+        to_name =
+          descriptor_get(descriptor, :to)
+          |> case do
+            nil -> descriptor_get(descriptor, :to_path)
+            value -> value
+          end
+          |> normalize_non_empty_string()
 
         if is_binary(from_name) and is_binary(to_name) and from_name != to_name do
-          %{op: :rename_column, from: from_name, to: to_name}
+          %{op: op, from: from_name, to: to_name}
         else
           nil
         end
 
-      :drop_column ->
-        column_name = normalize_non_empty_string(descriptor_get(descriptor, :column))
+      op when op in [:drop_column, :drop_field] ->
+        column_name =
+          descriptor_get(descriptor, :column)
+          |> case do
+            nil -> descriptor_get(descriptor, :path)
+            value -> value
+          end
+          |> normalize_non_empty_string()
 
         if is_binary(column_name) do
-          %{op: :drop_column, column: column_name}
+          %{op: op, column: column_name}
         else
           nil
         end
 
-      :alter_column_type ->
-        column_name = normalize_non_empty_string(descriptor_get(descriptor, :column))
+      op when op in [:alter_column_type, :alter_field_type] ->
+        column_name =
+          descriptor_get(descriptor, :column)
+          |> case do
+            nil -> descriptor_get(descriptor, :path)
+            value -> value
+          end
+          |> normalize_non_empty_string()
 
         column_type =
           descriptor_get(descriptor, :type)
@@ -1337,7 +1595,7 @@ defmodule DuckFeeder.DuckLake.SQL do
           |> normalize_column_type()
 
         if is_binary(column_name) and is_binary(column_type) do
-          %{op: :alter_column_type, column: column_name, type: column_type}
+          %{op: op, column: column_name, type: column_type}
         else
           nil
         end
@@ -1356,8 +1614,11 @@ defmodule DuckFeeder.DuckLake.SQL do
     |> case do
       "rename_table" -> :rename_table
       "rename_column" -> :rename_column
+      "rename_field" -> :rename_field
       "drop_column" -> :drop_column
+      "drop_field" -> :drop_field
       "alter_column_type" -> :alter_column_type
+      "alter_field_type" -> :alter_field_type
       _ -> nil
     end
   end

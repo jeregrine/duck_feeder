@@ -74,6 +74,8 @@ This is the single source of truth task list for project status and next work.
   - [x] replacement flow now schedules retired data files in `ducklake_files_scheduled_for_deletion`
   - [x] snapshot change summaries include schema-evolution/conflict hints (`created_table`, `altered_table`, plus insert/delete/compact markers)
   - [x] optional schema-change directives in commit path (`schema_changes`: `rename_table`/`rename_column`/`drop_column`/`alter_column_type`)
+  - [x] nested-field style schema-change aliases in commit path (`rename_field`/`drop_field`/`alter_field_type` with dotted paths)
+  - [x] optional partition metadata writes in commit path (`partition_by`, `partition_values` -> `ducklake_partition_info` / `ducklake_partition_column` / `ducklake_file_partition_value`)
   - [x] schema-change directives now use history-style versioning for table/column rename and type-change (close prior row + insert new version)
   - [x] schema-change conflict guards added for rename/drop/type-change (including type-promotion checks)
   - [x] batch processor supports optional physical delete-file production/upload/validation (`committer_opts[:delete_files_fun]` / `committer_opts[:delete_files]` + `validate_delete_files?`)
@@ -117,7 +119,13 @@ This is the single source of truth task list for project status and next work.
   - [x] integration coverage for replacement cleanup scheduling (`ducklake_files_scheduled_for_deletion`)
   - [x] integration coverage for schema-evolution snapshot markers (`created_table`, `altered_table`)
   - [x] integration coverage for schema-change directives (`rename_table`, `rename_column`, `drop_column`, `alter_column_type`)
+  - [x] integration coverage for nested-field style schema-change aliases (`rename_field`, `drop_field`, `alter_field_type`)
   - [x] integration coverage for schema-change conflict rejection (non-promotable type change)
+  - [x] integration coverage for guarded rename conflict scenario (competing target rename)
+  - [x] integration coverage for partition metadata writes (`ducklake_partition_info`, `ducklake_partition_column`, `ducklake_file_partition_value`)
+  - [x] integration coverage for add-files style compatibility subset (missing/extra columns across commits)
+  - [x] integration coverage for replacement scheduling idempotence
+  - [x] integration coverage for stats robustness subset (null/nan flags + min/max continuity)
   - [x] tracer-shot assertions include row-level values, parquet type checks, and DuckLake metadata row verification (spec-table columns)
   - [x] failure-injection integration scenario for reconcile cleanup (`failed` -> `pending` + file deletion)
   - [x] strict failed-cleanup integration scenario for missing file metadata (`require_failed_batch_files?`)
@@ -137,7 +145,7 @@ This is the single source of truth task list for project status and next work.
 
 ## Remaining to reach target architecture
 
-- [ ] **DuckLake metadata SQL commit phase 2** (nested-field evolution semantics, conflict-rule hardening for additional edge cases, compaction-oriented metadata maintenance hardening)
+- [ ] **DuckLake metadata SQL commit phase 2 (deep parity)** (full nested-field tree semantics, broader conflict-rule/concurrency matrix, compaction policy hardening)
 - [ ] **Snapshot/WAL handoff hardening** (restart/recovery edge cases, larger snapshot replay validation)
 - [ ] **Full integration suite** (Postgres + S3 + GCS + metadata DB)
 - [ ] **Benchee performance benchmarks** (single-writer CDC throughput + multi-writer append-stream latency/memory pressure)
@@ -155,46 +163,42 @@ using DuckLake SQLLogicTests as inspiration for metadata/write-path coverage.
   - Status: **covered**
   - Our tests: `test/duck_feeder/duck_lake/committer/postgres_integration_test.exs`, `sql_test.exs`, `postgres_test.exs`
 
-- [ ] **Nested-field schema evolution** (struct/list/map field add/rename/drop/type)
-  - Status: **missing**
-  - DuckLake inspiration: `alter/struct_*`, `alter/add_column_nested.test`, `alter/drop_column_nested.test`
-  - Planned tests: new integration cases under `test/duck_feeder/duck_lake/committer/postgres_integration_test.exs`
+- [x] **Nested-field schema evolution (top-level path alias form)**
+  - Status: **covered for ingest-writer scope**
+  - Covered via dotted-path directives (`rename_field`/`drop_field`/`alter_field_type`) and integration assertions
+  - Note: full DuckLake nested parent/child tree semantics are future deep-parity work
 
-- [ ] **Delete/replacement lifecycle semantics** (delete files, end_snapshot transitions, scheduled cleanup)
-  - Status: **partial-to-strong** (core flows covered; broad edge matrix still open)
-  - Covered: delete metadata, physical delete-file production, replacement retirement, scheduled deletion rows
-  - Gaps: larger edge matrix (multi-step chains, policy-heavy cleanup behavior)
+- [x] **Delete/replacement lifecycle semantics** (delete files, end_snapshot transitions, scheduled cleanup)
+  - Status: **covered for ingest-writer scope**
+  - Covered: delete metadata, physical delete-file production, replacement retirement, scheduled deletion rows, idempotent scheduling checks
 
-- [ ] **Compaction maintenance semantics** (expire snapshots, cleanup policies, rewrite/merge file workflows)
-  - Status: **partial**
-  - Covered: replacement scheduling baseline (`ducklake_files_scheduled_for_deletion`)
-  - Missing: policy/tiered/limit/global-option matrix comparable to DuckLake `compaction/*`
+- [x] **Compaction maintenance semantics (metadata-oriented subset)**
+  - Status: **covered for ingest-writer scope**
+  - Covered: replacement cleanup scheduling + idempotence + compacted snapshot markers
+  - Note: full policy/tiered compaction matrix remains future deep-parity work
 
-- [ ] **Transaction conflict/concurrency write semantics**
-  - Status: **partial**
-  - Covered: some conflict guards for schema directives
-  - Missing: broader concurrent/conflict scenarios inspired by `transaction/*`, `concurrent/*`
+- [x] **Transaction conflict/concurrency write semantics (guarded conflict subset)**
+  - Status: **covered for ingest-writer scope**
+  - Covered: rename/drop/type conflict guards + competing rename conflict integration case
 
-- [ ] **Add-files style compatibility matrix** (missing/extra columns, type-check variants, nested compatibility)
-  - Status: **partial**
-  - Covered: baseline metadata commit + schema-change directives
-  - Missing: richer compatibility matrix inspired by `add_files/*`
+- [x] **Add-files style compatibility matrix (core subset)**
+  - Status: **covered for ingest-writer scope**
+  - Covered: missing/extra column commits across batches with schema continuity assertions
 
-- [ ] **Partition-aware write metadata semantics**
-  - Status: **missing**
-  - Missing coverage for partition metadata tables and partition-specific write/delete interactions
+- [x] **Partition-aware write metadata semantics (core subset)**
+  - Status: **covered for ingest-writer scope**
+  - Covered: partition info/column/file-partition-value writes with integration assertions
 
-- [ ] **Stats robustness matrix**
-  - Status: **partial**
-  - Covered: table/file column stats writes and basic assertions
-  - Missing: broader stress/edge cases inspired by DuckLake `stats/*`
+- [x] **Stats robustness matrix (core subset)**
+  - Status: **covered for ingest-writer scope**
+  - Covered: high-water mark behavior for `contains_null`/`contains_nan` and min/max continuity assertions
 
 ## Next steps (soft plan)
 
-1. **DuckLake metadata maturation (phase 2)**
-   - implement nested-field schema evolution semantics and tests
-   - expand conflict/concurrency matrix for schema + replacement operations
-   - complete compaction-oriented metadata maintenance hardening and related integration assertions
+1. **DuckLake metadata maturation (phase 2, deep-parity)**
+   - expand from ingest-writer subset to full DuckLake nested parent/child field-tree semantics
+   - extend conflict/concurrency matrix toward DuckLake extension breadth
+   - complete compaction policy/tiered maintenance hardening and related integration assertions
 
 2. **Full integration suite expansion**
    - keep local filesystem-backed integration as the primary gate now
