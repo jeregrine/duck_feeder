@@ -56,6 +56,7 @@ This is the single source of truth task list for project status and next work.
   - [x] `DuckFeeder.Writer` adapter interface
   - [x] temporary `DuckFeeder.Writer.Jsonl` adapter
   - [x] `DuckFeeder.Writer.ParquetNif` (Rustler-backed parquet writer)
+  - [x] optional Elixir-side datetime normalization to unix microseconds (`writer.datetime_encoding`)
   - [x] writer format selection + parquet fallback wiring
   - [x] `DuckFeeder.BatchProcessor`
   - [x] `DuckFeeder.DuckLake.Committer` interface + no-op committer

@@ -238,7 +238,7 @@ defmodule DuckFeeder.RuntimeStreamIntegrationTest do
     assert {:ok, %{service_pid: service_pid, cdc_pid: cdc_pid}} =
              Runtime.start_stream(meta_conn, source_name, storage,
                observer_pid: self(),
-               writer: %{format: :parquet},
+               writer: %{format: :parquet, datetime_encoding: :unix_microseconds},
                committer_module: DuckFeeder.DuckLake.Committer.Postgres,
                pipeline_opts: %{max_rows: 1, max_bytes: 10_000, flush_interval_ms: 60_000},
                bootstrap_replication?: true,
@@ -325,7 +325,7 @@ defmodule DuckFeeder.RuntimeStreamIntegrationTest do
         " ORDER BY _op",
         ") TO STDOUT (FORMAT CSV, HEADER);",
         "COPY (",
-        "SELECT typeof(_xid) AS xid_type, typeof(_op) AS op_type FROM dl.main.",
+        "SELECT typeof(_xid) AS xid_type, typeof(_op) AS op_type, typeof(_ingest_ts) AS ingest_ts_type FROM dl.main.",
         trace_table,
         " LIMIT 1",
         ") TO STDOUT (FORMAT CSV, HEADER);"
@@ -338,8 +338,8 @@ defmodule DuckFeeder.RuntimeStreamIntegrationTest do
     assert duckdb_output =~ "_op,_record"
     assert duckdb_output =~ "I,"
     assert duckdb_output =~ "goose"
-    assert duckdb_output =~ "xid_type,op_type"
-    assert duckdb_output =~ "BIGINT,VARCHAR"
+    assert duckdb_output =~ "xid_type,op_type,ingest_ts_type"
+    assert duckdb_output =~ "BIGINT,VARCHAR,BIGINT"
 
     GenServer.stop(cdc_pid)
     GenServer.stop(service_pid)
@@ -371,7 +371,7 @@ defmodule DuckFeeder.RuntimeStreamIntegrationTest do
     assert {:ok, %{service_pid: service_pid, cdc_pid: cdc_pid}} =
              Runtime.start_stream(meta_conn, source_name, storage,
                observer_pid: self(),
-               writer: %{format: :parquet},
+               writer: %{format: :parquet, datetime_encoding: :unix_microseconds},
                committer_module: FailingCommitter,
                pipeline_opts: %{max_rows: 1, max_bytes: 10_000, flush_interval_ms: 60_000},
                bootstrap_replication?: true,

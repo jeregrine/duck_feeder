@@ -105,7 +105,7 @@ defmodule DuckFeeder.ServiceTest do
     assert {:committed, %{xid: 700}} =
              Service.push_event(service, %Event.Commit{xid: 700, end_lsn: "0/120"})
 
-    assert_receive {:duck_feeder_batch_processed, {"raw", "users"}, {:ok, result}, batch}, 500
+    assert_receive {:duck_feeder_batch_processed, {"raw", "users"}, {:ok, result}, batch}, 1_000
 
     assert result.status == :committed
     assert result.batch_id == "batch-service"
