@@ -71,6 +71,7 @@ This is the single source of truth task list for project status and next work.
   - [x] default spec commit path writes snapshot/table/column/mapping/data_file/stats/snapshot_changes/schema_versions
   - [x] default spec commit path writes table/file column stats (`ducklake_table_column_stats`, `ducklake_file_column_stats`)
   - [x] default spec commit path supports optional delete-file metadata + replacement end-snapshot transitions (`ducklake_delete_file`, retire prior `ducklake_data_file`/`ducklake_delete_file` rows)
+  - [x] batch processor supports optional physical delete-file production/upload/validation (`committer_opts[:delete_files_fun]` / `committer_opts[:delete_files]` + `validate_delete_files?`)
   - [x] default schema/commit history record (`duckfeeder_meta.schema_history`)
   - [x] default commit-log SQL target (`duckfeeder_meta.ducklake_commits`)
   - [x] `DuckFeeder.Service` end-to-end wiring module
@@ -105,6 +106,7 @@ This is the single source of truth task list for project status and next work.
   - [x] integration coverage for snapshot->WAL handoff replay behavior (preexisting rows + post-snapshot WAL)
   - [x] integration test file for append stream end-to-end flow (test-config-gated)
   - [x] integration coverage for optional delete-file metadata commits (`ducklake_delete_file` + snapshot change marker)
+  - [x] integration coverage for physically produced delete files (`delete_files_fun` rows -> writer/upload -> metadata rows)
   - [x] integration coverage for replacement/end-snapshot transitions (retire prior `ducklake_data_file` + `ducklake_delete_file` rows)
   - [x] tracer-shot assertions include row-level values, parquet type checks, and DuckLake metadata row verification (spec-table columns)
   - [x] failure-injection integration scenario for reconcile cleanup (`failed` -> `pending` + file deletion)
@@ -125,7 +127,7 @@ This is the single source of truth task list for project status and next work.
 
 ## Remaining to reach target architecture
 
-- [ ] **DuckLake metadata SQL commit phase 2** (delete-file physical-file generation/validation, schema-evolution conflict semantics, compaction-oriented metadata maintenance)
+- [ ] **DuckLake metadata SQL commit phase 2** (schema-evolution conflict semantics, compaction-oriented metadata maintenance)
 - [ ] **Snapshot/WAL handoff hardening** (restart/recovery edge cases, larger snapshot replay validation)
 - [ ] **Full integration suite** (Postgres + S3 + GCS + metadata DB)
 - [ ] **Benchee performance benchmarks** (single-writer CDC throughput + multi-writer append-stream latency/memory pressure)
@@ -137,7 +139,6 @@ This is the single source of truth task list for project status and next work.
 ## Next steps (soft plan)
 
 1. **DuckLake metadata maturation (phase 2)**
-   - extend from metadata-only delete-file rows to physical delete-file production/validation flow
    - tighten schema-evolution semantics to mirror DuckLake conflict/query expectations
    - complete compaction-oriented metadata writes/maintenance paths and related integration assertions
 

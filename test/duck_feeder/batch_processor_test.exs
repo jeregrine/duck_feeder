@@ -101,6 +101,25 @@ defmodule DuckFeeder.BatchProcessorTest do
     def delete_object(_config, _object_ref), do: :ok
   end
 
+  defmodule FakeStorageHeadMissing do
+    @behaviour DuckFeeder.Storage.Adapter
+
+    @impl true
+    def put_file(_config, _local_path, object_ref, _opts) do
+      if pid = Process.get(:test_pid), do: send(pid, {:storage_put_file, object_ref})
+      {:ok, %{etag: "etag-1", version_id: nil, size: 10}}
+    end
+
+    @impl true
+    def head_object(_config, object_ref) do
+      if pid = Process.get(:test_pid), do: send(pid, {:storage_head_object, object_ref})
+      {:error, :not_found}
+    end
+
+    @impl true
+    def delete_object(_config, _object_ref), do: :ok
+  end
+
   defmodule FakeCommitter do
     @behaviour DuckFeeder.DuckLake.Committer
 
@@ -172,6 +191,66 @@ defmodule DuckFeeder.BatchProcessorTest do
     assert opts[:ducklake_sql] == ["SELECT 1"]
 
     refute_received {:meta_commit_uploaded_batch, "batch-test"}
+  end
+
+  test "materializes and uploads delete files from rows before commit" do
+    context = %{
+      meta_module: FakeMeta,
+      meta_conn: :fake_conn,
+      designated_table_by_target: %{{"raw", "users"} => 7},
+      writer: %{adapter: FakeWriter},
+      storage: %{provider: :s3, bucket: "bucket", adapter: FakeStorage},
+      committer_module: FakeCommitter,
+      committer_opts: [
+        validate_delete_files?: true,
+        delete_files_fun: fn _table, batch, _write_result ->
+          [%{rows: Enum.map(batch.rows, fn row -> %{"row_id" => row["id"]} end), delete_count: 1}]
+        end
+      ],
+      object_prefix: "cdc"
+    }
+
+    batch = %{rows: [%{"id" => 1}], lsn_start: "0/10", lsn_end: "0/11", row_count: 1}
+
+    assert {:ok, result} = BatchProcessor.process_batch(context, {"raw", "users"}, batch)
+    assert result.status == :committed
+
+    assert_received {:committer_commit_batch, "batch-test", opts}
+    assert [%{path: delete_path, delete_count: 1}] = opts[:delete_files]
+    assert String.contains?(delete_path, "-deletes-1")
+
+    assert_received {:writer_write_batch, [%{"id" => 1}]}
+    assert_received {:writer_write_batch, [%{"row_id" => 1}]}
+
+    assert_received {:meta_put_batch_file, %{object_key: main_object_key}}
+    assert_received {:meta_put_batch_file, %{object_key: delete_object_key}}
+    assert main_object_key != delete_object_key
+  end
+
+  test "marks batch failed when delete file validation fails" do
+    context = %{
+      meta_module: FakeMeta,
+      meta_conn: :fake_conn,
+      designated_table_by_target: %{{"raw", "users"} => 7},
+      writer: %{adapter: FakeWriter},
+      storage: %{provider: :s3, bucket: "bucket", adapter: FakeStorageHeadMissing},
+      committer_module: FakeCommitter,
+      committer_opts: [
+        validate_delete_files?: true,
+        delete_files: [%{path: "raw/users/missing-delete.parquet"}]
+      ],
+      object_prefix: "cdc"
+    }
+
+    batch = %{rows: [%{"id" => 1}], lsn_start: "0/10", lsn_end: "0/11", row_count: 1}
+
+    assert {:error, {:delete_file_missing, "raw/users/missing-delete.parquet", :not_found}} =
+             BatchProcessor.process_batch(context, {"raw", "users"}, batch)
+
+    assert_received {:storage_head_object, %{key: "raw/users/missing-delete.parquet"}}
+    assert_received {:meta_transition_batch, "batch-test", :failed, opts}
+    assert Keyword.get(opts, :error_message)
+    refute_received {:committer_commit_batch, _, _}
   end
 
   test "marks batch failed when upload fails" do

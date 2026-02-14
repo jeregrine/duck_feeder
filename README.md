@@ -88,8 +88,9 @@ By default it writes spec-aligned rows into DuckLake metadata tables, including
 `ducklake_name_mapping`, `ducklake_data_file`, `ducklake_table_stats`,
 `ducklake_snapshot_changes`, and `ducklake_schema_versions`, plus DuckFeeder control-plane
 history/audit rows in `duckfeeder_meta.schema_history` and `duckfeeder_meta.ducklake_commits`.
-It also supports optional metadata-driven delete-file/compaction transitions via
-`committer_opts` (`:delete_files`, `:replace_data_file_ids`).
+It also supports optional delete-file/compaction transitions via `committer_opts`:
+`:delete_files`, `:delete_files_fun`, `:replace_data_file_ids`, and
+`:validate_delete_files?` (for storage `head_object` verification).
 (override via `committer_opts[:ducklake_sql]`).
 Runtime/service startup accepts `committer_module` and `committer_opts` passthrough.
 

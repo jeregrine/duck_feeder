@@ -323,4 +323,99 @@ defmodule DuckFeeder.AppendStreamIntegrationTest do
 
     GenServer.stop(stream)
   end
+
+  test "append stream can physically produce and validate delete files from rows", %{
+    meta_conn: meta_conn
+  } do
+    unique =
+      "#{System.system_time(:microsecond)}_#{System.unique_integer([:positive, :monotonic])}"
+
+    source_name = "append_delete_rows_source_#{unique}"
+    target_table = "append_delete_rows_events_#{unique}"
+
+    local_data_root =
+      Path.join(
+        System.tmp_dir!(),
+        "duck_feeder_append_delete_rows_trace_#{System.unique_integer([:positive])}"
+      )
+
+    File.mkdir_p!(local_data_root)
+
+    storage = %{
+      provider: :s3,
+      bucket: "bucket",
+      adapter: LocalFilesystemStorage,
+      root_dir: local_data_root
+    }
+
+    assert {:ok, source_id} =
+             Meta.register_source(meta_conn, %{
+               name: source_name,
+               connection_info: %{"dsn" => "append://local"},
+               slot_name: "append_delete_rows_slot_#{unique}",
+               publication_name: "append_delete_rows_pub_#{unique}",
+               status: "active"
+             })
+
+    assert {:ok, designated_table_id} =
+             Meta.register_designated_table(meta_conn, %{
+               source_id: source_id,
+               source_schema: "app",
+               source_table: "events",
+               target_schema: "raw",
+               target_table: target_table,
+               mode: "cdc_changelog"
+             })
+
+    assert {:ok, designated_tables} = Meta.list_designated_tables(meta_conn, source_id: source_id)
+
+    delete_files_fun = fn _table, batch, _write_result ->
+      [
+        %{
+          rows: Enum.map(batch.rows, fn _row -> %{"row_id" => 1} end),
+          delete_count: length(batch.rows)
+        }
+      ]
+    end
+
+    assert {:ok, stream} =
+             AppendStream.start_link(
+               designated_tables: designated_tables,
+               meta_conn: meta_conn,
+               storage: storage,
+               writer: %{format: :parquet, datetime_encoding: :unix_microseconds},
+               committer_module: DuckFeeder.DuckLake.Committer.Postgres,
+               committer_opts: [
+                 validate_delete_files?: true,
+                 delete_files_fun: delete_files_fun
+               ],
+               pipeline_opts: %{max_rows: 1, max_bytes: 10_000, flush_interval_ms: 60_000},
+               observer_pid: self(),
+               object_prefix: source_name
+             )
+
+    assert :ok = AppendStream.append(stream, target_table, %{"kind" => "first", "value" => 1})
+
+    assert_receive {:duck_feeder_append_batch_processed, {"raw", ^target_table}, {:ok, _result},
+                    _batch},
+                   10_000
+
+    assert {:ok, %{rows: [[delete_path, delete_count]]}} =
+             Postgrex.query(
+               meta_conn,
+               """
+               SELECT path, delete_count
+               FROM ducklake_metadata.ducklake_delete_file
+               WHERE table_id = $1
+               ORDER BY delete_file_id DESC
+               LIMIT 1
+               """,
+               [designated_table_id]
+             )
+
+    assert delete_count == 1
+    assert File.exists?(Path.join(local_data_root, delete_path))
+
+    GenServer.stop(stream)
+  end
 end
