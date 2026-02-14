@@ -1,7 +1,7 @@
 defmodule DuckFeeder.RuntimeStreamIntegrationTest do
   use ExUnit.Case, async: false
 
-  alias DuckFeeder.{Meta, Runtime}
+  alias DuckFeeder.{Meta, Reconciler, Runtime}
   alias DuckFeeder.CDC.{ConnectionOptions, Setup}
 
   @moduletag :integration
@@ -56,6 +56,35 @@ defmodule DuckFeeder.RuntimeStreamIntegrationTest do
         {:error, reason} -> {:error, reason}
       end
     end
+  end
+
+  defmodule FailingCommitter do
+    @behaviour DuckFeeder.DuckLake.Committer
+
+    @impl true
+    def commit_batch(_meta_conn, _batch_id, _opts), do: {:error, :forced_commit_failure}
+  end
+
+  defmodule FilteredMeta do
+    def list_stale_batches(conn, opts) do
+      designated_table_id = Process.get(:reconcile_designated_table_id)
+
+      case DuckFeeder.Meta.list_stale_batches(conn, opts) do
+        {:ok, batches} when is_integer(designated_table_id) ->
+          {:ok, Enum.filter(batches, &(&1.designated_table_id == designated_table_id))}
+
+        other ->
+          other
+      end
+    end
+
+    def list_batch_files(conn, batch_id), do: DuckFeeder.Meta.list_batch_files(conn, batch_id)
+
+    def transition_batch(conn, batch_id, state, opts),
+      do: DuckFeeder.Meta.transition_batch(conn, batch_id, state, opts)
+
+    def commit_uploaded_batch(conn, batch_id),
+      do: DuckFeeder.Meta.commit_uploaded_batch(conn, batch_id)
   end
 
   setup_all do
@@ -311,6 +340,96 @@ defmodule DuckFeeder.RuntimeStreamIntegrationTest do
     assert duckdb_output =~ "goose"
     assert duckdb_output =~ "xid_type,op_type"
     assert duckdb_output =~ "BIGINT,VARCHAR"
+
+    GenServer.stop(cdc_pid)
+    GenServer.stop(service_pid)
+  end
+
+  test "reconciler cleans failed uploaded batch and resets it to pending", %{
+    meta_conn: meta_conn,
+    source_conn: source_conn,
+    source_name: source_name,
+    source_table: source_table,
+    target_table: target_table,
+    designated_table_id: designated_table_id
+  } do
+    local_data_root =
+      Path.join(
+        System.tmp_dir!(),
+        "duck_feeder_reconcile_trace_#{System.unique_integer([:positive])}"
+      )
+
+    File.mkdir_p!(local_data_root)
+
+    storage = %{
+      provider: :s3,
+      bucket: "bucket",
+      adapter: LocalFilesystemStorage,
+      root_dir: local_data_root
+    }
+
+    assert {:ok, %{service_pid: service_pid, cdc_pid: cdc_pid}} =
+             Runtime.start_stream(meta_conn, source_name, storage,
+               observer_pid: self(),
+               writer: %{format: :parquet},
+               committer_module: FailingCommitter,
+               pipeline_opts: %{max_rows: 1, max_bytes: 10_000, flush_interval_ms: 60_000},
+               bootstrap_replication?: true,
+               auto_reconnect: false,
+               sync_connect: true
+             )
+
+    Process.sleep(150)
+
+    assert {:ok, _} =
+             Postgrex.query(
+               source_conn,
+               "INSERT INTO public.\"#{source_table}\" (id, name) VALUES (3, 'heron')",
+               []
+             )
+
+    assert_receive {:duck_feeder_batch_processed, {"raw", ^target_table},
+                    {:error, :forced_commit_failure}, _batch},
+                   10_000
+
+    assert {:ok, %{rows: [[batch_id, state]]}} =
+             Postgrex.query(
+               meta_conn,
+               """
+               SELECT batch_id, state
+               FROM duckfeeder_meta.batches
+               WHERE designated_table_id = $1
+               ORDER BY inserted_at DESC
+               LIMIT 1
+               """,
+               [designated_table_id]
+             )
+
+    assert state == "failed"
+
+    assert {:ok, [%{object_key: object_key}]} = Meta.list_batch_files(meta_conn, batch_id)
+    local_parquet_path = Path.join(local_data_root, object_key)
+    assert File.exists?(local_parquet_path)
+
+    Process.put(:reconcile_designated_table_id, designated_table_id)
+
+    assert {:ok, summary} =
+             Reconciler.reconcile(
+               %{
+                 meta_conn: meta_conn,
+                 meta_module: FilteredMeta,
+                 storage: storage
+               },
+               states: [:failed],
+               cleanup_failed_uploads?: true,
+               stale_before: DateTime.add(DateTime.utc_now(), 60, :second)
+             )
+
+    assert summary.retried == [batch_id]
+    assert summary.errors == []
+
+    refute File.exists?(local_parquet_path)
+    assert {:ok, :pending} = Meta.get_batch_state(meta_conn, batch_id)
 
     GenServer.stop(cdc_pid)
     GenServer.stop(service_pid)

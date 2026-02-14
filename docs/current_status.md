@@ -138,6 +138,11 @@ This tracks progress against `docs/plan_compact.md`.
    - keep `config/test.exs` as the default integration harness config surface
    - document local Postgres logical-replication prerequisites clearly in README
 
+7. **Explicit table-selection config/API**
+   - add a clear Elixir-first table registration surface ("sync these tables")
+   - support per-table mapping from Postgres source table to DuckLake target table
+   - document parity goals with tools that provide table-creation/sync helpers (e.g. Moonlink-style workflows)
+
 ## Local test status
 
 - `mix test` passes for current codebase.
