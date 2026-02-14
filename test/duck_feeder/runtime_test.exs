@@ -239,6 +239,28 @@ defmodule DuckFeeder.RuntimeTest do
     Process.exit(cdc_pid, :normal)
   end
 
+  test "start_stream applies default reconnect backoff" do
+    storage = %{provider: :s3, bucket: "bucket", adapter: DuckFeeder.Storage.S3}
+
+    assert {:ok, %{service_pid: service_pid, cdc_pid: cdc_pid, start_lsn: "0/20"}} =
+             Runtime.start_stream(:meta_conn, "source-a", storage,
+               meta_module: FakeMeta,
+               service_module: FakeService,
+               cdc_module: FakeCDC,
+               connection_options_module: FakeConnectionOptions,
+               bootstrap_replication?: false,
+               observer_pid: self(),
+               service_name: nil,
+               cdc_name: nil
+             )
+
+    assert_receive {:fake_cdc_start, cdc_opts}
+    assert cdc_opts[:reconnect_backoff] == 1_000
+
+    GenServer.stop(service_pid)
+    Process.exit(cdc_pid, :normal)
+  end
+
   test "start_stream can bootstrap publication/slot and adjust start lsn" do
     storage = %{provider: :s3, bucket: "bucket", adapter: DuckFeeder.Storage.S3}
 

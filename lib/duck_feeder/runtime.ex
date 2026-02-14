@@ -6,6 +6,8 @@ defmodule DuckFeeder.Runtime do
   alias DuckFeeder.{Meta, Service}
   alias DuckFeeder.CDC.{Bootstrap, Connection, ConnectionOptions, Lsn}
 
+  @default_reconnect_backoff 1_000
+
   @spec service_options(pid(), String.t(), map(), keyword()) ::
           {:ok, keyword()} | {:error, term()}
   def service_options(meta_conn, source_name, storage_config, opts \\ [])
@@ -158,6 +160,12 @@ defmodule DuckFeeder.Runtime do
           end
       end
 
+    reconnect_backoff =
+      case Keyword.fetch(opts, :reconnect_backoff) do
+        {:ok, value} -> value
+        :error -> @default_reconnect_backoff
+      end
+
     [
       name: Keyword.get(opts, :cdc_name),
       connection_opts: connection_opts,
@@ -170,7 +178,7 @@ defmodule DuckFeeder.Runtime do
       converter_module: Keyword.get(opts, :converter_module),
       event_sink: event_sink,
       auto_reconnect: Keyword.get(opts, :auto_reconnect, true),
-      reconnect_backoff: Keyword.get(opts, :reconnect_backoff),
+      reconnect_backoff: reconnect_backoff,
       sync_connect: Keyword.get(opts, :sync_connect, true)
     ]
     |> Enum.reject(fn {_key, value} -> is_nil(value) end)
