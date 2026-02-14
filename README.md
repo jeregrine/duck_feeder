@@ -2,14 +2,16 @@
 
 Elixir-first CDC ingest library (Postgres WAL -> Parquet -> object storage -> DuckLake metadata).
 
-## Current status
+## Project goal
 
-Started with a **semi-generic storage interface** supporting:
-- `:s3` (AWS S3 and S3-compatible)
-- `:gcs` (Google Cloud Storage JSON API)
+Production-focused Elixir runtime that:
+- runs inside your OTP supervision tree,
+- streams Postgres CDC/WAL,
+- batches writes to Parquet,
+- uploads to object storage,
+- and commits metadata into a DuckLake-compatible Postgres catalog.
 
-HTTP stack is **Req-only** (no hackney dependency in this project).
-
+Current implementation keeps HTTP/storage interactions Req-only and keeps Elixir/Rust dependencies minimal.
 `DuckFeeder.Config` validates runtime config (source/storage/metadata/ingest) with NimbleOptions.
 
 ## Metadata bootstrap from config
@@ -41,6 +43,25 @@ You can seed `duckfeeder_meta` source + designated table rows from runtime confi
   )
 ```
 
+## Ecto migration integration
+
+DuckFeeder provides migration helpers intended to be wrapped by your Ecto migrations:
+
+```elixir
+defmodule MyApp.Repo.Migrations.AddDuckFeeder do
+  use Ecto.Migration
+
+  def up, do: DuckFeeder.Migrations.up(repo: repo())
+  def down, do: DuckFeeder.Migrations.down(repo: repo())
+end
+```
+
+You can also check the applied DuckFeeder migration version:
+
+```elixir
+DuckFeeder.Migrations.migrated_version(repo: MyApp.Repo)
+```
+
 ## Writer API
 
 `DuckFeeder.Writer` supports both JSONL and Parquet output.
@@ -62,11 +83,11 @@ normalization in Elixir and avoid extra Rust parsing dependencies.
 It supports pluggable committers via `DuckFeeder.DuckLake.Committer` (default no-op committer).
 `DuckFeeder.DuckLake.Committer.Postgres` is available as a transactional scaffold for
 running DuckLake SQL statements + checkpoint commit in one transaction.
-By default it writes spec-aligned snapshot/file/change rows into
-`ducklake_metadata.ducklake_snapshot`, `ducklake_metadata.ducklake_data_file`, and
-`ducklake_metadata.ducklake_snapshot_changes`, refreshes `ducklake_metadata.ducklake_table_stats`,
-records schema/commit history in `duckfeeder_meta.schema_history`, and writes an audit row in
-`duckfeeder_meta.ducklake_commits`.
+By default it writes spec-aligned rows into DuckLake metadata tables, including
+`ducklake_snapshot`, `ducklake_table`, `ducklake_column`, `ducklake_column_mapping`,
+`ducklake_name_mapping`, `ducklake_data_file`, `ducklake_table_stats`,
+`ducklake_snapshot_changes`, and `ducklake_schema_versions`, plus DuckFeeder control-plane
+history/audit rows in `duckfeeder_meta.schema_history` and `duckfeeder_meta.ducklake_commits`.
 (override via `committer_opts[:ducklake_sql]`).
 Runtime/service startup accepts `committer_module` and `committer_opts` passthrough.
 

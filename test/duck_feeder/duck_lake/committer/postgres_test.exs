@@ -115,22 +115,49 @@ defmodule DuckFeeder.DuckLake.Committer.PostgresTest do
                query_fun: query_fun,
                rollback_fun: rollback_fun,
                object_key: "raw/users/file-1.parquet",
-               write_result: %{row_count: 10, file_size_bytes: 99}
+               write_result: %{row_count: 10, file_size_bytes: 99},
+               batch: %{rows: [%{"id" => 1, "name" => "duck"}]}
              )
 
-    assert_received {:query, spec_sql, ["batch-1", "raw/users/file-1.parquet", 10, 99]}
-    assert spec_sql =~ "INSERT INTO ducklake_metadata.ducklake_snapshot"
-
-    assert_received {:query, stats_sql, ["batch-1"]}
-    assert stats_sql =~ "INSERT INTO ducklake_metadata.ducklake_table_stats"
-
-    assert_received {:query, history_sql, ["batch-1", "raw/users/file-1.parquet", 10, 99]}
-    assert history_sql =~ "INSERT INTO duckfeeder_meta.schema_history"
-
-    assert_received {:query, log_sql, ["batch-1", "raw/users/file-1.parquet", 10, 99]}
-    assert log_sql =~ "INSERT INTO duckfeeder_meta.ducklake_commits"
-
     assert_received {:meta_commit_uploaded_batch_tx, "batch-1"}
+
+    queries =
+      Stream.repeatedly(fn ->
+        receive do
+          {:query, sql, params} -> {sql, params}
+        after
+          10 -> :done
+        end
+      end)
+      |> Enum.take_while(&(&1 != :done))
+
+    assert Enum.any?(queries, fn {sql, _} ->
+             sql =~ "INSERT INTO ducklake_metadata.ducklake_snapshot"
+           end)
+
+    assert Enum.any?(queries, fn {sql, _} ->
+             sql =~ "INSERT INTO ducklake_metadata.ducklake_table"
+           end)
+
+    assert Enum.any?(queries, fn {sql, _} ->
+             sql =~ "INSERT INTO ducklake_metadata.ducklake_data_file"
+           end)
+
+    assert Enum.any?(queries, fn {sql, _} ->
+             sql =~ "INSERT INTO ducklake_metadata.ducklake_table_stats"
+           end)
+
+    assert Enum.any?(queries, fn {sql, _} ->
+             sql =~ "INSERT INTO ducklake_metadata.ducklake_snapshot_changes"
+           end)
+
+    assert Enum.any?(queries, fn {sql, _} ->
+             sql =~ "INSERT INTO duckfeeder_meta.schema_history"
+           end)
+
+    assert Enum.any?(queries, fn {sql, _} ->
+             sql =~ "INSERT INTO duckfeeder_meta.ducklake_commits"
+           end)
   end
 
   test "returns error for invalid statement shape" do

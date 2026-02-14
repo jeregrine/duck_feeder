@@ -22,6 +22,10 @@ This is the single source of truth task list for project status and next work.
   - [x] explicit Elixir table-selection for seeding (`seed_meta/3` `tables:` option)
   - [x] per-table target remapping (`{"target_table", "source_table"}` selection form)
 
+- [x] **Migration integration**
+  - [x] `DuckFeeder.Migrations` / `DuckFeeder.Migration` helpers for Ecto migration wrappers
+  - [x] migration up/down/version flow via repo SQL execution
+
 - [x] **CDC foundations**
   - [x] `DuckFeeder.CDC.Event`
   - [x] `DuckFeeder.CDC.TransactionBuffer`
@@ -61,8 +65,8 @@ This is the single source of truth task list for project status and next work.
   - [x] `DuckFeeder.BatchProcessor`
   - [x] `DuckFeeder.DuckLake.Committer` interface + no-op committer
   - [x] `DuckFeeder.DuckLake.Committer.Postgres` transactional scaffold
-  - [x] default spec-aligned snapshot/file/change SQL scaffold (`ducklake_metadata.*`)
-  - [x] default spec-aligned table stats refresh (`ducklake_metadata.ducklake_table_stats`)
+  - [x] DuckLake spec-table bootstrap aligned to `ducklake-web` table definitions (`ducklake_metadata.*`)
+  - [x] default spec commit path writes snapshot/table/column/mapping/data_file/stats/snapshot_changes/schema_versions
   - [x] default schema/commit history record (`duckfeeder_meta.schema_history`)
   - [x] default commit-log SQL target (`duckfeeder_meta.ducklake_commits`)
   - [x] `DuckFeeder.Service` end-to-end wiring module
@@ -93,7 +97,7 @@ This is the single source of truth task list for project status and next work.
   - [x] integration test file for meta store (test-config-gated)
   - [x] integration test file for CDC connection stream (test-config-gated)
   - [x] integration test file for runtime start_stream end-to-end flow (test-config-gated)
-  - [x] tracer-shot assertions include row-level values, parquet type checks, and DuckLake metadata row verification
+  - [x] tracer-shot assertions include row-level values, parquet type checks, and DuckLake metadata row verification (spec-table columns)
   - [x] failure-injection integration scenario for reconcile cleanup (`failed` -> `pending` + file deletion)
   - [x] strict failed-cleanup integration scenario for missing file metadata (`require_failed_batch_files?`)
   - [x] helper script for integration runs (local pg + duckdb prerequisites)
@@ -115,27 +119,27 @@ This is the single source of truth task list for project status and next work.
 - [ ] **Replication client hardening** (bootstrap lifecycle, reconnect policy tuning, backpressure/metrics)
 - [ ] **Production initial snapshot + WAL handoff path** (direct ingest integration + replay validation)
 - [ ] **Parquet writer hardening** (type fidelity, performance tuning, and compatibility validation)
-- [ ] **Full DuckLake metadata SQL commit implementation** (table metadata/stats/history beyond snapshot+file append path)
+- [ ] **DuckLake metadata SQL commit phase 2** (delete-file flows, file/column stats richness, schema-evolution conflict semantics, compaction-oriented metadata)
 - [ ] **Advanced recovery/reconciler loop** (orphan detection, policy tuning, large-scale cleanup safety)
 - [ ] **Full integration suite** (Postgres + S3 + GCS + metadata DB)
 
 ## Next steps (soft plan)
 
-1. **DuckLake metadata maturation**
-   - incrementally align metadata writes toward fuller DuckLake spec coverage
-   - preserve current ingest path while expanding snapshot/history/table metadata depth
+1. **DuckLake metadata maturation (phase 2)**
+   - implement delete-file and richer stats flows (`ducklake_delete_file`, `ducklake_file_column_stats`, `ducklake_table_column_stats`)
+   - tighten schema-evolution semantics to mirror DuckLake conflict/query expectations
 
-2. **Parquet writer hardening (phase 2)**
+2. **Full integration suite expansion**
+   - keep local filesystem-backed integration as the primary gate now
+   - add provider-backed S3/GCS matrix after core DuckLake metadata semantics are stable
+
+3. **Parquet writer hardening (phase 2)**
    - add more precise typing for temporal/decimal-like fields where practical
    - tune performance and compatibility across DuckDB/object-store readers
    - prefer Elixir-side normalization/casting for temporal values to keep Rust deps minimal
 
-3. **Recovery/reconcile hardening (phase 2)**
+4. **Recovery/reconcile hardening (phase 2)**
    - add orphan-detection integration cases and larger-batch cleanup safety checks
-
-4. **Full integration matrix expansion**
-   - extend local integration beyond postgres/localfs to provider-backed S3/GCS paths
-   - keep `mix test --only integration` as the required release gate
 
 5. **Dependency footprint minimization (Elixir + Rust)**
    - keep runtime deps minimal and avoid heavy crates unless required

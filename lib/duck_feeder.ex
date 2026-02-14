@@ -10,6 +10,10 @@ defmodule DuckFeeder do
   defdelegate seed_meta(meta_conn, config, opts \\ []), to: DuckFeeder.Bootstrap
   defdelegate seed_and_start_stream(meta_conn, config, opts \\ []), to: DuckFeeder.Bootstrap
 
+  defdelegate migrate_up(opts \\ []), to: DuckFeeder.Migrations, as: :up
+  defdelegate migrate_down(opts \\ []), to: DuckFeeder.Migrations, as: :down
+  defdelegate migrated_version(opts \\ []), to: DuckFeeder.Migrations
+
   defdelegate runtime_child_spec(meta_conn, source_name, storage_config, opts \\ []),
     to: DuckFeeder.Integration
 

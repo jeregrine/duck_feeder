@@ -15,6 +15,8 @@ defmodule DuckFeeder.Meta.StoreIntegrationTest do
 
     {:ok, conn_opts} = ConnectionOptions.parse_url(pg_url)
     {:ok, conn} = Postgrex.start_link(conn_opts ++ [types: DuckFeeder.Postgrex.Types])
+    assert {:ok, _} = Postgrex.query(conn, "DROP SCHEMA IF EXISTS ducklake_metadata CASCADE", [])
+    assert {:ok, _} = Postgrex.query(conn, "DROP SCHEMA IF EXISTS duckfeeder_meta CASCADE", [])
     assert :ok = Meta.bootstrap(conn)
 
     on_exit(fn ->

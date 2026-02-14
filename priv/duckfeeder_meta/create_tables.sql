@@ -77,37 +77,264 @@ CREATE INDEX IF NOT EXISTS schema_history_table_lsn_idx
 
 CREATE SCHEMA IF NOT EXISTS ducklake_metadata;
 
-CREATE TABLE IF NOT EXISTS ducklake_metadata.ducklake_snapshot (
-  id BIGSERIAL PRIMARY KEY,
-  table_id BIGINT NOT NULL,
-  lsn_end TEXT NOT NULL,
-  committed_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-  CONSTRAINT ducklake_snapshot_unique_table_lsn UNIQUE (table_id, lsn_end)
+CREATE TABLE IF NOT EXISTS ducklake_metadata.ducklake_metadata (
+  key VARCHAR NOT NULL,
+  value VARCHAR NOT NULL,
+  scope VARCHAR,
+  scope_id BIGINT
 );
 
-CREATE TABLE IF NOT EXISTS ducklake_metadata.ducklake_data_file (
-  id BIGSERIAL PRIMARY KEY,
-  snapshot_id BIGINT NOT NULL REFERENCES ducklake_metadata.ducklake_snapshot(id) ON DELETE CASCADE,
-  object_key TEXT NOT NULL,
-  row_count BIGINT NOT NULL DEFAULT 0,
-  file_size BIGINT NOT NULL DEFAULT 0,
-  inserted_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-  CONSTRAINT ducklake_data_file_unique_snapshot_object UNIQUE (snapshot_id, object_key)
+CREATE TABLE IF NOT EXISTS ducklake_metadata.ducklake_snapshot (
+  snapshot_id BIGINT PRIMARY KEY,
+  snapshot_time TIMESTAMPTZ,
+  schema_version BIGINT,
+  next_catalog_id BIGINT,
+  next_file_id BIGINT
 );
 
 CREATE TABLE IF NOT EXISTS ducklake_metadata.ducklake_snapshot_changes (
-  id BIGSERIAL PRIMARY KEY,
-  snapshot_id BIGINT NOT NULL REFERENCES ducklake_metadata.ducklake_snapshot(id) ON DELETE CASCADE,
-  change_kind TEXT NOT NULL DEFAULT 'append',
-  data_file_id BIGINT NOT NULL REFERENCES ducklake_metadata.ducklake_data_file(id) ON DELETE CASCADE,
-  inserted_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-  CONSTRAINT ducklake_snapshot_changes_unique UNIQUE (snapshot_id, data_file_id, change_kind)
+  snapshot_id BIGINT PRIMARY KEY,
+  changes_made VARCHAR,
+  author VARCHAR,
+  commit_message VARCHAR,
+  commit_extra_info VARCHAR
+);
+
+CREATE TABLE IF NOT EXISTS ducklake_metadata.ducklake_schema (
+  schema_id BIGINT PRIMARY KEY,
+  schema_uuid UUID,
+  begin_snapshot BIGINT,
+  end_snapshot BIGINT,
+  schema_name VARCHAR,
+  path VARCHAR,
+  path_is_relative BOOLEAN
+);
+
+CREATE TABLE IF NOT EXISTS ducklake_metadata.ducklake_table (
+  table_id BIGINT,
+  table_uuid UUID,
+  begin_snapshot BIGINT,
+  end_snapshot BIGINT,
+  schema_id BIGINT,
+  table_name VARCHAR,
+  path VARCHAR,
+  path_is_relative BOOLEAN
+);
+
+CREATE TABLE IF NOT EXISTS ducklake_metadata.ducklake_view (
+  view_id BIGINT,
+  view_uuid UUID,
+  begin_snapshot BIGINT,
+  end_snapshot BIGINT,
+  schema_id BIGINT,
+  view_name VARCHAR,
+  dialect VARCHAR,
+  sql VARCHAR,
+  column_aliases VARCHAR
+);
+
+CREATE TABLE IF NOT EXISTS ducklake_metadata.ducklake_tag (
+  object_id BIGINT,
+  begin_snapshot BIGINT,
+  end_snapshot BIGINT,
+  key VARCHAR,
+  value VARCHAR
+);
+
+CREATE TABLE IF NOT EXISTS ducklake_metadata.ducklake_column_tag (
+  table_id BIGINT,
+  column_id BIGINT,
+  begin_snapshot BIGINT,
+  end_snapshot BIGINT,
+  key VARCHAR,
+  value VARCHAR
+);
+
+CREATE TABLE IF NOT EXISTS ducklake_metadata.ducklake_data_file (
+  data_file_id BIGINT PRIMARY KEY,
+  table_id BIGINT,
+  begin_snapshot BIGINT,
+  end_snapshot BIGINT,
+  file_order BIGINT,
+  path VARCHAR,
+  path_is_relative BOOLEAN,
+  file_format VARCHAR,
+  record_count BIGINT,
+  file_size_bytes BIGINT,
+  footer_size BIGINT,
+  row_id_start BIGINT,
+  partition_id BIGINT,
+  encryption_key VARCHAR,
+  partial_file_info VARCHAR,
+  mapping_id BIGINT
+);
+
+CREATE TABLE IF NOT EXISTS ducklake_metadata.ducklake_file_column_stats (
+  data_file_id BIGINT,
+  table_id BIGINT,
+  column_id BIGINT,
+  column_size_bytes BIGINT,
+  value_count BIGINT,
+  null_count BIGINT,
+  min_value VARCHAR,
+  max_value VARCHAR,
+  contains_nan BOOLEAN,
+  extra_stats VARCHAR
+);
+
+CREATE TABLE IF NOT EXISTS ducklake_metadata.ducklake_delete_file (
+  delete_file_id BIGINT PRIMARY KEY,
+  table_id BIGINT,
+  begin_snapshot BIGINT,
+  end_snapshot BIGINT,
+  data_file_id BIGINT,
+  path VARCHAR,
+  path_is_relative BOOLEAN,
+  format VARCHAR,
+  delete_count BIGINT,
+  file_size_bytes BIGINT,
+  footer_size BIGINT,
+  encryption_key VARCHAR
+);
+
+CREATE TABLE IF NOT EXISTS ducklake_metadata.ducklake_column (
+  column_id BIGINT,
+  begin_snapshot BIGINT,
+  end_snapshot BIGINT,
+  table_id BIGINT,
+  column_order BIGINT,
+  column_name VARCHAR,
+  column_type VARCHAR,
+  initial_default VARCHAR,
+  default_value VARCHAR,
+  nulls_allowed BOOLEAN,
+  parent_column BIGINT
 );
 
 CREATE TABLE IF NOT EXISTS ducklake_metadata.ducklake_table_stats (
-  table_id BIGINT PRIMARY KEY,
-  row_count BIGINT NOT NULL DEFAULT 0,
-  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+  table_id BIGINT,
+  record_count BIGINT,
+  next_row_id BIGINT,
+  file_size_bytes BIGINT
+);
+
+CREATE TABLE IF NOT EXISTS ducklake_metadata.ducklake_table_column_stats (
+  table_id BIGINT,
+  column_id BIGINT,
+  contains_null BOOLEAN,
+  contains_nan BOOLEAN,
+  min_value VARCHAR,
+  max_value VARCHAR,
+  extra_stats VARCHAR
+);
+
+CREATE TABLE IF NOT EXISTS ducklake_metadata.ducklake_partition_info (
+  partition_id BIGINT,
+  table_id BIGINT,
+  begin_snapshot BIGINT,
+  end_snapshot BIGINT
+);
+
+CREATE TABLE IF NOT EXISTS ducklake_metadata.ducklake_partition_column (
+  partition_id BIGINT,
+  table_id BIGINT,
+  partition_key_index BIGINT,
+  column_id BIGINT,
+  transform VARCHAR
+);
+
+CREATE TABLE IF NOT EXISTS ducklake_metadata.ducklake_file_partition_value (
+  data_file_id BIGINT,
+  table_id BIGINT,
+  partition_key_index BIGINT,
+  partition_value VARCHAR
+);
+
+CREATE TABLE IF NOT EXISTS ducklake_metadata.ducklake_files_scheduled_for_deletion (
+  data_file_id BIGINT,
+  path VARCHAR,
+  path_is_relative BOOLEAN,
+  schedule_start TIMESTAMPTZ
+);
+
+CREATE TABLE IF NOT EXISTS ducklake_metadata.ducklake_inlined_data_tables (
+  table_id BIGINT,
+  table_name VARCHAR,
+  schema_version BIGINT
+);
+
+CREATE TABLE IF NOT EXISTS ducklake_metadata.ducklake_column_mapping (
+  mapping_id BIGINT,
+  table_id BIGINT,
+  type VARCHAR
+);
+
+CREATE TABLE IF NOT EXISTS ducklake_metadata.ducklake_name_mapping (
+  mapping_id BIGINT,
+  column_id BIGINT,
+  source_name VARCHAR,
+  target_field_id BIGINT,
+  parent_column BIGINT,
+  is_partition BOOLEAN
+);
+
+CREATE TABLE IF NOT EXISTS ducklake_metadata.ducklake_schema_versions (
+  begin_snapshot BIGINT,
+  schema_version BIGINT
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS ducklake_table_stats_table_id_idx
+  ON ducklake_metadata.ducklake_table_stats (table_id);
+
+CREATE UNIQUE INDEX IF NOT EXISTS ducklake_active_table_idx
+  ON ducklake_metadata.ducklake_table (table_id)
+  WHERE end_snapshot IS NULL;
+
+CREATE UNIQUE INDEX IF NOT EXISTS ducklake_active_column_name_idx
+  ON ducklake_metadata.ducklake_column (table_id, column_name)
+  WHERE end_snapshot IS NULL;
+
+CREATE UNIQUE INDEX IF NOT EXISTS ducklake_column_mapping_table_idx
+  ON ducklake_metadata.ducklake_column_mapping (table_id);
+
+CREATE UNIQUE INDEX IF NOT EXISTS ducklake_name_mapping_unique_idx
+  ON ducklake_metadata.ducklake_name_mapping (mapping_id, source_name, COALESCE(parent_column, -1));
+
+INSERT INTO ducklake_metadata.ducklake_snapshot (snapshot_id, snapshot_time, schema_version, next_catalog_id, next_file_id)
+SELECT 0, now(), 0, 1, 1
+WHERE NOT EXISTS (
+  SELECT 1 FROM ducklake_metadata.ducklake_snapshot WHERE snapshot_id = 0
+);
+
+INSERT INTO ducklake_metadata.ducklake_snapshot_changes (snapshot_id, changes_made, author, commit_message, commit_extra_info)
+SELECT 0, 'created_schema:"main"', NULL, NULL, NULL
+WHERE NOT EXISTS (
+  SELECT 1 FROM ducklake_metadata.ducklake_snapshot_changes WHERE snapshot_id = 0
+);
+
+INSERT INTO ducklake_metadata.ducklake_metadata (key, value, scope, scope_id)
+SELECT key, value, NULL, NULL
+FROM (VALUES ('version', '0.3'), ('created_by', 'duck_feeder')) AS seed(key, value)
+WHERE NOT EXISTS (
+  SELECT 1
+  FROM ducklake_metadata.ducklake_metadata existing
+  WHERE existing.key = seed.key
+    AND existing.scope IS NULL
+    AND existing.scope_id IS NULL
+);
+
+INSERT INTO ducklake_metadata.ducklake_schema (schema_id, schema_uuid, begin_snapshot, end_snapshot, schema_name, path, path_is_relative)
+SELECT 0, '00000000-0000-0000-0000-000000000000'::uuid, 0, NULL, 'main', 'main/', true
+WHERE NOT EXISTS (
+  SELECT 1 FROM ducklake_metadata.ducklake_schema WHERE schema_id = 0
+);
+
+INSERT INTO ducklake_metadata.ducklake_schema_versions (begin_snapshot, schema_version)
+SELECT 0, 0
+WHERE NOT EXISTS (
+  SELECT 1
+  FROM ducklake_metadata.ducklake_schema_versions
+  WHERE begin_snapshot = 0 AND schema_version = 0
 );
 
 CREATE TABLE IF NOT EXISTS duckfeeder_meta.ducklake_commits (

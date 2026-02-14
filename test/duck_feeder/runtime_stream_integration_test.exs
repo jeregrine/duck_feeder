@@ -99,6 +99,13 @@ defmodule DuckFeeder.RuntimeStreamIntegrationTest do
     {:ok, source_conn_opts} = ConnectionOptions.parse_url(source_url)
 
     {:ok, meta_conn} = Postgrex.start_link(meta_conn_opts ++ [types: DuckFeeder.Postgrex.Types])
+
+    assert {:ok, _} =
+             Postgrex.query(meta_conn, "DROP SCHEMA IF EXISTS ducklake_metadata CASCADE", [])
+
+    assert {:ok, _} =
+             Postgrex.query(meta_conn, "DROP SCHEMA IF EXISTS duckfeeder_meta CASCADE", [])
+
     assert :ok = Meta.bootstrap(meta_conn)
 
     {:ok, source_conn} =
@@ -271,11 +278,11 @@ defmodule DuckFeeder.RuntimeStreamIntegrationTest do
     assert {:ok, %{rows: [[snapshot_count]]}} =
              Postgrex.query(
                meta_conn,
-               "SELECT count(*) FROM ducklake_metadata.ducklake_snapshot WHERE table_id = $1",
-               [designated_table_id]
+               "SELECT count(*) FROM ducklake_metadata.ducklake_snapshot",
+               []
              )
 
-    assert snapshot_count >= 1
+    assert snapshot_count >= 2
 
     assert {:ok, %{rows: [[commit_count]]}} =
              Postgrex.query(
@@ -286,41 +293,44 @@ defmodule DuckFeeder.RuntimeStreamIntegrationTest do
 
     assert commit_count >= 1
 
-    assert {:ok, %{rows: [[ducklake_object_key, ducklake_file_size, ducklake_row_count]]}} =
+    assert {:ok, %{rows: [[ducklake_path, ducklake_file_size, ducklake_record_count]]}} =
              Postgrex.query(
                meta_conn,
                """
-               SELECT data_file.object_key, data_file.file_size, data_file.row_count
+               SELECT data_file.path, data_file.file_size_bytes, data_file.record_count
                FROM ducklake_metadata.ducklake_data_file data_file
-               JOIN ducklake_metadata.ducklake_snapshot snapshot
-                 ON snapshot.id = data_file.snapshot_id
-               WHERE snapshot.table_id = $1
-               ORDER BY data_file.id DESC
+               WHERE data_file.table_id = $1
+               ORDER BY data_file.data_file_id DESC
                LIMIT 1
                """,
                [designated_table_id]
              )
 
-    assert ducklake_object_key == object_key
+    assert ducklake_path == object_key
     assert ducklake_file_size > 0
-    assert ducklake_row_count == 1
+    assert ducklake_record_count == 1
 
-    assert {:ok, %{rows: [[stats_row_count]]}} =
+    assert {:ok, %{rows: [[stats_record_count, stats_next_row_id, stats_file_size_bytes]]}} =
              Postgrex.query(
                meta_conn,
                """
-               SELECT row_count
+               SELECT record_count, next_row_id, file_size_bytes
                FROM ducklake_metadata.ducklake_table_stats
                WHERE table_id = $1
                """,
                [designated_table_id]
              )
 
-    assert stats_row_count >= 1
+    assert stats_record_count >= 1
+    assert stats_next_row_id >= 1
+    assert stats_file_size_bytes > 0
 
-    trace_schema = "ducklake_trace_#{designated_table_id}"
-    trace_catalog = "metadata_trace_#{designated_table_id}"
-    trace_table = "users_trace_#{designated_table_id}"
+    trace_unique =
+      "#{System.system_time(:microsecond)}_#{System.unique_integer([:positive, :monotonic])}"
+
+    trace_schema = "ducklake_trace_#{designated_table_id}_#{trace_unique}"
+    trace_catalog = "metadata_trace_#{designated_table_id}_#{trace_unique}"
+    trace_table = "users_trace_#{designated_table_id}_#{trace_unique}"
 
     ducklake_sql =
       [

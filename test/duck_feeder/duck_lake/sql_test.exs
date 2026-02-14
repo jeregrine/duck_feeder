@@ -3,30 +3,47 @@ defmodule DuckFeeder.DuckLake.SQLTest do
 
   alias DuckFeeder.DuckLake.SQL
 
-  test "returns default spec-aligned + commit-log statements when object key exists" do
+  test "returns default DuckLake commit statements when object key exists" do
     statements =
       SQL.commit_statements("batch-1",
         object_key: "raw/users/file-1.parquet",
-        write_result: %{row_count: 10, file_size_bytes: 1024}
+        write_result: %{row_count: 10, file_size_bytes: 1024},
+        batch: %{rows: [%{"id" => 1, "name" => "duck"}]}
       )
 
-    assert [
-             {spec_sql, ["batch-1", "raw/users/file-1.parquet", 10, 1024]},
-             {stats_sql, ["batch-1"]},
-             {history_sql, ["batch-1", "raw/users/file-1.parquet", 10, 1024]},
-             {log_sql, ["batch-1", "raw/users/file-1.parquet", 10, 1024]}
-           ] = statements
+    assert length(statements) >= 8
 
-    assert spec_sql =~ "INSERT INTO ducklake_metadata.ducklake_snapshot"
-    assert spec_sql =~ "INSERT INTO ducklake_metadata.ducklake_data_file"
-    assert spec_sql =~ "INSERT INTO ducklake_metadata.ducklake_snapshot_changes"
+    assert Enum.any?(statements, fn {sql, _params} ->
+             sql =~ "INSERT INTO ducklake_metadata.ducklake_snapshot"
+           end)
 
-    assert stats_sql =~ "INSERT INTO ducklake_metadata.ducklake_table_stats"
+    assert Enum.any?(statements, fn {sql, _params} ->
+             sql =~ "INSERT INTO ducklake_metadata.ducklake_table"
+           end)
 
-    assert history_sql =~ "INSERT INTO duckfeeder_meta.schema_history"
-    assert history_sql =~ "ducklake_commit_append"
+    assert Enum.any?(statements, fn {sql, _params} ->
+             sql =~ "INSERT INTO ducklake_metadata.ducklake_column"
+           end)
 
-    assert log_sql =~ "INSERT INTO duckfeeder_meta.ducklake_commits"
+    assert Enum.any?(statements, fn {sql, _params} ->
+             sql =~ "INSERT INTO ducklake_metadata.ducklake_data_file"
+           end)
+
+    assert Enum.any?(statements, fn {sql, _params} ->
+             sql =~ "INSERT INTO ducklake_metadata.ducklake_table_stats"
+           end)
+
+    assert Enum.any?(statements, fn {sql, _params} ->
+             sql =~ "INSERT INTO ducklake_metadata.ducklake_snapshot_changes"
+           end)
+
+    assert Enum.any?(statements, fn {sql, _params} ->
+             sql =~ "INSERT INTO duckfeeder_meta.schema_history"
+           end)
+
+    assert Enum.any?(statements, fn {sql, _params} ->
+             sql =~ "INSERT INTO duckfeeder_meta.ducklake_commits"
+           end)
   end
 
   test "returns empty list when default statement lacks object key" do
@@ -38,18 +55,13 @@ defmodule DuckFeeder.DuckLake.SQLTest do
       SQL.commit_statements("batch-1",
         object_key: "raw/users/file-1.parquet",
         write_result: %{row_count: 10, file_size_bytes: 1024},
+        batch: %{rows: [%{"id" => 1}]},
         include_commit_log?: false
       )
 
-    assert [
-             {spec_sql, ["batch-1", "raw/users/file-1.parquet", 10, 1024]},
-             {stats_sql, ["batch-1"]},
-             {history_sql, ["batch-1", "raw/users/file-1.parquet", 10, 1024]}
-           ] = statements
-
-    assert spec_sql =~ "ducklake_metadata.ducklake_snapshot"
-    assert stats_sql =~ "ducklake_metadata.ducklake_table_stats"
-    assert history_sql =~ "duckfeeder_meta.schema_history"
+    refute Enum.any?(statements, fn {sql, _params} ->
+             sql =~ "INSERT INTO duckfeeder_meta.ducklake_commits"
+           end)
   end
 
   test "respects custom statement list and function" do
