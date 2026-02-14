@@ -175,6 +175,39 @@ defmodule DuckFeeder.CDC.ConnectionTest do
              Connection.handle_data(xlog(0, 10, relation_payload), state)
   end
 
+  test "status tick emits lag telemetry" do
+    handler_id = "duck-feeder-connection-lag-#{System.unique_integer([:positive])}"
+
+    :ok =
+      :telemetry.attach(
+        handler_id,
+        [:duck_feeder, :cdc, :lag],
+        &__MODULE__.handle_event/4,
+        self()
+      )
+
+    on_exit(fn ->
+      :telemetry.detach(handler_id)
+    end)
+
+    {:ok, state} =
+      Connection.init(
+        slot_name: "duck_slot",
+        publication_name: "duck_pub",
+        start_lsn: "0/0",
+        event_sink: self(),
+        status_interval_ms: 1_000
+      )
+
+    assert {:noreply, [_ack], %State{} = _next_state} =
+             Connection.handle_info(:status_tick, state)
+
+    assert_receive {:telemetry, [:duck_feeder, :cdc, :lag], measurements, metadata}, 300
+    assert measurements.lag_bytes == 0
+    assert metadata.source == :status_tick
+    assert metadata.slot_name == "duck_slot"
+  end
+
   test "handle_disconnect emits noreply" do
     {:ok, state} =
       Connection.init(
@@ -200,5 +233,9 @@ defmodule DuckFeeder.CDC.ConnectionTest do
       value when is_binary(value) -> <<?t, byte_size(value)::32, value::binary>>
     end)
     |> IO.iodata_to_binary()
+  end
+
+  def handle_event(event, measurements, metadata, pid) do
+    send(pid, {:telemetry, event, measurements, metadata})
   end
 end

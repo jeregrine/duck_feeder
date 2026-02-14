@@ -43,8 +43,11 @@ defmodule DuckFeeder.CDC.Setup do
         sql = "CREATE PUBLICATION #{quote_ident(publication_name)} FOR TABLE #{table_sql}"
 
         case query_fun.(conn, sql, []) do
-          {:ok, _result} -> {:ok, :created}
-          {:error, reason} -> {:error, reason}
+          {:ok, _result} ->
+            {:ok, :created}
+
+          {:error, reason} ->
+            if duplicate_object_error?(reason), do: {:ok, :exists}, else: {:error, reason}
         end
 
       {:error, _reason} = error ->
@@ -54,11 +57,31 @@ defmodule DuckFeeder.CDC.Setup do
 
   @spec slot_exists?(pid(), String.t(), keyword()) :: {:ok, boolean()} | {:error, term()}
   def slot_exists?(conn, slot_name, opts \\ []) when is_binary(slot_name) do
+    with {:ok, info} <- slot_info(conn, slot_name, opts) do
+      {:ok, not is_nil(info)}
+    end
+  end
+
+  @spec slot_info(pid(), String.t(), keyword()) :: {:ok, map() | nil} | {:error, term()}
+  def slot_info(conn, slot_name, opts \\ []) when is_binary(slot_name) do
     query_fun = Keyword.get(opts, :query_fun, &Postgrex.query/3)
 
     with {:ok, result} <-
-           query_fun.(conn, "SELECT 1 FROM pg_replication_slots WHERE slot_name = $1", [slot_name]) do
-      {:ok, result.num_rows > 0}
+           query_fun.(
+             conn,
+             "SELECT slot_name, slot_type, plugin FROM pg_replication_slots WHERE slot_name = $1",
+             [slot_name]
+           ) do
+      case result.rows do
+        [[found_slot_name, slot_type, plugin]] ->
+          {:ok, %{slot_name: found_slot_name, slot_type: slot_type, plugin: plugin}}
+
+        [] ->
+          {:ok, nil}
+
+        rows ->
+          {:error, {:unexpected_slot_info_rows, rows}}
+      end
     end
   end
 
@@ -69,17 +92,26 @@ defmodule DuckFeeder.CDC.Setup do
       when is_binary(slot_name) and is_binary(plugin) do
     query_fun = Keyword.get(opts, :query_fun, &Postgrex.query/3)
 
-    with {:ok, exists?} <- slot_exists?(conn, slot_name, query_fun: query_fun) do
-      if exists? do
-        {:ok, :exists}
-      else
-        create_slot(conn, slot_name, plugin, query_fun: query_fun)
+    with {:ok, slot_info} <- slot_info(conn, slot_name, query_fun: query_fun) do
+      case slot_info do
+        nil ->
+          create_slot(conn, slot_name, plugin, query_fun: query_fun)
+
+        %{slot_type: "logical", plugin: existing_plugin} when existing_plugin == plugin ->
+          {:ok, :exists}
+
+        %{slot_type: "logical", plugin: existing_plugin} ->
+          {:error, {:slot_plugin_mismatch, plugin, existing_plugin}}
+
+        %{slot_type: slot_type} ->
+          {:error, {:slot_type_mismatch, slot_type}}
       end
     end
   end
 
   @spec create_slot(pid(), String.t(), String.t(), keyword()) ::
-          {:ok, {:created, %{slot_name: String.t(), lsn: String.t()}}} | {:error, term()}
+          {:ok, :exists | {:created, %{slot_name: String.t(), lsn: String.t()}}}
+          | {:error, term()}
   def create_slot(conn, slot_name, plugin \\ "pgoutput", opts \\ [])
       when is_binary(slot_name) and is_binary(plugin) do
     query_fun = Keyword.get(opts, :query_fun, &Postgrex.query/3)
@@ -96,7 +128,7 @@ defmodule DuckFeeder.CDC.Setup do
         {:error, {:unexpected_slot_create_rows, rows}}
 
       {:error, reason} ->
-        {:error, reason}
+        if duplicate_object_error?(reason), do: {:ok, :exists}, else: {:error, reason}
     end
   end
 
@@ -140,6 +172,12 @@ defmodule DuckFeeder.CDC.Setup do
       _ -> {:error, {:missing_required, key}}
     end
   end
+
+  defp duplicate_object_error?(%Postgrex.Error{postgres: %{code: code}})
+       when code in [:duplicate_object, "42710"],
+       do: true
+
+  defp duplicate_object_error?(_reason), do: false
 
   defp quote_ident(identifier) do
     escaped = String.replace(identifier, "\"", "\"\"")

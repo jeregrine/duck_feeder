@@ -107,7 +107,7 @@ defmodule DuckFeeder.TelemetryTest do
     assert metadata.table == "users"
   end
 
-  test "emits cdc connection/frame telemetry" do
+  test "emits cdc connection/frame/lag telemetry" do
     handler_id = "duck-feeder-test-cdc-conn-#{System.unique_integer([:positive])}"
 
     :ok =
@@ -115,7 +115,8 @@ defmodule DuckFeeder.TelemetryTest do
         handler_id,
         [
           [:duck_feeder, :cdc, :connection],
-          [:duck_feeder, :cdc, :frame]
+          [:duck_feeder, :cdc, :frame],
+          [:duck_feeder, :cdc, :lag]
         ],
         &__MODULE__.handle_event/4,
         self()
@@ -127,6 +128,7 @@ defmodule DuckFeeder.TelemetryTest do
 
     DuckFeeder.Telemetry.cdc_connection(:stream_starting, %{slot_name: "slot"})
     DuckFeeder.Telemetry.cdc_frame(:keepalive, :ack_requested, %{wal_end: 1})
+    DuckFeeder.Telemetry.cdc_lag(%{lag_bytes: 42}, %{source: :test})
 
     assert_receive {:telemetry, [:duck_feeder, :cdc, :connection], %{count: 1}, metadata}, 300
     assert metadata.status == :stream_starting
@@ -135,6 +137,11 @@ defmodule DuckFeeder.TelemetryTest do
     assert_receive {:telemetry, [:duck_feeder, :cdc, :frame], %{count: 1}, frame_meta}, 300
     assert frame_meta.frame_type == :keepalive
     assert frame_meta.outcome == :ack_requested
+
+    assert_receive {:telemetry, [:duck_feeder, :cdc, :lag], %{count: 1, lag_bytes: 42}, lag_meta},
+                   300
+
+    assert lag_meta.source == :test
   end
 
   test "emits reconciler run telemetry" do

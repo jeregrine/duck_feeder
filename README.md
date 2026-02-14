@@ -400,6 +400,7 @@ Core events currently emitted:
 - `[:duck_feeder, :cdc, :event]`
 - `[:duck_feeder, :cdc, :connection]`
 - `[:duck_feeder, :cdc, :frame]`
+- `[:duck_feeder, :cdc, :lag]`
 - `[:duck_feeder, :batch, :flushed]`
 - `[:duck_feeder, :batch, :processed]`
 - `[:duck_feeder, :reconciler, :run]`

@@ -40,15 +40,74 @@ defmodule DuckFeeder.CDC.SetupTest do
     assert create_sql =~ "\"public\".\"orders\""
   end
 
+  test "create_publication treats duplicate object as :exists" do
+    duplicate_error = %Postgrex.Error{postgres: %{code: :duplicate_object}}
+
+    {:ok, _calls, query_fun} =
+      fake_query_fun([
+        {:error, duplicate_error}
+      ])
+
+    assert {:ok, :exists} =
+             Setup.create_publication(
+               :conn,
+               "duck_pub",
+               [%{source_schema: "public", source_table: "users"}],
+               query_fun: query_fun
+             )
+  end
+
+  test "ensure_slot returns :exists for matching existing logical slot" do
+    {:ok, _calls, query_fun} =
+      fake_query_fun([
+        {:ok, %Postgrex.Result{rows: [["duck_slot", "logical", "pgoutput"]]}}
+      ])
+
+    assert {:ok, :exists} =
+             Setup.ensure_slot(:conn, "duck_slot", "pgoutput", query_fun: query_fun)
+  end
+
   test "ensure_slot creates logical slot when missing" do
     {:ok, _calls, query_fun} =
       fake_query_fun([
-        {:ok, %Postgrex.Result{num_rows: 0, rows: []}},
+        {:ok, %Postgrex.Result{rows: []}},
         {:ok, %Postgrex.Result{rows: [["duck_slot", "0/16B6A98"]]}}
       ])
 
     assert {:ok, {:created, %{slot_name: "duck_slot", lsn: "0/16B6A98"}}} =
              Setup.ensure_slot(:conn, "duck_slot", "pgoutput", query_fun: query_fun)
+  end
+
+  test "ensure_slot rejects plugin mismatch for existing logical slot" do
+    {:ok, _calls, query_fun} =
+      fake_query_fun([
+        {:ok, %Postgrex.Result{rows: [["duck_slot", "logical", "wal2json"]]}}
+      ])
+
+    assert {:error, {:slot_plugin_mismatch, "pgoutput", "wal2json"}} =
+             Setup.ensure_slot(:conn, "duck_slot", "pgoutput", query_fun: query_fun)
+  end
+
+  test "ensure_slot rejects non-logical slot type" do
+    {:ok, _calls, query_fun} =
+      fake_query_fun([
+        {:ok, %Postgrex.Result{rows: [["duck_slot", "physical", nil]]}}
+      ])
+
+    assert {:error, {:slot_type_mismatch, "physical"}} =
+             Setup.ensure_slot(:conn, "duck_slot", "pgoutput", query_fun: query_fun)
+  end
+
+  test "create_slot treats duplicate object as :exists" do
+    duplicate_error = %Postgrex.Error{postgres: %{code: :duplicate_object}}
+
+    {:ok, _calls, query_fun} =
+      fake_query_fun([
+        {:error, duplicate_error}
+      ])
+
+    assert {:ok, :exists} =
+             Setup.create_slot(:conn, "duck_slot", "pgoutput", query_fun: query_fun)
   end
 
   test "drop_slot no-ops when slot does not exist" do
@@ -59,8 +118,10 @@ defmodule DuckFeeder.CDC.SetupTest do
 
     assert :ok = Setup.drop_slot(:conn, "duck_slot", query_fun: query_fun)
 
-    assert [{"SELECT 1 FROM pg_replication_slots WHERE slot_name = $1", ["duck_slot"]}] ==
-             Agent.get(calls, &Enum.reverse/1)
+    assert [
+             {"SELECT slot_name, slot_type, plugin FROM pg_replication_slots WHERE slot_name = $1",
+              ["duck_slot"]}
+           ] == Agent.get(calls, &Enum.reverse/1)
   end
 
   test "publication_tables_sql validates designated tables" do

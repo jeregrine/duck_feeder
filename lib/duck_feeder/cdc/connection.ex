@@ -174,7 +174,7 @@ defmodule DuckFeeder.CDC.Connection do
       end
     else
       {:error, reason} ->
-        {:disconnect, reason}
+        disconnect_with_reason(state, reason)
     end
   end
 
@@ -192,7 +192,7 @@ defmodule DuckFeeder.CDC.Connection do
           DuckFeeder.Telemetry.cdc_frame(:xlog, :ignored, %{wal_end: wal_end})
           {:noreply, [], state}
         else
-          {:error, reason} -> {:disconnect, reason}
+          {:error, reason} -> disconnect_with_reason(state, reason)
         end
 
       {:ok, event, converter_state} ->
@@ -211,17 +211,17 @@ defmodule DuckFeeder.CDC.Connection do
             {acks, state} = maybe_ack_event(state, event)
             {:noreply, acks, state}
           else
-            {:error, reason} -> {:disconnect, reason}
+            {:error, reason} -> disconnect_with_reason(state, reason)
           end
         else
           {:error, reason} ->
             DuckFeeder.Telemetry.cdc_connection(:event_sink_error, %{reason: reason})
-            {:disconnect, {:event_sink_failed, reason}}
+            disconnect_with_reason(state, {:event_sink_failed, reason})
         end
 
       {:error, reason} ->
         DuckFeeder.Telemetry.cdc_connection(:convert_error, %{reason: reason})
-        {:disconnect, {:logical_replication_convert_failed, reason}}
+        disconnect_with_reason(state, {:logical_replication_convert_failed, reason})
     end
   end
 
@@ -229,7 +229,24 @@ defmodule DuckFeeder.CDC.Connection do
 
   @impl true
   def handle_info(:status_tick, %State{} = state) do
+    lag = lag_bytes(state)
+
     DuckFeeder.Telemetry.cdc_frame(:status_tick, :ack_sent, %{applied_lsn: state.applied_lsn})
+
+    DuckFeeder.Telemetry.cdc_lag(
+      %{
+        lag_bytes: lag,
+        received_lsn: state.received_lsn,
+        applied_lsn: state.applied_lsn,
+        max_lag_bytes: state.max_lag_bytes || -1
+      },
+      %{
+        source: :status_tick,
+        slot_name: state.slot_name,
+        publication_name: state.publication_name
+      }
+    )
+
     {:noreply, [standby_status_update(state)], schedule_status_tick(state)}
   end
 
@@ -240,7 +257,9 @@ defmodule DuckFeeder.CDC.Connection do
     DuckFeeder.Telemetry.cdc_connection(:disconnected, %{
       slot_name: state.slot_name,
       publication_name: state.publication_name,
-      applied_lsn: state.applied_lsn
+      applied_lsn: state.applied_lsn,
+      lag_bytes: lag_bytes(state),
+      max_lag_bytes: state.max_lag_bytes
     })
 
     {:noreply, state}
@@ -284,21 +303,52 @@ defmodule DuckFeeder.CDC.Connection do
 
   defp maybe_enforce_lag(%State{max_lag_bytes: max_lag_bytes} = state)
        when is_integer(max_lag_bytes) and max_lag_bytes >= 0 do
-    lag_bytes = max(state.received_lsn - state.applied_lsn, 0)
+    lag = lag_bytes(state)
 
-    if lag_bytes > max_lag_bytes do
-      reason = {:max_lag_exceeded, lag_bytes, max_lag_bytes}
+    if lag > max_lag_bytes do
+      reason = {:max_lag_exceeded, lag, max_lag_bytes}
 
       DuckFeeder.Telemetry.cdc_connection(:lag_exceeded, %{
-        lag_bytes: lag_bytes,
+        lag_bytes: lag,
         max_lag_bytes: max_lag_bytes,
         slot_name: state.slot_name
       })
+
+      DuckFeeder.Telemetry.cdc_lag(
+        %{
+          lag_bytes: lag,
+          received_lsn: state.received_lsn,
+          applied_lsn: state.applied_lsn,
+          max_lag_bytes: max_lag_bytes
+        },
+        %{
+          source: :lag_guard,
+          status: :exceeded,
+          slot_name: state.slot_name,
+          publication_name: state.publication_name
+        }
+      )
 
       {:error, reason}
     else
       :ok
     end
+  end
+
+  defp disconnect_with_reason(%State{} = state, reason) do
+    DuckFeeder.Telemetry.cdc_connection(:disconnecting, %{
+      reason: reason,
+      slot_name: state.slot_name,
+      publication_name: state.publication_name,
+      lag_bytes: lag_bytes(state),
+      max_lag_bytes: state.max_lag_bytes
+    })
+
+    {:disconnect, reason}
+  end
+
+  defp lag_bytes(%State{} = state) do
+    max(state.received_lsn - state.applied_lsn, 0)
   end
 
   defp standby_status_update(%State{} = state) do

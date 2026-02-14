@@ -54,6 +54,8 @@ This is the single source of truth task list for project status and next work.
   - [x] partial snapshot replay resumes from checkpoint progress within the synthetic LSN window (skip already-replayed snapshot rows)
   - [x] durable handoff marker writes include bounded retry policy (`snapshot_handoff_mark_retries`, `snapshot_handoff_mark_retry_delay_ms`)
   - [x] `DuckFeeder.CDC.Connection` (`Postgrex.ReplicationConnection` stream client)
+  - [x] replication setup hardening for bootstrap races (duplicate publication/slot create treated as `:exists`)
+  - [x] replication slot lifecycle validation (existing slot type/plugin checks in `ensure_slot`)
   - [x] runtime bootstrap integration (`DuckFeeder.Runtime.start_stream/4` + `DuckFeeder.CDC.Bootstrap`)
   - [x] reconnect-backoff passthrough for replication startup (`reconnect_backoff`)
   - [x] default reconnect-backoff applied for CDC stream startup (`1_000ms` when unset)
@@ -103,6 +105,7 @@ This is the single source of truth task list for project status and next work.
 - [x] **Observability foundations**
   - [x] telemetry helper module (`DuckFeeder.Telemetry`)
   - [x] CDC event telemetry (`[:duck_feeder, :cdc, :event]`)
+  - [x] CDC lag telemetry (`[:duck_feeder, :cdc, :lag]`)
   - [x] batch flush telemetry (`[:duck_feeder, :batch, :flushed]`)
   - [x] batch processed telemetry (`[:duck_feeder, :batch, :processed]`)
 
