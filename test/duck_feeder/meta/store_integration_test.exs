@@ -2,14 +2,19 @@ defmodule DuckFeeder.Meta.StoreIntegrationTest do
   use ExUnit.Case, async: false
 
   alias DuckFeeder.Meta
-
-  @pg_url System.get_env("DUCK_FEEDER_META_DATABASE_URL")
+  alias DuckFeeder.CDC.ConnectionOptions
 
   @moduletag :integration
-  @moduletag skip: if(is_nil(@pg_url), do: "set DUCK_FEEDER_META_DATABASE_URL", else: false)
 
   setup_all do
-    {:ok, conn} = Postgrex.start_link(url: @pg_url)
+    integration_config = Application.get_env(:duck_feeder, :integration, [])
+    pg_url = Keyword.get(integration_config, :meta_database_url)
+
+    assert is_binary(pg_url) and pg_url != "",
+           "set :duck_feeder, :integration, meta_database_url in config/test.exs"
+
+    {:ok, conn_opts} = ConnectionOptions.parse_url(pg_url)
+    {:ok, conn} = Postgrex.start_link(conn_opts ++ [types: DuckFeeder.Postgrex.Types])
     assert :ok = Meta.bootstrap(conn)
 
     on_exit(fn ->
@@ -20,7 +25,8 @@ defmodule DuckFeeder.Meta.StoreIntegrationTest do
   end
 
   setup %{conn: conn} do
-    unique = System.unique_integer([:positive, :monotonic])
+    unique =
+      "#{System.system_time(:microsecond)}_#{System.unique_integer([:positive, :monotonic])}"
 
     {:ok, source_id} =
       Meta.register_source(conn, %{

@@ -71,9 +71,9 @@ defmodule DuckFeeder.DuckLake.SQL do
     1,
     'ducklake_commit_append',
     jsonb_build_object(
-      'object_key', $2,
-      'row_count', $3,
-      'file_size', $4
+      'object_key', $2::text,
+      'row_count', ($3::bigint),
+      'file_size', ($4::bigint)
     ),
     batches.lsn_end,
     now()

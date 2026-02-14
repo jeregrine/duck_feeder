@@ -3,15 +3,21 @@ defmodule DuckFeeder.CDC.ConnectionIntegrationTest do
 
   alias DuckFeeder.CDC.{Bootstrap, Connection, ConnectionOptions, Event, Setup}
 
-  @pg_url System.get_env("DUCK_FEEDER_SOURCE_DATABASE_URL")
-
   @moduletag :integration
-  @moduletag skip: if(is_nil(@pg_url), do: "set DUCK_FEEDER_SOURCE_DATABASE_URL", else: false)
 
   setup_all do
-    {:ok, conn} = Postgrex.start_link(url: @pg_url)
+    integration_config = Application.get_env(:duck_feeder, :integration, [])
+    pg_url = Keyword.get(integration_config, :source_database_url)
 
-    unique = System.unique_integer([:positive, :monotonic])
+    assert is_binary(pg_url) and pg_url != "",
+           "set :duck_feeder, :integration, source_database_url in config/test.exs"
+
+    {:ok, conn_opts} = ConnectionOptions.parse_url(pg_url)
+    {:ok, conn} = Postgrex.start_link(conn_opts ++ [types: DuckFeeder.Postgrex.Types])
+
+    unique =
+      "#{System.system_time(:microsecond)}_#{System.unique_integer([:positive, :monotonic])}"
+
     table = "duck_feeder_cdc_itest_#{unique}"
     publication = "duck_feeder_pub_#{unique}"
     slot = "duck_feeder_slot_#{unique}"
@@ -33,14 +39,15 @@ defmodule DuckFeeder.CDC.ConnectionIntegrationTest do
       _ = GenServer.stop(conn)
     end)
 
-    {:ok, conn: conn, table: table, publication: publication, slot: slot}
+    {:ok, conn: conn, table: table, publication: publication, slot: slot, pg_url: pg_url}
   end
 
   test "streams insert transaction events", %{
     conn: conn,
     table: table,
     publication: publication,
-    slot: slot
+    slot: slot,
+    pg_url: pg_url
   } do
     assert {:ok, bootstrap} =
              Bootstrap.bootstrap(conn, %{
@@ -49,7 +56,7 @@ defmodule DuckFeeder.CDC.ConnectionIntegrationTest do
                designated_tables: [%{source_schema: "public", source_table: table}]
              })
 
-    assert {:ok, connection_opts} = ConnectionOptions.parse_url(@pg_url)
+    assert {:ok, connection_opts} = ConnectionOptions.parse_url(pg_url)
 
     assert {:ok, cdc_conn} =
              Connection.start_link(

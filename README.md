@@ -254,9 +254,10 @@ Typical bootstrap/use flow:
 
 Requirements:
 - local Postgres instances available for:
-  - metadata DB (`DUCK_FEEDER_META_DATABASE_URL`)
-  - source DB with logical replication enabled (`DUCK_FEEDER_SOURCE_DATABASE_URL`)
+  - metadata DB (`meta_database_url`)
+  - source DB with logical replication enabled (`source_database_url`)
 - `duckdb` CLI on PATH
+- integration DB URLs configured in `config/test.exs` under `:duck_feeder, :integration`
 
 Helper script:
 - `scripts/test_integration.sh`
@@ -264,8 +265,6 @@ Helper script:
 Run:
 
 ```bash
-DUCK_FEEDER_META_DATABASE_URL=postgres://... \
-DUCK_FEEDER_SOURCE_DATABASE_URL=postgres://... \
 scripts/test_integration.sh
 ```
 

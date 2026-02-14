@@ -13,16 +13,6 @@ if ! command -v psql >/dev/null 2>&1; then
   exit 1
 fi
 
-if [[ -z "${DUCK_FEEDER_META_DATABASE_URL:-}" ]]; then
-  echo "DUCK_FEEDER_META_DATABASE_URL is required"
-  exit 1
-fi
-
-if [[ -z "${DUCK_FEEDER_SOURCE_DATABASE_URL:-}" ]]; then
-  echo "DUCK_FEEDER_SOURCE_DATABASE_URL is required"
-  exit 1
-fi
-
 pushd "$ROOT_DIR" >/dev/null
 mix test --only integration
 popd >/dev/null

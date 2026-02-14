@@ -2,18 +2,9 @@ defmodule DuckFeeder.RuntimeStreamIntegrationTest do
   use ExUnit.Case, async: false
 
   alias DuckFeeder.{Meta, Runtime}
-  alias DuckFeeder.CDC.Setup
-
-  @meta_url System.get_env("DUCK_FEEDER_META_DATABASE_URL")
-  @source_url System.get_env("DUCK_FEEDER_SOURCE_DATABASE_URL")
+  alias DuckFeeder.CDC.{ConnectionOptions, Setup}
 
   @moduletag :integration
-
-  @moduletag skip:
-               if(is_nil(@meta_url) or is_nil(@source_url),
-                 do: "set DUCK_FEEDER_META_DATABASE_URL and DUCK_FEEDER_SOURCE_DATABASE_URL",
-                 else: false
-               )
 
   defmodule FakeStorage do
     @behaviour DuckFeeder.Storage.Adapter
@@ -68,21 +59,35 @@ defmodule DuckFeeder.RuntimeStreamIntegrationTest do
   end
 
   setup_all do
-    {:ok, meta_conn} = Postgrex.start_link(url: @meta_url)
+    integration_config = Application.get_env(:duck_feeder, :integration, [])
+    meta_url = Keyword.get(integration_config, :meta_database_url)
+    source_url = Keyword.get(integration_config, :source_database_url)
+
+    assert is_binary(meta_url) and meta_url != "" and is_binary(source_url) and source_url != "",
+           "set :duck_feeder, :integration, meta_database_url/source_database_url in config/test.exs"
+
+    {:ok, meta_conn_opts} = ConnectionOptions.parse_url(meta_url)
+    {:ok, source_conn_opts} = ConnectionOptions.parse_url(source_url)
+
+    {:ok, meta_conn} = Postgrex.start_link(meta_conn_opts ++ [types: DuckFeeder.Postgrex.Types])
     assert :ok = Meta.bootstrap(meta_conn)
 
-    {:ok, source_conn} = Postgrex.start_link(url: @source_url)
+    {:ok, source_conn} =
+      Postgrex.start_link(source_conn_opts ++ [types: DuckFeeder.Postgrex.Types])
 
     on_exit(fn ->
       GenServer.stop(source_conn)
       GenServer.stop(meta_conn)
     end)
 
-    {:ok, meta_conn: meta_conn, source_conn: source_conn}
+    {:ok,
+     meta_conn: meta_conn, source_conn: source_conn, meta_url: meta_url, source_url: source_url}
   end
 
-  setup %{meta_conn: meta_conn, source_conn: source_conn} do
-    unique = System.unique_integer([:positive, :monotonic])
+  setup %{meta_conn: meta_conn, source_conn: source_conn, source_url: source_url} do
+    unique =
+      "#{System.system_time(:microsecond)}_#{System.unique_integer([:positive, :monotonic])}"
+
     source_name = "runtime_source_#{unique}"
     source_table = "runtime_users_#{unique}"
     target_table = source_table
@@ -106,7 +111,7 @@ defmodule DuckFeeder.RuntimeStreamIntegrationTest do
     assert {:ok, source_id} =
              Meta.register_source(meta_conn, %{
                name: source_name,
-               connection_info: %{"dsn" => @source_url},
+               connection_info: %{"dsn" => source_url},
                slot_name: slot_name,
                publication_name: publication_name,
                status: "active"
@@ -178,6 +183,7 @@ defmodule DuckFeeder.RuntimeStreamIntegrationTest do
 
   test "wal cdc to parquet upload and ducklake metadata commit", %{
     meta_conn: meta_conn,
+    meta_url: meta_url,
     source_conn: source_conn,
     source_name: source_name,
     source_table: source_table,
@@ -261,7 +267,7 @@ defmodule DuckFeeder.RuntimeStreamIntegrationTest do
         "INSTALL ducklake;",
         "LOAD ducklake;",
         "ATTACH 'ducklake:",
-        ducklake_postgres_connection(@meta_url),
+        ducklake_postgres_connection(meta_url),
         "' AS dl (",
         "DATA_PATH '",
         String.replace(local_data_root, "'", "''"),
@@ -272,7 +278,9 @@ defmodule DuckFeeder.RuntimeStreamIntegrationTest do
         "');",
         "CREATE TABLE dl.main.",
         trace_table,
-        " (id VARCHAR, name VARCHAR);",
+        " AS SELECT * FROM read_parquet('",
+        String.replace(local_parquet_path, "'", "''"),
+        "') LIMIT 0;",
         "CALL ducklake_add_data_files('dl', '",
         trace_table,
         "', '",

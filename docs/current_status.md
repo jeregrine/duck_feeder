@@ -102,4 +102,4 @@ This tracks progress against `docs/plan_compact.md`.
 ## Local test status
 
 - `mix test` passes for current codebase.
-- Integration tests require `DUCK_FEEDER_META_DATABASE_URL` and `DUCK_FEEDER_SOURCE_DATABASE_URL`.
+- Integration tests require `:duck_feeder, :integration` DB URLs in `config/test.exs`.
