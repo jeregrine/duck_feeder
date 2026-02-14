@@ -7,6 +7,8 @@ defmodule DuckFeeder.Reconciler do
   - optional failed-batch retry path (`cleanup_failed_uploads?: true`) that:
     - deletes known batch objects from storage
     - transitions batch from `failed` back to `pending`
+  - optional orphan detection during failed cleanup:
+    - `require_failed_batch_files?: true` returns an error when a failed batch has no known files
   - optional run safety controls:
     - `max_batches: positive_integer()` to cap work per reconcile call
     - `stop_on_error?: true` to halt after the first batch error
@@ -89,7 +91,7 @@ defmodule DuckFeeder.Reconciler do
 
   defp reconcile_batch(meta, conn, context, opts, %{batch_id: batch_id, state: "failed"}) do
     if Keyword.get(opts, :cleanup_failed_uploads?, false) do
-      case cleanup_failed_batch(meta, conn, context, batch_id) do
+      case cleanup_failed_batch(meta, conn, context, batch_id, opts) do
         :ok -> {:retried, batch_id}
         {:error, reason} -> {:error, batch_id, reason}
       end
@@ -102,8 +104,9 @@ defmodule DuckFeeder.Reconciler do
     {:skipped, "#{batch_id}:#{state}"}
   end
 
-  defp cleanup_failed_batch(meta, conn, context, batch_id) do
+  defp cleanup_failed_batch(meta, conn, context, batch_id, opts) do
     with {:ok, files} <- meta.list_batch_files(conn, batch_id),
+         :ok <- maybe_require_failed_batch_files(files, batch_id, opts),
          :ok <- delete_batch_files(context, files),
          {:ok, %{to: :pending}} <-
            meta.transition_batch(conn, batch_id, :pending, error_message: nil) do
@@ -127,6 +130,14 @@ defmodule DuckFeeder.Reconciler do
     do: {:error, {:missing_batch_files, batch_id}}
 
   defp ensure_batch_files_present(files, _batch_id) when is_list(files), do: :ok
+
+  defp maybe_require_failed_batch_files(files, batch_id, opts) when is_list(files) do
+    if Keyword.get(opts, :require_failed_batch_files?, false) do
+      ensure_batch_files_present(files, batch_id)
+    else
+      :ok
+    end
+  end
 
   defp verify_batch_files(context, files, batch_id) when is_list(files) do
     storage = Map.get(context, :storage)

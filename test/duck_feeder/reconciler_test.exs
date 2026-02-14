@@ -32,6 +32,14 @@ defmodule DuckFeeder.ReconcilerTest do
       do: {:ok, %{batch_id: "b2", from: :failed, to: :pending}}
   end
 
+  defmodule FakeMetaCleanupNoFiles do
+    def list_stale_batches(_conn, _opts), do: {:ok, [%{batch_id: "b4", state: "failed"}]}
+    def list_batch_files(_conn, "b4"), do: {:ok, []}
+
+    def transition_batch(_conn, "b4", :pending, error_message: nil),
+      do: {:ok, %{batch_id: "b4", from: :failed, to: :pending}}
+  end
+
   defmodule FakeMetaVerify do
     def list_stale_batches(_conn, _opts), do: {:ok, [%{batch_id: "b1", state: "uploaded"}]}
 
@@ -131,6 +139,41 @@ defmodule DuckFeeder.ReconcilerTest do
 
     assert_received {:storage_delete_object, "raw/users/file-1.parquet"}
     assert_received {:storage_delete_object, "raw/users/file-2.parquet"}
+  end
+
+  test "allows failed cleanup with no files by default" do
+    assert {:ok, summary} =
+             Reconciler.reconcile(
+               %{
+                 meta_conn: :fake,
+                 meta_module: FakeMetaCleanupNoFiles,
+                 storage_module: FakeStorage,
+                 storage: %{provider: :s3, bucket: "bucket"}
+               },
+               cleanup_failed_uploads?: true
+             )
+
+    assert summary.checked == 1
+    assert summary.retried == ["b4"]
+    assert summary.errors == []
+  end
+
+  test "returns error when failed cleanup requires files and none are recorded" do
+    assert {:ok, summary} =
+             Reconciler.reconcile(
+               %{
+                 meta_conn: :fake,
+                 meta_module: FakeMetaCleanupNoFiles,
+                 storage_module: FakeStorage,
+                 storage: %{provider: :s3, bucket: "bucket"}
+               },
+               cleanup_failed_uploads?: true,
+               require_failed_batch_files?: true
+             )
+
+    assert summary.checked == 1
+    assert summary.retried == []
+    assert summary.errors == [{"b4", {:missing_batch_files, "b4"}}]
   end
 
   test "can verify uploaded objects before committing" do

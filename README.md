@@ -140,6 +140,8 @@ It currently retries stale `uploaded` batches via `commit_uploaded_batch/2`.
 `DuckFeeder.reconcile/2` supports:
 - `cleanup_failed_uploads?: true` to delete known failed batch files and transition
   failed batches back to `pending`
+- `require_failed_batch_files?: true` to error when a failed batch has no recorded files
+  during cleanup (orphan-safety guard)
 - `verify_uploaded_objects?: true` to HEAD-check uploaded files before committing stale
   uploaded batches
 - `max_batches: positive_integer()` to cap per-run work

@@ -82,6 +82,7 @@ This is the single source of truth task list for project status and next work.
 - [x] **Recovery foundation**
   - [x] basic stale batch reconciler helper (`DuckFeeder.Reconciler`)
   - [x] failed-batch cleanup/retry option (delete known files + move `failed` -> `pending`)
+  - [x] optional failed-batch file requirement guard (`require_failed_batch_files?`)
   - [x] uploaded-object verification option (`verify_uploaded_objects?`)
   - [x] reconcile safety controls (`max_batches`, `stop_on_error?`)
   - [x] scheduled reconciler worker (`DuckFeeder.Reconciler.Worker`)
