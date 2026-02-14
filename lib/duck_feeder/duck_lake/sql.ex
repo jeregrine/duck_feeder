@@ -87,6 +87,38 @@ defmodule DuckFeeder.DuckLake.SQL do
     )
   """
 
+  @validate_column_compat_sql """
+  WITH table_ref AS (
+    SELECT batches.designated_table_id AS table_id
+    FROM duckfeeder_meta.batches batches
+    WHERE batches.batch_id = $1
+  ),
+  active_col AS (
+    SELECT upper(col.column_type) AS column_type
+    FROM ducklake_metadata.ducklake_column col
+    JOIN table_ref ON col.table_id = table_ref.table_id
+    WHERE col.column_name = $2::varchar
+      AND col.end_snapshot IS NULL
+    LIMIT 1
+  ),
+  incoming AS (
+    SELECT upper($3::varchar) AS incoming_type
+  )
+  SELECT 1 /
+    CASE
+      WHEN NOT EXISTS (SELECT 1 FROM active_col) THEN 1
+      WHEN EXISTS (
+        SELECT 1
+        FROM active_col, incoming
+        WHERE
+          active_col.column_type = incoming.incoming_type
+          OR (active_col.column_type = 'DOUBLE' AND incoming.incoming_type IN ('BIGINT', 'DOUBLE'))
+          OR active_col.column_type = 'VARCHAR'
+      ) THEN 1
+      ELSE 0
+    END
+  """
+
   @ensure_column_sql """
   INSERT INTO ducklake_metadata.ducklake_column
     (
@@ -1292,8 +1324,11 @@ defmodule DuckFeeder.DuckLake.SQL do
   end
 
   defp column_statements(batch_id, column_descriptors) do
-    Enum.map(column_descriptors, fn %{name: name, type: type} ->
-      {@ensure_column_sql, [batch_id, name, type]}
+    Enum.flat_map(column_descriptors, fn %{name: name, type: type} ->
+      [
+        {@validate_column_compat_sql, [batch_id, name, type]},
+        {@ensure_column_sql, [batch_id, name, type]}
+      ]
     end)
   end
 

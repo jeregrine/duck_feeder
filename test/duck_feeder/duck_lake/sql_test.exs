@@ -22,6 +22,10 @@ defmodule DuckFeeder.DuckLake.SQLTest do
            end)
 
     assert Enum.any?(statements, fn {sql, _params} ->
+             sql =~ "SELECT 1 /" and sql =~ "incoming_type"
+           end)
+
+    assert Enum.any?(statements, fn {sql, _params} ->
              sql =~ "INSERT INTO ducklake_metadata.ducklake_column"
            end)
 

@@ -1057,6 +1057,58 @@ defmodule DuckFeeder.DuckLake.Committer.PostgresIntegrationTest do
     assert max_value == "3.0"
   end
 
+  test "column type compatibility guard rejects incompatible incoming write shape", %{
+    meta_conn: meta_conn
+  } do
+    unique =
+      "#{System.system_time(:microsecond)}_#{System.unique_integer([:positive, :monotonic])}"
+
+    source_name = "ducklake_type_guard_source_#{unique}"
+    target_table = "ducklake_type_guard_table_#{unique}"
+
+    assert {:ok, source_id} =
+             Meta.register_source(meta_conn, %{
+               name: source_name,
+               connection_info: %{"dsn" => "type-guard://local"},
+               slot_name: "slot_type_guard_#{unique}",
+               publication_name: "pub_type_guard_#{unique}",
+               status: "active"
+             })
+
+    assert {:ok, designated_table_id} =
+             Meta.register_designated_table(meta_conn, %{
+               source_id: source_id,
+               source_schema: "public",
+               source_table: "events",
+               target_schema: "raw",
+               target_table: target_table,
+               mode: "cdc_changelog"
+             })
+
+    batch_1 = "batch_type_guard_1_#{unique}"
+    assert :ok = insert_uploaded_batch(meta_conn, batch_1, designated_table_id, "0/B0", "0/B0")
+
+    assert {:ok, %{batch_id: ^batch_1, committed?: true}} =
+             Postgres.commit_batch(meta_conn, batch_1,
+               object_key: "raw/#{target_table}/type-guard-1.parquet",
+               write_result: %{row_count: 1, file_size_bytes: 20},
+               batch: %{rows: [%{"value" => 1}]}
+             )
+
+    batch_2 = "batch_type_guard_2_#{unique}"
+    assert :ok = insert_uploaded_batch(meta_conn, batch_2, designated_table_id, "0/B1", "0/B1")
+
+    assert {:error, {:ducklake_sql_failed, sql, _}} =
+             Postgres.commit_batch(meta_conn, batch_2,
+               object_key: "raw/#{target_table}/type-guard-2.parquet",
+               write_result: %{row_count: 1, file_size_bytes: 20},
+               batch: %{rows: [%{"value" => true}]}
+             )
+
+    assert sql =~ "incoming_type"
+    assert {:ok, :uploaded} = Meta.get_batch_state(meta_conn, batch_2)
+  end
+
   defp insert_uploaded_batch(meta_conn, batch_id, designated_table_id, lsn_start, lsn_end) do
     with {:ok, _} <-
            Meta.insert_batch(meta_conn, %{
