@@ -7,18 +7,19 @@ defmodule DuckFeeder.Service do
 
   use GenServer
 
-  alias DuckFeeder.{BatchProcessor, Ingest}
-  alias DuckFeeder.CDC.Pipeline
+  alias DuckFeeder.{BatchProcessor, Ingest, TablePipeline}
+  alias DuckFeeder.CDC.{Lsn, Pipeline}
 
   defmodule State do
     @enforce_keys [:cdc_pipeline_pid, :ingest_pid, :context, :observer_pid]
-    defstruct [:cdc_pipeline_pid, :ingest_pid, :context, :observer_pid]
+    defstruct [:cdc_pipeline_pid, :ingest_pid, :context, :observer_pid, snapshot_lsn_counter: 0]
 
     @type t :: %__MODULE__{
             cdc_pipeline_pid: pid(),
             ingest_pid: pid(),
             context: map(),
-            observer_pid: pid()
+            observer_pid: pid(),
+            snapshot_lsn_counter: non_neg_integer()
           }
   end
 
@@ -48,6 +49,12 @@ defmodule DuckFeeder.Service do
 
   @spec in_transaction?(GenServer.server()) :: boolean()
   def in_transaction?(server), do: GenServer.call(server, :in_transaction?)
+
+  @spec ingest_snapshot_row(GenServer.server(), map(), map()) :: :ok | {:error, term()}
+  def ingest_snapshot_row(server, designated_table, row)
+      when is_map(designated_table) and is_map(row) do
+    GenServer.call(server, {:ingest_snapshot_row, designated_table, row})
+  end
 
   @impl true
   def init(opts) do
@@ -98,6 +105,19 @@ defmodule DuckFeeder.Service do
     {:reply, Pipeline.in_transaction?(cdc_pipeline_pid), state}
   end
 
+  def handle_call({:ingest_snapshot_row, designated_table, row}, _from, %State{} = state) do
+    with {:ok, table} <- snapshot_target_relation(designated_table),
+         {:ok, pipeline} <- Ingest.table_pipeline(state.ingest_pid, table),
+         {lsn, next_counter} <- next_snapshot_lsn(state.snapshot_lsn_counter),
+         {:ok, snapshot_row} <- build_snapshot_row(designated_table, row, lsn) do
+      :ok = TablePipeline.append(pipeline, snapshot_row, lsn)
+      {:reply, :ok, %{state | snapshot_lsn_counter: next_counter}}
+    else
+      {:error, reason} ->
+        {:reply, {:error, reason}, state}
+    end
+  end
+
   @impl true
   def handle_info(
         {:duck_feeder_cdc_event, event},
@@ -133,6 +153,62 @@ defmodule DuckFeeder.Service do
 
       Map.put(acc, target, id)
     end)
+  end
+
+  defp snapshot_target_relation(designated_table) when is_map(designated_table) do
+    with {:ok, target_schema} <- fetch_map_string(designated_table, :target_schema),
+         {:ok, target_table} <- fetch_map_string(designated_table, :target_table) do
+      {:ok, {target_schema, target_table}}
+    end
+  end
+
+  defp build_snapshot_row(designated_table, row, lsn)
+       when is_map(designated_table) and is_map(row) and is_binary(lsn) do
+    with {:ok, designated_table_id} <- fetch_map_value(designated_table, :id),
+         {:ok, source_schema} <- fetch_map_string(designated_table, :source_schema),
+         {:ok, source_table} <- fetch_map_string(designated_table, :source_table),
+         {:ok, target_schema} <- fetch_map_string(designated_table, :target_schema),
+         {:ok, target_table} <- fetch_map_string(designated_table, :target_table) do
+      {:ok,
+       %{
+         _op: "I",
+         _commit_lsn: lsn,
+         _xid: nil,
+         _source_ts: nil,
+         _ingest_ts: DateTime.utc_now(),
+         _relation_schema: source_schema,
+         _relation_table: source_table,
+         _record: stringify_keys(row),
+         _old_record: %{},
+         designated_table_id: designated_table_id,
+         target_relation: {target_schema, target_table}
+       }}
+    end
+  end
+
+  defp next_snapshot_lsn(counter) when is_integer(counter) and counter >= 0 do
+    next_counter = counter + 1
+    {Lsn.to_string(next_counter), next_counter}
+  end
+
+  defp stringify_keys(map) when is_map(map) do
+    map
+    |> Enum.map(fn {k, v} -> {to_string(k), v} end)
+    |> Map.new()
+  end
+
+  defp fetch_map_string(map, key) when is_map(map) and is_atom(key) do
+    case Map.get(map, key) do
+      value when is_binary(value) and value != "" -> {:ok, value}
+      _ -> {:error, {:invalid_designated_table_field, key}}
+    end
+  end
+
+  defp fetch_map_value(map, key) when is_map(map) do
+    case Map.get(map, key) do
+      nil -> {:error, {:invalid_designated_table_field, key}}
+      value -> {:ok, value}
+    end
   end
 
   defp maybe_put_optional(context, _key, nil), do: context

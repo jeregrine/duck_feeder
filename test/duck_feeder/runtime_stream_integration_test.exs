@@ -218,6 +218,61 @@ defmodule DuckFeeder.RuntimeStreamIntegrationTest do
     GenServer.stop(service_pid)
   end
 
+  test "snapshot before stream replays existing rows then continues WAL without duplicate replay",
+       %{
+         meta_conn: meta_conn,
+         source_conn: source_conn,
+         source_name: source_name,
+         source_table: source_table,
+         target_table: target_table
+       } do
+    storage = %{provider: :s3, bucket: "bucket", adapter: FakeStorage}
+
+    assert {:ok, _} =
+             Postgrex.query(
+               source_conn,
+               "INSERT INTO public.\"#{source_table}\" (id, name) VALUES (1, 'preexisting')",
+               []
+             )
+
+    assert {:ok, %{service_pid: service_pid, cdc_pid: cdc_pid}} =
+             Runtime.start_stream(meta_conn, source_name, storage,
+               observer_pid: self(),
+               pipeline_opts: %{max_rows: 1, max_bytes: 10_000, flush_interval_ms: 60_000},
+               snapshot_before_stream?: true,
+               bootstrap_replication?: true,
+               auto_reconnect: false,
+               sync_connect: true
+             )
+
+    assert_receive {:duck_feeder_batch_processed, {"raw", ^target_table}, {:ok, _snapshot_result},
+                    snapshot_batch},
+                   10_000
+
+    assert snapshot_batch.row_count == 1
+
+    assert batch_has_record_id?(snapshot_batch, 1)
+
+    assert {:ok, _} =
+             Postgrex.query(
+               source_conn,
+               "INSERT INTO public.\"#{source_table}\" (id, name) VALUES (2, 'post_snapshot')",
+               []
+             )
+
+    assert_receive {:duck_feeder_batch_processed, {"raw", ^target_table}, {:ok, _cdc_result},
+                    cdc_batch},
+                   10_000
+
+    assert cdc_batch.row_count == 1
+    assert batch_has_record_id?(cdc_batch, 2)
+
+    refute batch_has_record_id?(cdc_batch, 1)
+
+    GenServer.stop(cdc_pid)
+    GenServer.stop(service_pid)
+  end
+
   test "wal cdc to parquet upload and ducklake metadata commit", %{
     meta_conn: meta_conn,
     meta_url: meta_url,
@@ -546,6 +601,20 @@ defmodule DuckFeeder.RuntimeStreamIntegrationTest do
 
     GenServer.stop(cdc_pid)
     GenServer.stop(service_pid)
+  end
+
+  defp batch_has_record_id?(batch, id) when is_map(batch) do
+    expected = to_string(id)
+
+    Enum.any?(batch.rows, fn row ->
+      row_id =
+        row
+        |> Map.get(:_record, %{})
+        |> Map.get("id")
+        |> to_string()
+
+      row_id == expected
+    end)
   end
 
   defp ducklake_postgres_connection(url) do

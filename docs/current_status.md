@@ -43,6 +43,7 @@ This is the single source of truth task list for project status and next work.
   - [x] `DuckFeeder.CDC.InitialSnapshot` (snapshot tx + copy SQL helpers)
   - [x] `DuckFeeder.CDC.InitialSnapshot.Runner` (table copy + row dispatch orchestration)
   - [x] optional runtime snapshot-before-stream hook (`DuckFeeder.Runtime.start_stream/4`)
+  - [x] default snapshot row replay into service when `snapshot_before_stream?: true` and no explicit row handler
   - [x] `DuckFeeder.CDC.Connection` (`Postgrex.ReplicationConnection` stream client)
   - [x] runtime bootstrap integration (`DuckFeeder.Runtime.start_stream/4` + `DuckFeeder.CDC.Bootstrap`)
   - [x] reconnect-backoff passthrough for replication startup (`reconnect_backoff`)
@@ -99,6 +100,7 @@ This is the single source of truth task list for project status and next work.
   - [x] integration test file for meta store (test-config-gated)
   - [x] integration test file for CDC connection stream (test-config-gated)
   - [x] integration test file for runtime start_stream end-to-end flow (test-config-gated)
+  - [x] integration coverage for snapshot->WAL handoff replay behavior (preexisting rows + post-snapshot WAL)
   - [x] integration test file for append stream end-to-end flow (test-config-gated)
   - [x] tracer-shot assertions include row-level values, parquet type checks, and DuckLake metadata row verification (spec-table columns)
   - [x] failure-injection integration scenario for reconcile cleanup (`failed` -> `pending` + file deletion)

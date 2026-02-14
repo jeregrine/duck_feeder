@@ -163,6 +163,10 @@ Optional snapshot-before-stream mode is available via:
 - `snapshot_before_stream?: true`
 - `snapshot_row_handler: fn designated_table, row -> ... end`
 
+If no explicit `snapshot_row_handler` is provided, snapshot rows are replayed into the
+service ingest path by default (`snapshot_ingest?: true`). Set `snapshot_ingest?: false`
+to require an explicit row handler.
+
 Replication connection tuning options include:
 - `auto_reconnect: true | false`
 - `reconnect_backoff: milliseconds` (defaults to `1000` when unset)
