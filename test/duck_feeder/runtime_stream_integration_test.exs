@@ -377,6 +377,46 @@ defmodule DuckFeeder.RuntimeStreamIntegrationTest do
     GenServer.stop(service_pid)
   end
 
+  test "reconciler errors on failed batch without files when strict mode enabled", %{
+    meta_conn: meta_conn,
+    designated_table_id: designated_table_id
+  } do
+    batch_id = Meta.build_batch_id(designated_table_id, "0/10", "0/10", [99])
+
+    assert {:ok, %{state: :failed}} =
+             Meta.insert_batch(meta_conn, %{
+               batch_id: batch_id,
+               designated_table_id: designated_table_id,
+               lsn_start: "0/10",
+               lsn_end: "0/10",
+               state: :failed
+             })
+
+    Process.put(:reconcile_designated_table_id, designated_table_id)
+
+    assert {:ok, summary} =
+             Reconciler.reconcile(
+               %{
+                 meta_conn: meta_conn,
+                 meta_module: FilteredMeta,
+                 storage: %{
+                   provider: :s3,
+                   bucket: "bucket",
+                   adapter: LocalFilesystemStorage,
+                   root_dir: System.tmp_dir!()
+                 }
+               },
+               states: [:failed],
+               cleanup_failed_uploads?: true,
+               require_failed_batch_files?: true,
+               stale_before: DateTime.add(DateTime.utc_now(), 60, :second)
+             )
+
+    assert summary.retried == []
+    assert summary.errors == [{batch_id, {:missing_batch_files, batch_id}}]
+    assert {:ok, :failed} = Meta.get_batch_state(meta_conn, batch_id)
+  end
+
   test "reconciler cleans failed uploaded batch and resets it to pending", %{
     meta_conn: meta_conn,
     source_conn: source_conn,

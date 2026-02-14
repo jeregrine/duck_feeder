@@ -95,6 +95,7 @@ This is the single source of truth task list for project status and next work.
   - [x] integration test file for runtime start_stream end-to-end flow (test-config-gated)
   - [x] tracer-shot assertions include row-level values, parquet type checks, and DuckLake metadata row verification
   - [x] failure-injection integration scenario for reconcile cleanup (`failed` -> `pending` + file deletion)
+  - [x] strict failed-cleanup integration scenario for missing file metadata (`require_failed_batch_files?`)
   - [x] helper script for integration runs (local pg + duckdb prerequisites)
 
 - [x] **Third-party license compliance (ElectricSQL LSN reference)**
