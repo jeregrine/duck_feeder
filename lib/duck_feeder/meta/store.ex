@@ -5,6 +5,7 @@ defmodule DuckFeeder.Meta.Store do
   This module keeps the checkpoint and batch state machine persistence in Postgres.
   """
 
+  alias DuckFeeder.CDC.Lsn
   alias DuckFeeder.Meta.{BatchState, SQL}
 
   @register_source_sql """
@@ -76,7 +77,7 @@ defmodule DuckFeeder.Meta.Store do
 
   @upsert_checkpoint_sql """
   INSERT INTO duckfeeder_meta.checkpoints (designated_table_id, last_committed_lsn, updated_at)
-  VALUES ($1, ($2::text)::pg_lsn, now())
+  VALUES ($1, $2::pg_lsn, now())
   ON CONFLICT (designated_table_id) DO UPDATE SET
     last_committed_lsn = EXCLUDED.last_committed_lsn,
     updated_at = now()
@@ -87,7 +88,7 @@ defmodule DuckFeeder.Meta.Store do
   INSERT INTO duckfeeder_meta.batches
     (batch_id, designated_table_id, lsn_start, lsn_end, state, error_message, retry_count, inserted_at, updated_at)
   VALUES
-    ($1, $2, ($3::text)::pg_lsn, ($4::text)::pg_lsn, $5, $6, $7, now(), now())
+    ($1, $2, $3::pg_lsn, $4::pg_lsn, $5, $6, $7, now(), now())
   ON CONFLICT (batch_id) DO NOTHING
   RETURNING state
   """
@@ -114,7 +115,7 @@ defmodule DuckFeeder.Meta.Store do
 
   @upsert_checkpoint_max_sql """
   INSERT INTO duckfeeder_meta.checkpoints (designated_table_id, last_committed_lsn, updated_at)
-  VALUES ($1, ($2::text)::pg_lsn, now())
+  VALUES ($1, $2::pg_lsn, now())
   ON CONFLICT (designated_table_id) DO UPDATE SET
     last_committed_lsn = GREATEST(duckfeeder_meta.checkpoints.last_committed_lsn, EXCLUDED.last_committed_lsn),
     updated_at = now()
@@ -300,7 +301,8 @@ defmodule DuckFeeder.Meta.Store do
   @spec upsert_checkpoint(conn(), pos_integer(), String.t()) ::
           {:ok, String.t()} | {:error, term()}
   def upsert_checkpoint(conn, designated_table_id, lsn) when is_binary(lsn) do
-    with {:ok, result} <- query(conn, @upsert_checkpoint_sql, [designated_table_id, lsn]),
+    with {:ok, lsn_param} <- lsn_param(lsn),
+         {:ok, result} <- query(conn, @upsert_checkpoint_sql, [designated_table_id, lsn_param]),
          {:ok, committed_lsn} <- single_value(result) do
       {:ok, committed_lsn}
     end
@@ -312,6 +314,8 @@ defmodule DuckFeeder.Meta.Store do
          {:ok, designated_table_id} <- fetch_required(attrs, :designated_table_id),
          {:ok, lsn_start} <- fetch_required(attrs, :lsn_start),
          {:ok, lsn_end} <- fetch_required(attrs, :lsn_end),
+         {:ok, lsn_start_param} <- lsn_param(lsn_start),
+         {:ok, lsn_end_param} <- lsn_param(lsn_end),
          {:ok, state_db} <- BatchState.to_db(get_attr(attrs, :state, :pending)),
          {:ok, result} <-
            query(
@@ -320,8 +324,8 @@ defmodule DuckFeeder.Meta.Store do
              [
                batch_id,
                designated_table_id,
-               lsn_start,
-               lsn_end,
+               lsn_start_param,
+               lsn_end_param,
                state_db,
                get_attr(attrs, :error_message),
                get_attr(attrs, :retry_count, 0)
@@ -517,7 +521,9 @@ defmodule DuckFeeder.Meta.Store do
   defp commit_target_state(state), do: {:error, {:invalid_batch_commit_state, state}}
 
   defp upsert_checkpoint_max(conn, designated_table_id, lsn_end) do
-    with {:ok, result} <- query(conn, @upsert_checkpoint_max_sql, [designated_table_id, lsn_end]),
+    with {:ok, lsn_param} <- lsn_param(lsn_end),
+         {:ok, result} <-
+           query(conn, @upsert_checkpoint_max_sql, [designated_table_id, lsn_param]),
          {:ok, checkpoint_lsn} <- single_value(result) do
       {:ok, checkpoint_lsn}
     end
@@ -562,6 +568,10 @@ defmodule DuckFeeder.Meta.Store do
 
   defp single_value(%Postgrex.Result{rows: [[value]]}), do: {:ok, value}
   defp single_value(%Postgrex.Result{rows: rows}), do: {:error, {:unexpected_rows, rows}}
+
+  defp lsn_param(lsn) when is_binary(lsn), do: {:ok, Lsn.parse!(lsn)}
+  defp lsn_param(lsn) when is_integer(lsn) and lsn >= 0, do: {:ok, lsn}
+  defp lsn_param(other), do: {:error, {:invalid_lsn, other}}
 
   defp fetch_required(attrs, key) do
     case get_attr(attrs, key) do
