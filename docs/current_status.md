@@ -105,6 +105,7 @@ This is the single source of truth task list for project status and next work.
   - [x] integration coverage for snapshot->WAL handoff replay behavior (preexisting rows + post-snapshot WAL)
   - [x] integration test file for append stream end-to-end flow (test-config-gated)
   - [x] integration coverage for optional delete-file metadata commits (`ducklake_delete_file` + snapshot change marker)
+  - [x] integration coverage for replacement/end-snapshot transitions (retire prior `ducklake_data_file` + `ducklake_delete_file` rows)
   - [x] tracer-shot assertions include row-level values, parquet type checks, and DuckLake metadata row verification (spec-table columns)
   - [x] failure-injection integration scenario for reconcile cleanup (`failed` -> `pending` + file deletion)
   - [x] strict failed-cleanup integration scenario for missing file metadata (`require_failed_batch_files?`)
@@ -137,7 +138,6 @@ This is the single source of truth task list for project status and next work.
 
 1. **DuckLake metadata maturation (phase 2)**
    - extend from metadata-only delete-file rows to physical delete-file production/validation flow
-   - add integration coverage for replacement/end-snapshot transitions (currently unit-covered)
    - tighten schema-evolution semantics to mirror DuckLake conflict/query expectations
    - complete compaction-oriented metadata writes/maintenance paths and related integration assertions
 

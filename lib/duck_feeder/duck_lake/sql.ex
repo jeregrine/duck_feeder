@@ -21,7 +21,7 @@ defmodule DuckFeeder.DuckLake.SQL do
     WHERE batches.batch_id = $1
   ),
   incoming AS (
-    SELECT jsonb_array_elements_text($2::jsonb) AS column_name
+    SELECT unnest($2::text[]) AS column_name
   ),
   has_new AS (
     SELECT
@@ -594,13 +594,13 @@ defmodule DuckFeeder.DuckLake.SQL do
       file_id_increment = 1 + delete_file_count
 
       column_descriptors = extract_column_descriptors(batch)
-      column_names_json = JSON.encode!(Enum.map(column_descriptors, & &1.name))
+      column_names = Enum.map(column_descriptors, & &1.name)
 
       snapshot_changes =
         snapshot_changes(table_stats_row_delta, delete_file_count, replaced_data_file_ids)
 
       [
-        {@insert_snapshot_sql, [batch_id, column_names_json, file_id_increment]},
+        {@insert_snapshot_sql, [batch_id, column_names, file_id_increment]},
         {@ensure_table_sql, [batch_id]}
       ] ++
         column_statements(batch_id, column_descriptors) ++
