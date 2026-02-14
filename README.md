@@ -366,8 +366,24 @@ Example `config/test.exs`:
 ```elixir
 config :duck_feeder, :integration,
   meta_database_url: "postgres://postgres:postgres@localhost:5432/duck_feeder_meta_test",
-  source_database_url: "postgres://postgres:postgres@localhost:5432/duck_feeder_source_test"
+  source_database_url: "postgres://postgres:postgres@localhost:5432/duck_feeder_source_test",
+  s3_storage: nil,
+  gcs_storage: nil
 ```
+
+Optional provider-backed storage integration tests can be enabled via env vars read by
+`config/test.exs`:
+
+- S3-compatible:
+  - `DUCK_FEEDER_ITEST_S3_BUCKET`
+  - `DUCK_FEEDER_ITEST_S3_ENDPOINT`
+  - `DUCK_FEEDER_ITEST_S3_ACCESS_KEY_ID`
+  - `DUCK_FEEDER_ITEST_S3_SECRET_ACCESS_KEY`
+  - optional: `DUCK_FEEDER_ITEST_S3_REGION`, `DUCK_FEEDER_ITEST_S3_FORCE_PATH_STYLE`
+- GCS (JSON API / emulator-compatible base URL):
+  - `DUCK_FEEDER_ITEST_GCS_BUCKET`
+  - `DUCK_FEEDER_ITEST_GCS_TOKEN`
+  - optional: `DUCK_FEEDER_ITEST_GCS_BASE_URL`
 
 Helper script:
 - `scripts/test_integration.sh`
