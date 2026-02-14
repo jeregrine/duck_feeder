@@ -98,6 +98,7 @@ This is the single source of truth task list for project status and next work.
   - [x] integration test file for meta store (test-config-gated)
   - [x] integration test file for CDC connection stream (test-config-gated)
   - [x] integration test file for runtime start_stream end-to-end flow (test-config-gated)
+  - [x] integration test file for append stream end-to-end flow (test-config-gated)
   - [x] tracer-shot assertions include row-level values, parquet type checks, and DuckLake metadata row verification (spec-table columns)
   - [x] failure-injection integration scenario for reconcile cleanup (`failed` -> `pending` + file deletion)
   - [x] strict failed-cleanup integration scenario for missing file metadata (`require_failed_batch_files?`)
@@ -117,13 +118,14 @@ This is the single source of truth task list for project status and next work.
 
 ## Remaining to reach target architecture
 
-- [ ] **Replication client hardening** (bootstrap lifecycle, reconnect policy tuning, backpressure/metrics)
-- [ ] **Production initial snapshot + WAL handoff path** (direct ingest integration + replay validation)
-- [ ] **Append event stream integrations** (`:telemetry`/Logger/error adapters over `DuckFeeder.AppendStream`)
-- [ ] **Parquet writer hardening** (type fidelity, performance tuning, and compatibility validation)
 - [ ] **DuckLake metadata SQL commit phase 2** (delete-file flows, file/column stats richness, schema-evolution conflict semantics, compaction-oriented metadata)
-- [ ] **Advanced recovery/reconciler loop** (orphan detection, policy tuning, large-scale cleanup safety)
+- [ ] **Production initial snapshot + WAL handoff path** (direct ingest integration + replay validation)
 - [ ] **Full integration suite** (Postgres + S3 + GCS + metadata DB)
+- [ ] **Benchee performance benchmarks** (single-writer CDC throughput + multi-writer append-stream latency/memory pressure)
+- [ ] **Replication client hardening** (bootstrap lifecycle, reconnect policy tuning, backpressure/metrics)
+- [ ] **Parquet writer hardening** (type fidelity, performance tuning, and compatibility validation)
+- [ ] **Advanced recovery/reconciler loop** (orphan detection, policy tuning, large-scale cleanup safety)
+- [ ] **Append event stream integrations** (`:telemetry`/Logger/error adapters over `DuckFeeder.AppendStream`)
 
 ## Next steps (soft plan)
 
@@ -143,7 +145,12 @@ This is the single source of truth task list for project status and next work.
 4. **Recovery/reconcile hardening (phase 2)**
    - add orphan-detection integration cases and larger-batch cleanup safety checks
 
-5. **Dependency footprint minimization (Elixir + Rust)**
+5. **Benchee performance suite**
+   - single-writer benchmark: high-volume Postgres CDC path (batch throughput, flush latency)
+   - multi-writer benchmark: concurrent append-stream producers (analytics/logs/errors/telemetry)
+   - capture memory pressure + latency percentiles to guide batching defaults
+
+6. **Dependency footprint minimization (Elixir + Rust)**
    - keep runtime deps minimal and avoid heavy crates unless required
    - bias toward Elixir-side transforms over Rust parsing when both are viable
 
