@@ -20,7 +20,11 @@ defmodule DuckFeeder.AppendStream do
       :designated_table_by_target,
       :default_target_schema,
       :observer_pid,
-      :lsn_counter
+      :lsn_counter,
+      :batch_task_supervisor,
+      :max_inflight_batches,
+      :max_pending_batches,
+      :overflow_strategy
     ]
     defstruct [
       :pipeline_supervisor,
@@ -30,8 +34,35 @@ defmodule DuckFeeder.AppendStream do
       :default_target_schema,
       :observer_pid,
       :lsn_counter,
-      pipelines: %{}
+      :batch_task_supervisor,
+      :max_inflight_batches,
+      :max_pending_batches,
+      :overflow_strategy,
+      pipelines: %{},
+      inflight_batch_tasks: %{},
+      pending_batches: :queue.new(),
+      pending_batch_count: 0
     ]
+
+    @type inflight_task :: %{table: {String.t(), String.t()}, batch: map()}
+
+    @type t :: %__MODULE__{
+            pipeline_supervisor: pid(),
+            pipeline_opts: map(),
+            context: map(),
+            designated_table_by_target: %{optional({String.t(), String.t()}) => pos_integer()},
+            default_target_schema: String.t(),
+            observer_pid: pid(),
+            lsn_counter: non_neg_integer(),
+            batch_task_supervisor: pid(),
+            max_inflight_batches: pos_integer(),
+            max_pending_batches: pos_integer(),
+            overflow_strategy: :fail | :drop_oldest,
+            pipelines: %{optional({String.t(), String.t()}) => pid()},
+            inflight_batch_tasks: %{optional(reference()) => inflight_task()},
+            pending_batches: :queue.queue({{String.t(), String.t()}, map()}),
+            pending_batch_count: non_neg_integer()
+          }
   end
 
   @type option ::
@@ -48,6 +79,11 @@ defmodule DuckFeeder.AppendStream do
           | {:committer_opts, keyword()}
           | {:default_target_schema, String.t()}
           | {:start_lsn, String.t()}
+          | {:max_inflight_batches, pos_integer()}
+          | {:max_pending_batches, pos_integer()}
+          | {:overflow_strategy, :fail | :drop_oldest}
+          | {:poison_row_mode, :fail | :drop}
+          | {:poison_row_sink, pid() | (map() -> term()) | {module(), atom(), [term()]}}
 
   @spec start_link([option()]) :: GenServer.on_start()
   def start_link(opts) do
@@ -70,32 +106,55 @@ defmodule DuckFeeder.AppendStream do
   @impl true
   def init(opts) do
     designated_tables = Keyword.fetch!(opts, :designated_tables)
-    {:ok, pipeline_supervisor} = DynamicSupervisor.start_link(strategy: :one_for_one)
-
     start_lsn = Keyword.get(opts, :start_lsn, "0/0")
 
-    state =
-      %State{
-        pipeline_supervisor: pipeline_supervisor,
-        pipeline_opts: Keyword.get(opts, :pipeline_opts, %{}) |> Map.new(),
+    context =
+      %{
+        meta_conn: Keyword.fetch!(opts, :meta_conn),
         designated_table_by_target: designated_table_mapping(designated_tables),
-        default_target_schema: Keyword.get(opts, :default_target_schema, "raw"),
-        observer_pid: Keyword.get(opts, :observer_pid, self()),
-        lsn_counter: Lsn.parse!(start_lsn),
-        context:
-          %{
-            meta_conn: Keyword.fetch!(opts, :meta_conn),
-            designated_table_by_target: designated_table_mapping(designated_tables),
-            writer: Keyword.get(opts, :writer, %{}),
-            storage: Keyword.fetch!(opts, :storage),
-            object_prefix: Keyword.get(opts, :object_prefix, "duck_feeder_append")
-          }
-          |> maybe_put_optional(:meta_module, Keyword.get(opts, :meta_module))
-          |> maybe_put_optional(:committer_module, Keyword.get(opts, :committer_module))
-          |> maybe_put_optional(:committer_opts, Keyword.get(opts, :committer_opts))
+        writer: Keyword.get(opts, :writer, %{}),
+        storage: Keyword.fetch!(opts, :storage),
+        object_prefix: Keyword.get(opts, :object_prefix, "duck_feeder_append")
       }
+      |> maybe_put_optional(:meta_module, Keyword.get(opts, :meta_module))
+      |> maybe_put_optional(:committer_module, Keyword.get(opts, :committer_module))
+      |> maybe_put_optional(:committer_opts, Keyword.get(opts, :committer_opts))
+      |> maybe_put_optional(:poison_row_mode, Keyword.get(opts, :poison_row_mode))
+      |> maybe_put_optional(:poison_row_sink, Keyword.get(opts, :poison_row_sink))
 
-    {:ok, state}
+    with {:ok, lsn_counter} <- Lsn.parse(start_lsn),
+         {:ok, max_inflight_batches} <-
+           normalize_positive_integer(
+             Keyword.get(opts, :max_inflight_batches, 1),
+             :max_inflight_batches
+           ),
+         {:ok, max_pending_batches} <-
+           normalize_positive_integer(
+             Keyword.get(opts, :max_pending_batches, 1_000),
+             :max_pending_batches
+           ),
+         {:ok, overflow_strategy} <-
+           normalize_overflow_strategy(Keyword.get(opts, :overflow_strategy, :fail)),
+         {:ok, pipeline_supervisor} <- DynamicSupervisor.start_link(strategy: :one_for_one),
+         {:ok, batch_task_supervisor} <- Task.Supervisor.start_link(strategy: :one_for_one) do
+      {:ok,
+       %State{
+         pipeline_supervisor: pipeline_supervisor,
+         pipeline_opts: Keyword.get(opts, :pipeline_opts, %{}) |> Map.new(),
+         context: context,
+         designated_table_by_target: designated_table_mapping(designated_tables),
+         default_target_schema: Keyword.get(opts, :default_target_schema, "raw"),
+         observer_pid: Keyword.get(opts, :observer_pid, self()),
+         lsn_counter: lsn_counter,
+         batch_task_supervisor: batch_task_supervisor,
+         max_inflight_batches: max_inflight_batches,
+         max_pending_batches: max_pending_batches,
+         overflow_strategy: overflow_strategy
+       }}
+    else
+      {:error, reason} ->
+        {:stop, reason}
+    end
   end
 
   @impl true
@@ -122,14 +181,95 @@ defmodule DuckFeeder.AppendStream do
 
   @impl true
   def handle_info({:duck_feeder_batch, table, batch}, %State{} = state) do
-    result = BatchProcessor.process_batch(state.context, table, batch)
+    case enqueue_or_start_batch(state, table, batch) do
+      {:ok, next_state} ->
+        {:noreply, next_state}
 
-    if is_pid(state.observer_pid) do
-      send(state.observer_pid, {:duck_feeder_append_batch_processed, table, result, batch})
-      send(state.observer_pid, {:duck_feeder_batch_processed, table, result, batch})
+      {:error, reason, next_state} ->
+        overflow_state =
+          emit_batch_queue_telemetry(next_state, :overflow, %{
+            table: table,
+            reason: reason
+          })
+
+        if is_pid(overflow_state.observer_pid) do
+          send(
+            overflow_state.observer_pid,
+            {:duck_feeder_append_batch_queue_overflow, table, batch, reason}
+          )
+
+          send(
+            overflow_state.observer_pid,
+            {:duck_feeder_batch_queue_overflow, table, batch, reason}
+          )
+        end
+
+        {:stop, reason, overflow_state}
     end
+  end
 
-    {:noreply, state}
+  def handle_info({ref, result}, %State{inflight_batch_tasks: inflight} = state)
+      when is_reference(ref) do
+    case Map.pop(inflight, ref) do
+      {nil, _inflight} ->
+        {:noreply, state}
+
+      {%{table: table, batch: batch}, next_inflight} ->
+        Process.demonitor(ref, [:flush])
+
+        next_state =
+          state
+          |> Map.put(:inflight_batch_tasks, next_inflight)
+          |> notify_batch_result(table, result, batch)
+          |> maybe_start_queued_batches()
+          |> emit_batch_queue_telemetry(:completed, %{
+            table: table,
+            result: batch_result_status(result)
+          })
+
+        {:noreply, next_state}
+    end
+  end
+
+  def handle_info(
+        {:DOWN, ref, :process, _pid, reason},
+        %State{inflight_batch_tasks: inflight} = state
+      )
+      when is_reference(ref) do
+    case Map.get(inflight, ref) do
+      nil ->
+        {:noreply, state}
+
+      %{table: table, batch: batch} ->
+        if normal_down_reason?(reason) do
+          {:noreply, state}
+        else
+          {_task, next_inflight} = Map.pop(inflight, ref)
+          error = {:batch_task_crashed, reason}
+
+          next_state = %{state | inflight_batch_tasks: next_inflight}
+
+          if is_pid(next_state.observer_pid) do
+            send(
+              next_state.observer_pid,
+              {:duck_feeder_append_batch_processed, table, {:error, error}, batch}
+            )
+
+            send(
+              next_state.observer_pid,
+              {:duck_feeder_batch_processed, table, {:error, error}, batch}
+            )
+          end
+
+          next_state =
+            emit_batch_queue_telemetry(next_state, :task_crashed, %{
+              table: table,
+              reason: reason
+            })
+
+          {:stop, error, next_state}
+        end
+    end
   end
 
   defp ensure_pipeline(%State{pipelines: pipelines} = state, table) do
@@ -165,6 +305,156 @@ defmodule DuckFeeder.AppendStream do
 
       {:error, reason} ->
         {:error, {:pipeline_start_failed, table, reason}}
+    end
+  end
+
+  defp enqueue_or_start_batch(%State{} = state, table, batch) do
+    if map_size(state.inflight_batch_tasks) < state.max_inflight_batches do
+      {:ok, start_batch_task(state, table, batch, :incoming)}
+    else
+      if state.pending_batch_count >= state.max_pending_batches do
+        handle_queue_overflow(state, table, batch)
+      else
+        queued_state =
+          %{
+            state
+            | pending_batches: :queue.in({table, batch}, state.pending_batches),
+              pending_batch_count: state.pending_batch_count + 1
+          }
+          |> emit_batch_queue_telemetry(:enqueued, %{table: table})
+
+        {:ok, queued_state}
+      end
+    end
+  end
+
+  defp handle_queue_overflow(%State{overflow_strategy: :fail} = state, _table, _batch) do
+    {:error, {:batch_queue_overflow, state.max_pending_batches}, state}
+  end
+
+  defp handle_queue_overflow(%State{overflow_strategy: :drop_oldest} = state, table, batch) do
+    case :queue.out(state.pending_batches) do
+      {{:value, {dropped_table, dropped_batch}}, next_queue} ->
+        next_state =
+          %{
+            state
+            | pending_batches: :queue.in({table, batch}, next_queue)
+          }
+          |> notify_dropped_batch(dropped_table, dropped_batch, :drop_oldest)
+          |> emit_batch_queue_telemetry(:dropped_oldest, %{
+            table: table,
+            dropped_table: dropped_table,
+            reason: :drop_oldest
+          })
+          |> emit_batch_queue_telemetry(:enqueued, %{table: table, source: :drop_oldest})
+
+        {:ok, next_state}
+
+      {:empty, _queue} ->
+        {:error, {:batch_queue_overflow, state.max_pending_batches}, state}
+    end
+  end
+
+  defp start_batch_task(%State{} = state, table, batch, source) when is_atom(source) do
+    task =
+      Task.Supervisor.async_nolink(state.batch_task_supervisor, fn ->
+        BatchProcessor.process_batch(state.context, table, batch)
+      end)
+
+    %{
+      state
+      | inflight_batch_tasks:
+          Map.put(state.inflight_batch_tasks, task.ref, %{table: table, batch: batch})
+    }
+    |> emit_batch_queue_telemetry(:started, %{table: table, source: source})
+  end
+
+  defp maybe_start_queued_batches(%State{} = state) do
+    cond do
+      map_size(state.inflight_batch_tasks) >= state.max_inflight_batches ->
+        state
+
+      state.pending_batch_count == 0 ->
+        state
+
+      true ->
+        case :queue.out(state.pending_batches) do
+          {{:value, {table, batch}}, next_queue} ->
+            state
+            |> Map.put(:pending_batches, next_queue)
+            |> Map.put(:pending_batch_count, state.pending_batch_count - 1)
+            |> start_batch_task(table, batch, :queued)
+            |> maybe_start_queued_batches()
+
+          {:empty, _} ->
+            %{state | pending_batch_count: 0}
+        end
+    end
+  end
+
+  defp notify_batch_result(%State{observer_pid: observer_pid} = state, table, result, batch) do
+    if is_pid(observer_pid) do
+      send(observer_pid, {:duck_feeder_append_batch_processed, table, result, batch})
+      send(observer_pid, {:duck_feeder_batch_processed, table, result, batch})
+    end
+
+    state
+  end
+
+  defp notify_dropped_batch(
+         %State{observer_pid: observer_pid} = state,
+         dropped_table,
+         dropped_batch,
+         reason
+       ) do
+    DuckFeeder.Telemetry.append_stream_batch_dropped(
+      %{dropped_count: 1},
+      %{table: dropped_table, reason: reason}
+    )
+
+    if is_pid(observer_pid) do
+      send(
+        observer_pid,
+        {:duck_feeder_append_batch_dropped, dropped_table, dropped_batch, reason}
+      )
+
+      send(observer_pid, {:duck_feeder_batch_dropped, dropped_table, dropped_batch, reason})
+    end
+
+    state
+  end
+
+  defp emit_batch_queue_telemetry(%State{} = state, status, metadata)
+       when is_atom(status) and is_map(metadata) do
+    measurements = %{
+      pending_batch_count: state.pending_batch_count,
+      inflight_batch_count: map_size(state.inflight_batch_tasks),
+      max_pending_batches: state.max_pending_batches,
+      max_inflight_batches: state.max_inflight_batches
+    }
+
+    metadata =
+      metadata
+      |> Map.put(:status, status)
+      |> maybe_put_table_metadata()
+
+    DuckFeeder.Telemetry.append_stream_batch_queue(measurements, metadata)
+    state
+  end
+
+  defp batch_result_status({:ok, _result}), do: :ok
+  defp batch_result_status({:error, _reason}), do: :error
+  defp batch_result_status(_result), do: :unknown
+
+  defp maybe_put_table_metadata(metadata) when is_map(metadata) do
+    case Map.get(metadata, :table) do
+      {schema, table} when is_binary(schema) and is_binary(table) ->
+        metadata
+        |> Map.put(:table_schema, schema)
+        |> Map.put(:table_name, table)
+
+      _ ->
+        metadata
     end
   end
 
@@ -213,6 +503,22 @@ defmodule DuckFeeder.AppendStream do
       Map.put(acc, target, id)
     end)
   end
+
+  defp normalize_positive_integer(value, _key) when is_integer(value) and value > 0,
+    do: {:ok, value}
+
+  defp normalize_positive_integer(value, key), do: {:error, {:invalid_option, key, value}}
+
+  defp normalize_overflow_strategy(strategy) when strategy in [:fail, :drop_oldest],
+    do: {:ok, strategy}
+
+  defp normalize_overflow_strategy(other),
+    do: {:error, {:invalid_option, :overflow_strategy, other}}
+
+  defp normal_down_reason?(:normal), do: true
+  defp normal_down_reason?(:shutdown), do: true
+  defp normal_down_reason?({:shutdown, _reason}), do: true
+  defp normal_down_reason?(_reason), do: false
 
   defp maybe_put_optional(context, _key, nil), do: context
   defp maybe_put_optional(context, key, value), do: Map.put(context, key, value)

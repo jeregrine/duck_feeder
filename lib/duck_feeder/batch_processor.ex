@@ -73,15 +73,29 @@ defmodule DuckFeeder.BatchProcessor do
 
   defp process_uncommitted_batch(context, meta, conn, table, batch, batch_id, current_state) do
     with {:ok, :encoded} <- advance_to(meta, conn, batch_id, current_state, :encoded),
-         {:ok, write_result} <- Writer.write_batch(context.writer, %{rows: batch.rows}) do
+         {:ok, write_result, effective_batch} <- write_batch_with_poison_policy(context, batch) do
       result =
-        finalize_written_batch(context, meta, conn, table, batch, batch_id, write_result)
+        finalize_written_batch(
+          context,
+          meta,
+          conn,
+          table,
+          effective_batch,
+          batch_id,
+          write_result
+        )
 
       _ = Writer.cleanup(context.writer, write_result)
 
       case result do
-        {:ok, _} = ok ->
-          ok
+        {:ok, committed} = ok ->
+          dropped_count = max(length(batch.rows) - length(effective_batch.rows), 0)
+
+          if dropped_count > 0 do
+            {:ok, Map.put(committed, :dropped_poison_rows, dropped_count)}
+          else
+            ok
+          end
 
         {:error, reason} = error ->
           mark_failed(meta, conn, batch_id, reason)
@@ -537,6 +551,102 @@ defmodule DuckFeeder.BatchProcessor do
       end
     end)
     |> Enum.uniq()
+  end
+
+  defp write_batch_with_poison_policy(context, batch) do
+    case Writer.write_batch(context.writer, %{rows: batch.rows}) do
+      {:ok, write_result} ->
+        {:ok, write_result, batch}
+
+      {:error, reason} = original_error ->
+        maybe_recover_poison_rows(context, batch, reason, original_error)
+    end
+  end
+
+  defp maybe_recover_poison_rows(context, batch, reason, fallback_error) do
+    case Map.get(context, :poison_row_mode, :fail) do
+      :drop ->
+        recover_batch_without_poison_rows(context, batch, reason)
+
+      _ ->
+        fallback_error
+    end
+  end
+
+  defp recover_batch_without_poison_rows(context, batch, batch_error) do
+    {valid_rows, dropped_rows} = isolate_rows(context, batch.rows, batch_error)
+
+    case valid_rows do
+      [] ->
+        {:error, {:all_rows_poisoned, batch_error, dropped_rows}}
+
+      rows ->
+        recovered_batch = %{
+          batch
+          | rows: rows,
+            row_count: length(rows)
+        }
+
+        case Writer.write_batch(context.writer, %{rows: recovered_batch.rows}) do
+          {:ok, write_result} -> {:ok, write_result, recovered_batch}
+          {:error, reason} -> {:error, {:poison_recovery_failed, reason, dropped_rows}}
+        end
+    end
+  end
+
+  defp isolate_rows(context, rows, batch_error) when is_list(rows) do
+    rows
+    |> Enum.with_index(1)
+    |> Enum.reduce({[], []}, fn {row, index}, {valid_acc, dropped_acc} ->
+      case Writer.write_batch(context.writer, %{rows: [row]}) do
+        {:ok, write_result} ->
+          _ = Writer.cleanup(context.writer, write_result)
+          {[row | valid_acc], dropped_acc}
+
+        {:error, reason} ->
+          dropped = %{row: row, index: index, reason: reason, batch_error: batch_error}
+          emit_poison_row(context, dropped)
+          {valid_acc, [dropped | dropped_acc]}
+      end
+    end)
+    |> then(fn {valid, dropped} -> {Enum.reverse(valid), Enum.reverse(dropped)} end)
+  end
+
+  defp emit_poison_row(context, dropped) when is_map(dropped) do
+    DuckFeeder.Telemetry.execute(
+      [:batch, :poison_row],
+      %{count: 1},
+      %{
+        index: dropped.index,
+        reason: dropped.reason,
+        batch_error: dropped.batch_error
+      }
+    )
+
+    case Map.get(context, :poison_row_sink) do
+      pid when is_pid(pid) ->
+        send(pid, {:duck_feeder_poison_row, dropped})
+
+      fun when is_function(fun, 1) ->
+        _ = safe_poison_sink(fun, dropped)
+
+      {module, function, args} when is_atom(module) and is_atom(function) and is_list(args) ->
+        _ = safe_poison_sink(fn payload -> apply(module, function, [payload | args]) end, dropped)
+
+      _ ->
+        :ok
+    end
+
+    :ok
+  end
+
+  defp safe_poison_sink(fun, payload) when is_function(fun, 1) do
+    fun.(payload)
+    :ok
+  rescue
+    _ -> :ok
+  catch
+    _, _ -> :ok
   end
 
   defp designated_table_id(context, table) do

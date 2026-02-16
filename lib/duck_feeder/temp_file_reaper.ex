@@ -162,7 +162,7 @@ defmodule DuckFeeder.TempFileReaper do
            ) do
       {:ok,
        %{
-         enabled?: enabled? in [true, true, 1, "true", "1"],
+         enabled?: enabled? in [true, 1, "true", "1"],
          tmp_dir: tmp_dir,
          prefix: prefix,
          suffixes: suffixes,

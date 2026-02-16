@@ -44,7 +44,8 @@ defmodule DuckFeeder.BootstrapTest do
   test "seeds source and designated tables from runtime config" do
     config = %{
       source: %{
-        postgres_url: "postgres://source",
+        postgres_url:
+          "postgres://source_user:source_password@db.example:5432/source_db?sslmode=require&password=query_secret",
         slot_name: "duck_slot",
         publication_name: "duck_pub",
         designated_tables: [
@@ -71,7 +72,10 @@ defmodule DuckFeeder.BootstrapTest do
              Bootstrap.seed_meta(:meta_conn, config,
                meta_module: FakeMeta,
                source_name: "source-a",
-               connection_info: %{dsn: "postgres://dsn"}
+               connection_info: %{
+                 dsn: "postgres://dsn_user:dsn_password@dsn.example:5432/dsn_db",
+                 password: "should_not_persist"
+               }
              )
 
     assert_received :meta_bootstrap
@@ -79,8 +83,12 @@ defmodule DuckFeeder.BootstrapTest do
     assert_received {:meta_register_source, source_attrs}
     assert source_attrs.name == "source-a"
     assert source_attrs.slot_name == "duck_slot"
-    assert source_attrs.connection_info.postgres_url == "postgres://source"
-    assert source_attrs.connection_info.dsn == "postgres://dsn"
+
+    assert source_attrs.connection_info.postgres_url ==
+             "postgres://source_user@db.example:5432/source_db?sslmode=require"
+
+    assert source_attrs.connection_info.dsn == "postgres://dsn_user@dsn.example:5432/dsn_db"
+    refute Map.has_key?(source_attrs.connection_info, :password)
 
     assert_received {:meta_register_designated_table, table_attrs}
     assert table_attrs.source_id == 10
@@ -90,7 +98,7 @@ defmodule DuckFeeder.BootstrapTest do
   test "can seed metadata and start runtime stream from config" do
     config = %{
       source: %{
-        postgres_url: "postgres://source",
+        postgres_url: "postgres://stream_user:stream_password@localhost:5432/source_db",
         slot_name: "duck_slot",
         publication_name: "duck_pub",
         designated_tables: [
@@ -128,6 +136,10 @@ defmodule DuckFeeder.BootstrapTest do
     assert storage_config.provider == :s3
     assert storage_config.bucket == "bucket"
     assert start_opts[:meta_module] == FakeMeta
+    assert start_opts[:connection_opts][:hostname] == "localhost"
+    assert start_opts[:connection_opts][:database] == "source_db"
+    assert start_opts[:connection_opts][:username] == "stream_user"
+    assert start_opts[:connection_opts][:password] == "stream_password"
   end
 
   test "supports explicit table selection and target remapping from Elixir opts" do

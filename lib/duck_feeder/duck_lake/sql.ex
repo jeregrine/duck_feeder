@@ -224,6 +224,138 @@ defmodule DuckFeeder.DuckLake.SQL do
   )
   """
 
+  @validate_column_compat_bulk_sql """
+  WITH table_ref AS (
+    SELECT batches.designated_table_id AS table_id
+    FROM duckfeeder_meta.batches batches
+    WHERE batches.batch_id = $1
+  ),
+  incoming AS (
+    SELECT name AS column_name, upper(type) AS incoming_type
+    FROM unnest($2::text[], $3::text[]) AS entry(name, type)
+  )
+  SELECT 1 /
+    CASE
+      WHEN EXISTS (
+        SELECT 1
+        FROM incoming
+        JOIN table_ref ON true
+        JOIN ducklake_metadata.ducklake_column col
+          ON col.table_id = table_ref.table_id
+         AND col.column_name = incoming.column_name
+         AND col.end_snapshot IS NULL
+        WHERE NOT (
+          upper(col.column_type) = incoming.incoming_type
+          OR (upper(col.column_type) = 'DOUBLE' AND incoming.incoming_type IN ('BIGINT', 'DOUBLE'))
+          OR upper(col.column_type) = 'VARCHAR'
+        )
+      ) THEN 0
+      ELSE 1
+    END
+  """
+
+  @ensure_column_bulk_sql """
+  WITH table_ref AS (
+    SELECT batches.designated_table_id AS table_id
+    FROM duckfeeder_meta.batches batches
+    WHERE batches.batch_id = $1
+  ),
+  current_snapshot AS (
+    SELECT snapshot_id
+    FROM ducklake_metadata.ducklake_snapshot
+    ORDER BY snapshot_id DESC
+    LIMIT 1
+  ),
+  incoming AS (
+    SELECT name AS column_name, type AS column_type, ordinality
+    FROM unnest($2::text[], $3::text[]) WITH ORDINALITY AS entry(name, type, ordinality)
+  ),
+  missing AS (
+    SELECT incoming.column_name, incoming.column_type, incoming.ordinality
+    FROM incoming
+    JOIN table_ref ON true
+    WHERE NOT EXISTS (
+      SELECT 1
+      FROM ducklake_metadata.ducklake_column col
+      WHERE col.table_id = table_ref.table_id
+        AND col.column_name = incoming.column_name
+        AND col.end_snapshot IS NULL
+    )
+  ),
+  base AS (
+    SELECT
+      COALESCE(MAX(col.column_id), 0) AS base_column_id,
+      COALESCE(MAX(col.column_order), 0) AS base_column_order
+    FROM ducklake_metadata.ducklake_column col
+    JOIN table_ref ON col.table_id = table_ref.table_id
+    WHERE col.end_snapshot IS NULL
+  )
+  INSERT INTO ducklake_metadata.ducklake_column
+    (
+      column_id,
+      begin_snapshot,
+      end_snapshot,
+      table_id,
+      column_order,
+      column_name,
+      column_type,
+      initial_default,
+      default_value,
+      nulls_allowed,
+      parent_column
+    )
+  SELECT
+    base.base_column_id + row_number() OVER (ORDER BY missing.ordinality),
+    current_snapshot.snapshot_id,
+    NULL,
+    table_ref.table_id,
+    base.base_column_order + row_number() OVER (ORDER BY missing.ordinality),
+    missing.column_name,
+    missing.column_type,
+    NULL,
+    NULL,
+    true,
+    NULL
+  FROM missing
+  JOIN table_ref ON true
+  JOIN current_snapshot ON true
+  JOIN base ON true
+  """
+
+  @ensure_name_mapping_bulk_sql """
+  WITH table_ref AS (
+    SELECT batches.designated_table_id AS table_id
+    FROM duckfeeder_meta.batches batches
+    WHERE batches.batch_id = $1
+  ),
+  incoming AS (
+    SELECT name AS source_name
+    FROM unnest($2::text[]) AS entry(name)
+  )
+  INSERT INTO ducklake_metadata.ducklake_name_mapping
+    (mapping_id, column_id, source_name, target_field_id, parent_column, is_partition)
+  SELECT
+    table_ref.table_id,
+    col.column_id,
+    incoming.source_name,
+    col.column_id,
+    NULL,
+    false
+  FROM incoming
+  JOIN table_ref ON true
+  JOIN ducklake_metadata.ducklake_column col
+    ON col.table_id = table_ref.table_id
+   AND col.column_name = incoming.source_name
+   AND col.end_snapshot IS NULL
+  WHERE NOT EXISTS (
+    SELECT 1
+    FROM ducklake_metadata.ducklake_name_mapping mapping
+    WHERE mapping.mapping_id = table_ref.table_id
+      AND mapping.source_name = incoming.source_name
+      AND COALESCE(mapping.parent_column, -1) = -1
+  )
+  """
+
   @schema_change_validate_rename_table_sql """
   WITH table_ref AS (
     SELECT batches.designated_table_id AS table_id
@@ -1092,6 +1224,120 @@ defmodule DuckFeeder.DuckLake.SQL do
     extra_stats = EXCLUDED.extra_stats
   """
 
+  @upsert_table_column_stats_bulk_sql """
+  WITH table_ref AS (
+    SELECT batches.designated_table_id AS table_id
+    FROM duckfeeder_meta.batches batches
+    WHERE batches.batch_id = $1
+  ),
+  incoming AS (
+    SELECT
+      name AS column_name,
+      value_count::bigint AS value_count,
+      null_count::bigint AS null_count,
+      min_value,
+      max_value,
+      contains_nan::boolean AS contains_nan
+    FROM unnest(
+      $2::text[],
+      $3::bigint[],
+      $4::bigint[],
+      $5::text[],
+      $6::text[],
+      $7::boolean[]
+    ) AS entry(name, value_count, null_count, min_value, max_value, contains_nan)
+  )
+  INSERT INTO ducklake_metadata.ducklake_table_column_stats
+    (table_id, column_id, contains_null, contains_nan, min_value, max_value, extra_stats)
+  SELECT
+    table_ref.table_id,
+    col.column_id,
+    (incoming.null_count > 0),
+    incoming.contains_nan,
+    incoming.min_value,
+    incoming.max_value,
+    ('value_count=' || incoming.value_count::text)
+  FROM incoming
+  JOIN table_ref ON true
+  JOIN ducklake_metadata.ducklake_column col
+    ON col.table_id = table_ref.table_id
+   AND col.column_name = incoming.column_name
+   AND col.end_snapshot IS NULL
+  ON CONFLICT (table_id, column_id) DO UPDATE SET
+    contains_null = ducklake_metadata.ducklake_table_column_stats.contains_null OR EXCLUDED.contains_null,
+    contains_nan = ducklake_metadata.ducklake_table_column_stats.contains_nan OR EXCLUDED.contains_nan,
+    min_value = CASE
+      WHEN ducklake_metadata.ducklake_table_column_stats.min_value IS NULL THEN EXCLUDED.min_value
+      WHEN EXCLUDED.min_value IS NULL THEN ducklake_metadata.ducklake_table_column_stats.min_value
+      ELSE LEAST(ducklake_metadata.ducklake_table_column_stats.min_value, EXCLUDED.min_value)
+    END,
+    max_value = CASE
+      WHEN ducklake_metadata.ducklake_table_column_stats.max_value IS NULL THEN EXCLUDED.max_value
+      WHEN EXCLUDED.max_value IS NULL THEN ducklake_metadata.ducklake_table_column_stats.max_value
+      ELSE GREATEST(ducklake_metadata.ducklake_table_column_stats.max_value, EXCLUDED.max_value)
+    END,
+    extra_stats = EXCLUDED.extra_stats
+  """
+
+  @insert_file_column_stats_bulk_sql """
+  WITH current_snapshot AS (
+    SELECT snapshot_id, next_file_id
+    FROM ducklake_metadata.ducklake_snapshot
+    ORDER BY snapshot_id DESC
+    LIMIT 1
+  ),
+  table_ref AS (
+    SELECT batches.designated_table_id AS table_id
+    FROM duckfeeder_meta.batches batches
+    WHERE batches.batch_id = $1
+  ),
+  incoming AS (
+    SELECT
+      name AS column_name,
+      value_count::bigint AS value_count,
+      null_count::bigint AS null_count,
+      min_value,
+      max_value,
+      contains_nan::boolean AS contains_nan
+    FROM unnest(
+      $2::text[],
+      $3::bigint[],
+      $4::bigint[],
+      $5::text[],
+      $6::text[],
+      $7::boolean[]
+    ) AS entry(name, value_count, null_count, min_value, max_value, contains_nan)
+  )
+  INSERT INTO ducklake_metadata.ducklake_file_column_stats
+    (data_file_id, table_id, column_id, column_size_bytes, value_count, null_count, min_value, max_value, contains_nan, extra_stats)
+  SELECT
+    current_snapshot.next_file_id - ($8::bigint + 1),
+    table_ref.table_id,
+    col.column_id,
+    NULL,
+    incoming.value_count,
+    incoming.null_count,
+    incoming.min_value,
+    incoming.max_value,
+    incoming.contains_nan,
+    NULL
+  FROM incoming
+  JOIN current_snapshot ON true
+  JOIN table_ref ON true
+  JOIN ducklake_metadata.ducklake_column col
+    ON col.table_id = table_ref.table_id
+   AND col.column_name = incoming.column_name
+   AND col.end_snapshot IS NULL
+  ON CONFLICT (data_file_id, column_id) DO UPDATE SET
+    column_size_bytes = EXCLUDED.column_size_bytes,
+    value_count = EXCLUDED.value_count,
+    null_count = EXCLUDED.null_count,
+    min_value = EXCLUDED.min_value,
+    max_value = EXCLUDED.max_value,
+    contains_nan = EXCLUDED.contains_nan,
+    extra_stats = EXCLUDED.extra_stats
+  """
+
   @insert_snapshot_changes_sql """
   WITH current_snapshot AS (
     SELECT snapshot_id
@@ -1241,6 +1487,8 @@ defmodule DuckFeeder.DuckLake.SQL do
   end
 
   defp default_commit_statements(batch_id, opts) do
+    legacy_sql_constants_marker()
+
     object_key = Keyword.get(opts, :object_key)
     write_result = Keyword.get(opts, :write_result, %{}) |> Map.new()
     include_commit_log? = Keyword.get(opts, :include_commit_log?, true)
@@ -1287,8 +1535,7 @@ defmodule DuckFeeder.DuckLake.SQL do
         {@ensure_mapping_sql, [batch_id]}
       ] ++
         schema_change_statements(batch_id, schema_changes) ++
-        column_statements(batch_id, column_descriptors) ++
-        name_mapping_statements(batch_id, column_descriptors) ++
+        column_bulk_statements(batch_id, column_descriptors) ++
         partition_statements(batch_id, partition_signature, partition_descriptors) ++
         [
           {@record_schema_version_sql, []},
@@ -1306,8 +1553,7 @@ defmodule DuckFeeder.DuckLake.SQL do
           {@upsert_table_stats_sql,
            [batch_id, table_stats_row_delta, table_stats_file_size_delta]}
         ] ++
-        table_column_stats_statements(batch_id, column_descriptors) ++
-        file_column_stats_statements(batch_id, column_descriptors, delete_file_count) ++
+        column_stats_bulk_statements(batch_id, column_descriptors, delete_file_count) ++
         [
           {@insert_snapshot_changes_sql, [batch_id, snapshot_changes]},
           {@default_schema_history_sql, [batch_id, object_key, row_count, file_size]}
@@ -1323,50 +1569,87 @@ defmodule DuckFeeder.DuckLake.SQL do
     end
   end
 
-  defp column_statements(batch_id, column_descriptors) do
-    Enum.flat_map(column_descriptors, fn %{name: name, type: type} ->
-      [
-        {@validate_column_compat_sql, [batch_id, name, type]},
-        {@ensure_column_sql, [batch_id, name, type]}
-      ]
-    end)
+  defp column_bulk_statements(_batch_id, []), do: []
+
+  defp column_bulk_statements(batch_id, column_descriptors) do
+    arrays = column_arrays(column_descriptors)
+
+    [
+      {@validate_column_compat_bulk_sql, [batch_id, arrays.names, arrays.types]},
+      {@ensure_column_bulk_sql, [batch_id, arrays.names, arrays.types]},
+      {@ensure_name_mapping_bulk_sql, [batch_id, arrays.names]}
+    ]
   end
 
-  defp name_mapping_statements(batch_id, column_descriptors) do
-    Enum.map(column_descriptors, fn %{name: name} ->
-      {@ensure_name_mapping_sql, [batch_id, name]}
-    end)
-  end
+  defp column_stats_bulk_statements(_batch_id, [], _delete_file_count), do: []
 
-  defp table_column_stats_statements(batch_id, column_descriptors) do
-    Enum.map(column_descriptors, fn %{name: name, stats: stats} ->
-      {@upsert_table_column_stats_sql,
+  defp column_stats_bulk_statements(batch_id, column_descriptors, delete_file_count) do
+    arrays = column_arrays(column_descriptors)
+
+    [
+      {@upsert_table_column_stats_bulk_sql,
        [
          batch_id,
-         name,
-         stats.value_count,
-         stats.null_count,
-         stats.min_value,
-         stats.max_value,
-         stats.contains_nan
-       ]}
-    end)
-  end
-
-  defp file_column_stats_statements(batch_id, column_descriptors, delete_file_count) do
-    Enum.map(column_descriptors, fn %{name: name, stats: stats} ->
-      {@insert_file_column_stats_sql,
+         arrays.names,
+         arrays.value_counts,
+         arrays.null_counts,
+         arrays.min_values,
+         arrays.max_values,
+         arrays.contains_nans
+       ]},
+      {@insert_file_column_stats_bulk_sql,
        [
          batch_id,
-         name,
-         stats.value_count,
-         stats.null_count,
-         stats.min_value,
-         stats.max_value,
-         stats.contains_nan,
+         arrays.names,
+         arrays.value_counts,
+         arrays.null_counts,
+         arrays.min_values,
+         arrays.max_values,
+         arrays.contains_nans,
          delete_file_count
        ]}
-    end)
+    ]
+  end
+
+  defp column_arrays(column_descriptors) when is_list(column_descriptors) do
+    Enum.reduce(
+      column_descriptors,
+      %{
+        names: [],
+        types: [],
+        value_counts: [],
+        null_counts: [],
+        min_values: [],
+        max_values: [],
+        contains_nans: []
+      },
+      fn descriptor, acc ->
+        stats = Map.get(descriptor, :stats, %{})
+
+        %{
+          names: [Map.get(descriptor, :name) | acc.names],
+          types: [Map.get(descriptor, :type) | acc.types],
+          value_counts: [Map.get(stats, :value_count, 0) | acc.value_counts],
+          null_counts: [Map.get(stats, :null_count, 0) | acc.null_counts],
+          min_values: [Map.get(stats, :min_value) | acc.min_values],
+          max_values: [Map.get(stats, :max_value) | acc.max_values],
+          contains_nans: [Map.get(stats, :contains_nan, false) | acc.contains_nans]
+        }
+      end
+    )
+    |> Map.new(fn {key, values} -> {key, Enum.reverse(values)} end)
+  end
+
+  defp legacy_sql_constants_marker do
+    [
+      @validate_column_compat_sql,
+      @ensure_column_sql,
+      @ensure_name_mapping_sql,
+      @upsert_table_column_stats_sql,
+      @insert_file_column_stats_sql
+    ]
+
+    :ok
   end
 
   defp delete_file_statements(batch_id, delete_files) when is_list(delete_files) do

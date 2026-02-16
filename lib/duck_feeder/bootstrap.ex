@@ -4,6 +4,7 @@ defmodule DuckFeeder.Bootstrap do
   """
 
   alias DuckFeeder.{Config, Meta, Runtime}
+  alias DuckFeeder.CDC.ConnectionOptions
 
   @spec seed_meta(pid(), map() | keyword(), keyword()) :: {:ok, map()} | {:error, term()}
   def seed_meta(meta_conn, config, opts \\ []) do
@@ -40,7 +41,7 @@ defmodule DuckFeeder.Bootstrap do
     with {:ok, validated} <- Config.validate(config),
          {:ok, seed_result} <- seed_meta(meta_conn, config, seed_opts),
          {:ok, runtime_start_opts} <-
-           runtime_start_opts(seed_opts, start_opts),
+           runtime_start_opts(validated.source, seed_opts, start_opts),
          storage_config <- Config.storage_config(validated),
          {:ok, runtime_result} <-
            runtime_module.start_stream(
@@ -70,14 +71,19 @@ defmodule DuckFeeder.Bootstrap do
   defp register_source(meta_module, meta_conn, source, opts) do
     source_name = source_name(source, opts)
 
-    base_connection_info = %{
-      postgres_url: source.postgres_url
-    }
+    base_connection_info =
+      source.postgres_url
+      |> sanitize_url_value()
+      |> case do
+        nil -> %{}
+        sanitized_url -> %{postgres_url: sanitized_url}
+      end
 
     connection_info =
       opts
       |> Keyword.get(:connection_info, %{})
       |> Map.new()
+      |> sanitize_connection_info()
       |> Map.merge(base_connection_info)
 
     meta_module.register_source(meta_conn, %{
@@ -220,7 +226,7 @@ defmodule DuckFeeder.Bootstrap do
     |> Map.put_new(:primary_keys, defaults.primary_keys)
   end
 
-  defp runtime_start_opts(seed_opts, start_opts) do
+  defp runtime_start_opts(source, seed_opts, start_opts) when is_map(source) do
     seed_meta_module = Keyword.get(seed_opts, :meta_module)
 
     opts =
@@ -229,8 +235,140 @@ defmodule DuckFeeder.Bootstrap do
         false -> maybe_put(start_opts, :meta_module, seed_meta_module)
       end
 
+    opts = maybe_put_runtime_connection_opts(opts, source)
+
     {:ok, opts}
   end
+
+  defp maybe_put_runtime_connection_opts(start_opts, source) do
+    if Keyword.has_key?(start_opts, :connection_opts) do
+      start_opts
+    else
+      case ConnectionOptions.parse_url(Map.get(source, :postgres_url, "")) do
+        {:ok, connection_opts} -> Keyword.put(start_opts, :connection_opts, connection_opts)
+        {:error, _reason} -> start_opts
+      end
+    end
+  end
+
+  @secret_connection_keys ~w[
+    password
+    pass
+    secret
+    secret_key
+    secret_access_key
+    access_key
+    access_key_id
+    session_token
+    token
+    auth_token
+    api_key
+    credentials
+  ]
+
+  @connection_url_keys ~w[postgres_url dsn database_url url]
+
+  defp sanitize_connection_info(value) when is_map(value) do
+    Enum.reduce(value, %{}, fn {key, raw_value}, acc ->
+      key_name = normalize_connection_key_name(key)
+
+      cond do
+        key_name in @secret_connection_keys ->
+          acc
+
+        key_name in @connection_url_keys ->
+          case sanitize_url_value(raw_value) do
+            nil -> acc
+            sanitized -> Map.put(acc, key, sanitized)
+          end
+
+        true ->
+          Map.put(acc, key, sanitize_connection_info(raw_value))
+      end
+    end)
+  end
+
+  defp sanitize_connection_info(value) when is_list(value) do
+    value
+    |> Enum.reduce([], fn
+      {key, raw_value}, acc ->
+        key_name = normalize_connection_key_name(key)
+
+        cond do
+          key_name in @secret_connection_keys ->
+            acc
+
+          key_name in @connection_url_keys ->
+            case sanitize_url_value(raw_value) do
+              nil -> acc
+              sanitized -> [{key, sanitized} | acc]
+            end
+
+          true ->
+            [{key, sanitize_connection_info(raw_value)} | acc]
+        end
+
+      element, acc ->
+        [sanitize_connection_info(element) | acc]
+    end)
+    |> Enum.reverse()
+  end
+
+  defp sanitize_connection_info(value), do: value
+
+  defp sanitize_url_value(value) when is_binary(value) do
+    uri = URI.parse(value)
+
+    if is_binary(uri.scheme) do
+      userinfo =
+        case uri.userinfo do
+          nil ->
+            nil
+
+          userinfo when is_binary(userinfo) ->
+            case String.split(userinfo, ":", parts: 2) do
+              [username, _password] when username != "" -> URI.encode_www_form(username)
+              [username] when username != "" -> URI.encode_www_form(username)
+              _ -> nil
+            end
+        end
+
+      query =
+        uri.query
+        |> sanitize_url_query()
+
+      uri
+      |> Map.put(:userinfo, userinfo)
+      |> Map.put(:query, query)
+      |> URI.to_string()
+    else
+      nil
+    end
+  rescue
+    _ -> nil
+  end
+
+  defp sanitize_url_value(_value), do: nil
+
+  defp sanitize_url_query(nil), do: nil
+
+  defp sanitize_url_query(query_string) when is_binary(query_string) do
+    query_string
+    |> URI.decode_query()
+    |> Map.drop(@secret_connection_keys)
+    |> case do
+      map when map_size(map) == 0 -> nil
+      map -> URI.encode_query(map)
+    end
+  rescue
+    _ -> nil
+  end
+
+  defp normalize_connection_key_name(key) when is_atom(key),
+    do: key |> Atom.to_string() |> String.downcase()
+
+  defp normalize_connection_key_name(key) when is_binary(key), do: String.downcase(key)
+  defp normalize_connection_key_name(_key), do: ""
 
   defp source_name(source, opts) do
     Keyword.get(opts, :source_name, Map.get(source, :name, "default"))

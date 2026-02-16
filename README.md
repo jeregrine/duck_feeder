@@ -16,7 +16,15 @@ Current implementation keeps HTTP/storage interactions Req-only and keeps Elixir
 
 ## Metadata bootstrap from config
 
-You can seed `duckfeeder_meta` source + designated table rows from runtime config:
+You can seed `duckfeeder_meta` source + designated table rows from runtime config.
+When seeding sources, connection info persisted in metadata is sanitized: password/secret/token
+keys are dropped and URL fields are stored in redacted form (userinfo password removed).
+
+Runtime credentials must still be supplied at stream startup time (for example via
+`start_opts[:connection_opts]`, `connection_overrides`, or environment-backed secret resolution
+in your app); do not rely on persisted metadata rows to store DB passwords.
+
+Example:
 
 ```elixir
 {:ok, validated} = DuckFeeder.validate_config(runtime_config)
@@ -134,6 +142,11 @@ table name.
 {:ok, _batch} = DuckFeeder.flush_append_table(stream, "events")
 ```
 
+Append stream batch processing is async + bounded (same model as `DuckFeeder.Service`):
+- `max_inflight_batches` (default `1`)
+- `max_pending_batches` (default `1000`)
+- `overflow_strategy: :fail | :drop_oldest` (default `:fail`; use `:drop_oldest` only for lossy append streams)
+
 ## Runtime service wiring
 
 `DuckFeeder.Runtime` builds and starts `DuckFeeder.Service` using metadata rows.
@@ -223,12 +236,21 @@ Replication connection tuning options include:
 - `backpressure_lag_bytes: non_neg_integer()` (enter/clear backpressure telemetry threshold)
 - `event_sink_mode: :pid | :call` (default `:pid`)
 
+`max_lag_bytes` and `backpressure_lag_bytes` should be treated as production guardrails.
+Because replication ack now advances only after durable batch checkpoint commits,
+unbounded downstream slowdown can otherwise retain WAL indefinitely on the source.
+
 Runtime now advances replication ack based on durable checkpoint progress
 (batch commit result -> service ack message -> `CDC.Connection`) instead of commit-decode time.
 
 Batch processing safety options on `start_stream/4` / `start_service/4`:
 - `max_inflight_batches` (default `1`)
 - `max_pending_batches` (default `1000`, service fails closed on overflow)
+- `poison_row_mode: :fail | :drop` (default `:fail`)
+- `poison_row_sink: pid | (map -> term) | {module, function, args}` (receives `:duck_feeder_poison_row` payloads when `:drop` is enabled)
+
+For `DuckFeeder.AppendStream`, you can optionally set `overflow_strategy: :drop_oldest`
+for availability-first workloads where bounded data loss is acceptable.
 
 ## Replication connection API
 
@@ -480,6 +502,11 @@ Core events currently emitted:
 - `[:duck_feeder, :cdc, :backpressure]`
 - `[:duck_feeder, :batch, :flushed]`
 - `[:duck_feeder, :batch, :processed]`
+- `[:duck_feeder, :batch, :poison_row]`
+- `[:duck_feeder, :service, :batch_queue]`
+- `[:duck_feeder, :append_stream, :batch_queue]`
+- `[:duck_feeder, :append_stream, :batch_dropped]`
+- `[:duck_feeder, :service, :ack_checkpoint_lag]`
 - `[:duck_feeder, :reconciler, :run]`
 
 ## Progress tracking

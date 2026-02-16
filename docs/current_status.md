@@ -20,13 +20,24 @@ Detailed historical inventory moved to `docs/current_status_archive.md`.
 - [ ] **P1 reliability: storage retry/timeout policy**
   - [x] retry/backoff + explicit timeout defaults added for S3/GCS request paths
   - [ ] expand provider-backed failure matrix (transient 5xx, timeout, retry recovery, reconcile cleanup)
+- [x] **P1 append-stream runtime parity with service**
+  - [x] moved `DuckFeeder.AppendStream` batch processing off GenServer mailbox hot path (async bounded worker model)
+  - [x] added append-stream queue bounds/concurrency controls equivalent to `Service` (`max_inflight_batches`, `max_pending_batches`)
+  - [x] added append-only overload shedding mode (`overflow_strategy: :drop_oldest`) while keeping CDC `Service` fail-closed
+- [x] **P1/P2 observability + operator guidance**
+  - [x] emit telemetry for service/append queue depth + inflight tasks + overflow risk
+  - [x] emit/standardize ack-vs-checkpoint lag telemetry and alerting guidance
+  - [x] document `max_lag_bytes` / `backpressure_lag_bytes` as effectively required for bounded WAL retention in production
+  - [x] document credential flow expectations now that persisted connection info is redacted (runtime creds must come from startup opts/env/secret source)
 - [ ] **P2 hardening/perf/security follow-ups**
   - [x] stream GCS uploads (avoid full-file memory reads)
   - [x] remove dynamic atom creation from external config normalization / connection override key paths
   - [x] optimize `BatchBuffer` row-size estimation hot path (remove `term_to_binary` per-row sizing)
   - [x] optimize parquet NIF serialization hot path (removed Elixir JSON encode + Rust JSON decode bridge; decode terms directly in Rust NIF)
   - [x] add best-effort temp-file reaper (`DuckFeeder.TempFileReaper`) integrated into writer temp-path creation
-  - [ ] secret-handling improvements for persisted connection info
+  - [x] persisted source connection info now strips credentials (password/secret/token keys removed; URL fields persisted in redacted form)
+  - [x] add poison-row/dead-letter policy for non-serializable row isolation (`poison_row_mode: :drop`, poison row sink callbacks/messages, telemetry)
+  - [x] optimize wide-table DuckLake commit SQL fanout (bulk DuckLake column/mapping/stats statements)
 
 ## Current snapshot
 
@@ -38,15 +49,16 @@ Detailed historical inventory moved to `docs/current_status_archive.md`.
   - append-stream commit path,
   - runtime CDC commit path,
   - snapshot-handoff recovery path (pending → explicit resume).
-- Replication client observability includes lag/disconnect/backpressure telemetry and reconnect backoff tuning knobs.
+- Replication/client observability includes lag/disconnect/backpressure telemetry, service+append queue telemetry, append dropped-batch telemetry, and service ack-vs-checkpoint lag telemetry.
+- Overflow policy is explicit: CDC `Service` remains fail-closed; `AppendStream` supports `overflow_strategy: :drop_oldest` for availability-first lossy workloads.
 - Ecto demo integration exists for realistic B2B SaaS write/update/delete flows with ADBC DuckDB parquet verification.
 
 ## Remaining workstreams (condensed)
 
 - **Provider-backed failure/reconcile depth:** expand transient failure matrix (timeouts/retries/restarts/orphan cleanup) on S3/GCS.
-- **Runtime observability polish:** add queue-pressure / ack-vs-checkpoint lag telemetry + alert policy guidance.
-- **Parquet hardening:** typing/perf/compatibility improvements.
-- **Security/ops hardening:** credential handling, temp-file lifecycle/reaper, richer failure telemetry.
+- **Operational alert policy tuning:** wire queue/ack lag telemetry into concrete SLO-driven alert thresholds.
+- **Parquet hardening:** typing/perf/compatibility improvements beyond current term-bridge removal.
+- **Security/ops hardening:** expand poison-row policy ergonomics (routing/retention/audit tooling) for production ops.
 - **DuckLake deep parity (phase 2):** broader nested-field and conflict/concurrency semantics.
 
 ## Ongoing Apache-2.0 obligations (ElectricSQL LSN-derived code)

@@ -72,6 +72,39 @@ defmodule DuckFeeder.BatchProcessorTest do
     end
   end
 
+  defmodule PoisonWriter do
+    @behaviour DuckFeeder.Writer.Adapter
+
+    @impl true
+    def write_batch(_config, %{rows: rows}, _opts) do
+      if Enum.any?(rows, fn row -> Map.get(row, "poison") == true end) do
+        {:error, :poison_row}
+      else
+        path =
+          Path.join(
+            System.tmp_dir!(),
+            "duck_feeder_batch_processor_poison_#{System.unique_integer([:positive])}.jsonl"
+          )
+
+        File.write!(path, "{}\n")
+
+        {:ok,
+         %{
+           local_path: path,
+           row_count: length(rows),
+           file_size_bytes: File.stat!(path).size,
+           format: :jsonl
+         }}
+      end
+    end
+
+    @impl true
+    def cleanup(_config, %{local_path: path}) do
+      File.rm(path)
+      :ok
+    end
+  end
+
   defmodule FakeStorage do
     @behaviour DuckFeeder.Storage.Adapter
 
@@ -271,6 +304,59 @@ defmodule DuckFeeder.BatchProcessorTest do
     assert_received {:meta_transition_batch, "batch-test", :failed, opts}
     assert Keyword.get(opts, :error_message)
     assert_received {:writer_cleanup, _path}
+  end
+
+  test "drops poison rows when configured and emits dead-letter messages" do
+    context = %{
+      meta_module: FakeMeta,
+      meta_conn: :fake_conn,
+      designated_table_by_target: %{{"raw", "users"} => 7},
+      writer: %{adapter: PoisonWriter},
+      storage: %{provider: :s3, bucket: "bucket", adapter: FakeStorage},
+      poison_row_mode: :drop,
+      poison_row_sink: self(),
+      object_prefix: "cdc"
+    }
+
+    batch = %{
+      rows: [%{"id" => 1}, %{"id" => 2, "poison" => true}, %{"id" => 3}],
+      lsn_start: "0/10",
+      lsn_end: "0/11",
+      row_count: 3
+    }
+
+    assert {:ok, result} = BatchProcessor.process_batch(context, {"raw", "users"}, batch)
+    assert result.status == :committed
+    assert result.row_count == 2
+    assert result.dropped_poison_rows == 1
+
+    assert_received {:duck_feeder_poison_row, dropped}
+    assert dropped.index == 2
+    assert dropped.reason == :poison_row
+  end
+
+  test "fails when all rows are poison even in drop mode" do
+    context = %{
+      meta_module: FakeMeta,
+      meta_conn: :fake_conn,
+      designated_table_by_target: %{{"raw", "users"} => 7},
+      writer: %{adapter: PoisonWriter},
+      storage: %{provider: :s3, bucket: "bucket", adapter: FakeStorage},
+      poison_row_mode: :drop,
+      object_prefix: "cdc"
+    }
+
+    batch = %{
+      rows: [%{"id" => 2, "poison" => true}],
+      lsn_start: "0/10",
+      lsn_end: "0/11",
+      row_count: 1
+    }
+
+    assert {:error, {:all_rows_poisoned, :poison_row, [_dropped]}} =
+             BatchProcessor.process_batch(context, {"raw", "users"}, batch)
+
+    assert_received {:meta_transition_batch, "batch-test", :failed, _opts}
   end
 
   test "returns error for unknown designated table target" do

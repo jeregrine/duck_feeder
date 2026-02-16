@@ -30,6 +30,8 @@ defmodule DuckFeeder.Runtime do
          pipeline_opts: Keyword.get(opts, :pipeline_opts, %{}),
          max_tx_changes: Keyword.get(opts, :max_tx_changes),
          observer_pid: Keyword.get(opts, :observer_pid),
+         poison_row_mode: Keyword.get(opts, :poison_row_mode),
+         poison_row_sink: Keyword.get(opts, :poison_row_sink),
          meta_module: meta_module
        ]
        |> Enum.reject(fn {_key, value} -> is_nil(value) end)}
@@ -185,6 +187,8 @@ defmodule DuckFeeder.Runtime do
       snapshot_lsn_start: Keyword.get(opts, :snapshot_lsn_start),
       max_inflight_batches: Keyword.get(opts, :max_inflight_batches),
       max_pending_batches: Keyword.get(opts, :max_pending_batches),
+      poison_row_mode: Keyword.get(opts, :poison_row_mode),
+      poison_row_sink: Keyword.get(opts, :poison_row_sink),
       meta_module: meta_module
     ]
     |> Enum.reject(fn {_key, value} -> is_nil(value) end)

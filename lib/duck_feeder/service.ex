@@ -31,6 +31,7 @@ defmodule DuckFeeder.Service do
       :max_pending_batches,
       :cdc_pid,
       :latest_checkpoint_lsn,
+      :latest_acked_lsn,
       snapshot_lsn_counter: 0,
       inflight_batch_tasks: %{},
       pending_batches: :queue.new(),
@@ -49,6 +50,7 @@ defmodule DuckFeeder.Service do
             max_pending_batches: pos_integer(),
             cdc_pid: pid() | nil,
             latest_checkpoint_lsn: String.t() | nil,
+            latest_acked_lsn: String.t() | nil,
             snapshot_lsn_counter: non_neg_integer(),
             inflight_batch_tasks: %{optional(reference()) => inflight_task()},
             pending_batches: :queue.queue({{String.t(), String.t()}, map()}),
@@ -72,6 +74,8 @@ defmodule DuckFeeder.Service do
           | {:snapshot_lsn_start, String.t()}
           | {:max_inflight_batches, pos_integer()}
           | {:max_pending_batches, pos_integer()}
+          | {:poison_row_mode, :fail | :drop}
+          | {:poison_row_sink, pid() | (map() -> term()) | {module(), atom(), [term()]}}
 
   @spec start_link([option()]) :: GenServer.on_start()
   def start_link(opts) do
@@ -127,6 +131,8 @@ defmodule DuckFeeder.Service do
       |> maybe_put_optional(:meta_module, Keyword.get(opts, :meta_module))
       |> maybe_put_optional(:committer_module, Keyword.get(opts, :committer_module))
       |> maybe_put_optional(:committer_opts, Keyword.get(opts, :committer_opts))
+      |> maybe_put_optional(:poison_row_mode, Keyword.get(opts, :poison_row_mode))
+      |> maybe_put_optional(:poison_row_sink, Keyword.get(opts, :poison_row_sink))
 
     observer_pid = Keyword.get(opts, :observer_pid, self())
 
@@ -168,11 +174,13 @@ defmodule DuckFeeder.Service do
   end
 
   def handle_call({:attach_cdc, cdc_pid}, _from, %State{} = state) when is_pid(cdc_pid) do
-    if is_binary(state.latest_checkpoint_lsn) do
-      send(cdc_pid, {:duck_feeder_ack_lsn, state.latest_checkpoint_lsn})
-    end
+    next_state =
+      state
+      |> Map.put(:cdc_pid, cdc_pid)
+      |> maybe_replay_checkpoint_ack()
+      |> emit_ack_checkpoint_lag_telemetry(:attach_cdc)
 
-    {:reply, :ok, %{state | cdc_pid: cdc_pid}}
+    {:reply, :ok, next_state}
   end
 
   def handle_call({:attach_cdc, other}, _from, %State{} = state) do
@@ -218,11 +226,20 @@ defmodule DuckFeeder.Service do
         {:noreply, next_state}
 
       {:error, reason, next_state} ->
-        if is_pid(next_state.observer_pid) do
-          send(next_state.observer_pid, {:duck_feeder_batch_queue_overflow, table, batch, reason})
+        overflow_state =
+          emit_batch_queue_telemetry(next_state, :overflow, %{
+            table: table,
+            reason: reason
+          })
+
+        if is_pid(overflow_state.observer_pid) do
+          send(
+            overflow_state.observer_pid,
+            {:duck_feeder_batch_queue_overflow, table, batch, reason}
+          )
         end
 
-        {:stop, reason, next_state}
+        {:stop, reason, overflow_state}
     end
   end
 
@@ -241,6 +258,10 @@ defmodule DuckFeeder.Service do
           |> notify_batch_result(table, result, batch)
           |> maybe_ack_checkpoint(result)
           |> maybe_start_queued_batches()
+          |> emit_batch_queue_telemetry(:completed, %{
+            table: table,
+            result: batch_result_status(result)
+          })
 
         {:noreply, next_state}
     end
@@ -262,36 +283,47 @@ defmodule DuckFeeder.Service do
           {_task, next_inflight} = Map.pop(inflight, ref)
           error = {:batch_task_crashed, reason}
 
-          if is_pid(state.observer_pid) do
+          next_state = %{state | inflight_batch_tasks: next_inflight}
+
+          if is_pid(next_state.observer_pid) do
             send(
-              state.observer_pid,
+              next_state.observer_pid,
               {:duck_feeder_batch_processed, table, {:error, error}, batch}
             )
           end
 
-          {:stop, error, %{state | inflight_batch_tasks: next_inflight}}
+          next_state =
+            emit_batch_queue_telemetry(next_state, :task_crashed, %{
+              table: table,
+              reason: reason
+            })
+
+          {:stop, error, next_state}
         end
     end
   end
 
   defp enqueue_or_start_batch(%State{} = state, table, batch) do
     if map_size(state.inflight_batch_tasks) < state.max_inflight_batches do
-      {:ok, start_batch_task(state, table, batch)}
+      {:ok, start_batch_task(state, table, batch, :incoming)}
     else
       if state.pending_batch_count >= state.max_pending_batches do
         {:error, {:batch_queue_overflow, state.max_pending_batches}, state}
       else
-        {:ok,
-         %{
-           state
-           | pending_batches: :queue.in({table, batch}, state.pending_batches),
-             pending_batch_count: state.pending_batch_count + 1
-         }}
+        queued_state =
+          %{
+            state
+            | pending_batches: :queue.in({table, batch}, state.pending_batches),
+              pending_batch_count: state.pending_batch_count + 1
+          }
+          |> emit_batch_queue_telemetry(:enqueued, %{table: table})
+
+        {:ok, queued_state}
       end
     end
   end
 
-  defp start_batch_task(%State{} = state, table, batch) do
+  defp start_batch_task(%State{} = state, table, batch, source) when is_atom(source) do
     task =
       Task.Supervisor.async_nolink(state.batch_task_supervisor, fn ->
         BatchProcessor.process_batch(state.context, table, batch)
@@ -302,6 +334,7 @@ defmodule DuckFeeder.Service do
       | inflight_batch_tasks:
           Map.put(state.inflight_batch_tasks, task.ref, %{table: table, batch: batch})
     }
+    |> emit_batch_queue_telemetry(:started, %{table: table, source: source})
   end
 
   defp maybe_start_queued_batches(%State{} = state) do
@@ -318,7 +351,7 @@ defmodule DuckFeeder.Service do
             state
             |> Map.put(:pending_batches, next_queue)
             |> Map.put(:pending_batch_count, state.pending_batch_count - 1)
-            |> start_batch_task(table, batch)
+            |> start_batch_task(table, batch, :queued)
             |> maybe_start_queued_batches()
 
           {:empty, _} ->
@@ -338,21 +371,127 @@ defmodule DuckFeeder.Service do
   defp maybe_ack_checkpoint(%State{} = state, {:ok, result}) when is_map(result) do
     checkpoint_lsn = Map.get(result, :checkpoint_lsn)
 
-    next_state =
-      if is_binary(checkpoint_lsn) do
-        %{state | latest_checkpoint_lsn: checkpoint_lsn}
-      else
-        state
-      end
-
-    if is_binary(checkpoint_lsn) and is_pid(state.cdc_pid) do
-      send(state.cdc_pid, {:duck_feeder_ack_lsn, checkpoint_lsn})
+    if is_binary(checkpoint_lsn) do
+      state
+      |> maybe_update_checkpoint_lsn(checkpoint_lsn)
+      |> maybe_send_checkpoint_ack(checkpoint_lsn)
+      |> emit_ack_checkpoint_lag_telemetry(:batch_commit)
+    else
+      state
     end
-
-    next_state
   end
 
   defp maybe_ack_checkpoint(state, _result), do: state
+
+  defp maybe_update_checkpoint_lsn(%State{} = state, checkpoint_lsn)
+       when is_binary(checkpoint_lsn),
+       do: %{state | latest_checkpoint_lsn: checkpoint_lsn}
+
+  defp maybe_update_checkpoint_lsn(%State{} = state, _checkpoint_lsn), do: state
+
+  defp maybe_send_checkpoint_ack(
+         %State{cdc_pid: cdc_pid} = state,
+         checkpoint_lsn
+       )
+       when is_binary(checkpoint_lsn) and is_pid(cdc_pid) do
+    send(cdc_pid, {:duck_feeder_ack_lsn, checkpoint_lsn})
+    %{state | latest_acked_lsn: checkpoint_lsn}
+  end
+
+  defp maybe_send_checkpoint_ack(%State{} = state, _checkpoint_lsn), do: state
+
+  defp maybe_replay_checkpoint_ack(
+         %State{cdc_pid: cdc_pid, latest_checkpoint_lsn: checkpoint_lsn} = state
+       )
+       when is_pid(cdc_pid) and is_binary(checkpoint_lsn) do
+    send(cdc_pid, {:duck_feeder_ack_lsn, checkpoint_lsn})
+    %{state | latest_acked_lsn: checkpoint_lsn}
+  end
+
+  defp maybe_replay_checkpoint_ack(%State{} = state), do: state
+
+  defp emit_batch_queue_telemetry(%State{} = state, status, metadata)
+       when is_atom(status) and is_map(metadata) do
+    measurements = %{
+      pending_batch_count: state.pending_batch_count,
+      inflight_batch_count: map_size(state.inflight_batch_tasks),
+      max_pending_batches: state.max_pending_batches,
+      max_inflight_batches: state.max_inflight_batches
+    }
+
+    metadata =
+      metadata
+      |> Map.put(:status, status)
+      |> maybe_put_table_metadata()
+
+    DuckFeeder.Telemetry.service_batch_queue(measurements, metadata)
+    state
+  end
+
+  defp emit_ack_checkpoint_lag_telemetry(
+         %State{latest_checkpoint_lsn: checkpoint_lsn} = state,
+         source
+       )
+       when is_binary(checkpoint_lsn) and is_atom(source) do
+    {measurements, metadata} =
+      checkpoint_ack_lag_measurements(
+        checkpoint_lsn,
+        state.latest_acked_lsn,
+        source,
+        is_pid(state.cdc_pid)
+      )
+
+    DuckFeeder.Telemetry.service_ack_checkpoint_lag(measurements, metadata)
+    state
+  end
+
+  defp emit_ack_checkpoint_lag_telemetry(%State{} = state, _source), do: state
+
+  defp checkpoint_ack_lag_measurements(checkpoint_lsn, ack_lsn, source, cdc_attached?) do
+    {lag_bytes, lag_known?, status} =
+      with {:ok, checkpoint_int} <- Lsn.parse(checkpoint_lsn),
+           {:ok, ack_int} <- parse_optional_lsn(ack_lsn) do
+        {max(checkpoint_int - ack_int, 0), true, :ok}
+      else
+        {:error, :missing_ack_lsn} -> {0, false, :missing_ack_lsn}
+        {:error, _reason} -> {0, false, :invalid_lsn}
+      end
+
+    measurements = %{
+      lag_bytes: lag_bytes,
+      lag_known: if(lag_known?, do: 1, else: 0),
+      cdc_attached: if(cdc_attached?, do: 1, else: 0)
+    }
+
+    metadata = %{
+      source: source,
+      status: status,
+      checkpoint_lsn: checkpoint_lsn,
+      ack_lsn: ack_lsn
+    }
+
+    {measurements, metadata}
+  end
+
+  defp parse_optional_lsn(lsn) when is_binary(lsn), do: Lsn.parse(lsn)
+  defp parse_optional_lsn(nil), do: {:error, :missing_ack_lsn}
+  defp parse_optional_lsn(_other), do: {:error, :invalid_ack_lsn}
+
+  defp batch_result_status({:ok, _result}), do: :ok
+  defp batch_result_status({:error, _reason}), do: :error
+  defp batch_result_status(_result), do: :unknown
+
+  defp maybe_put_table_metadata(metadata) when is_map(metadata) do
+    case Map.get(metadata, :table) do
+      {schema, table} when is_binary(schema) and is_binary(table) ->
+        metadata
+        |> Map.put(:table_schema, schema)
+        |> Map.put(:table_name, table)
+
+      _ ->
+        metadata
+    end
+  end
 
   defp designated_table_mapping(designated_tables) do
     designated_tables

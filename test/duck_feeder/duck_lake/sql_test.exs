@@ -256,6 +256,41 @@ defmodule DuckFeeder.DuckLake.SQLTest do
     assert ["batch-1", _column_names, 1, true] = snapshot_params
   end
 
+  test "uses bulk column/stat statements for wide batches" do
+    row =
+      1..100
+      |> Enum.map(fn idx -> {"col_#{idx}", idx} end)
+      |> Map.new()
+
+    statements =
+      SQL.commit_statements("batch-1",
+        object_key: "raw/users/file-1.parquet",
+        write_result: %{row_count: 1, file_size_bytes: 10},
+        batch: %{rows: [row]}
+      )
+
+    assert Enum.any?(statements, fn {sql, _params} ->
+             sql =~ "FROM unnest($2::text[], $3::text[])" and sql =~ "incoming_type"
+           end)
+
+    assert Enum.any?(statements, fn {sql, _params} ->
+             sql =~ "INSERT INTO ducklake_metadata.ducklake_column" and
+               sql =~ "WITH ORDINALITY"
+           end)
+
+    assert Enum.any?(statements, fn {sql, _params} ->
+             sql =~ "INSERT INTO ducklake_metadata.ducklake_table_column_stats" and
+               sql =~ "$2::text[]"
+           end)
+
+    assert Enum.any?(statements, fn {sql, _params} ->
+             sql =~ "INSERT INTO ducklake_metadata.ducklake_file_column_stats" and
+               sql =~ "$2::text[]"
+           end)
+
+    assert length(statements) < 60
+  end
+
   test "respects custom statement list and function" do
     assert ["SELECT 1"] == SQL.commit_statements("batch-1", ducklake_sql: ["SELECT 1"])
 
