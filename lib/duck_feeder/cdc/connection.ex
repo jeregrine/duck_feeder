@@ -116,6 +116,15 @@ defmodule DuckFeeder.CDC.Connection do
     Postgrex.ReplicationConnection.start_link(__MODULE__, init_arg, start_opts)
   end
 
+  @spec ack_lsn(GenServer.server(), String.t() | non_neg_integer(), timeout()) ::
+          :ok | {:error, term()}
+  def ack_lsn(server, lsn, timeout \\ 5_000) do
+    Postgrex.ReplicationConnection.call(server, {:ack_lsn, lsn}, timeout)
+  catch
+    :exit, reason ->
+      {:error, {:ack_call_exit, reason}}
+  end
+
   @impl true
   def init(opts) do
     slot_name = Keyword.fetch!(opts, :slot_name)
@@ -261,6 +270,43 @@ defmodule DuckFeeder.CDC.Connection do
   def handle_data(_other, %State{} = state), do: {:noreply, state}
 
   @impl true
+  def handle_call({:ack_lsn, lsn}, from, %State{} = state) do
+    case apply_ack_lsn(state, lsn, :ack_call) do
+      {:ok, {acks, next_state}} ->
+        Postgrex.ReplicationConnection.reply(from, :ok)
+        {:noreply, acks, next_state}
+
+      {:error, reason} ->
+        Postgrex.ReplicationConnection.reply(from, {:error, reason})
+
+        DuckFeeder.Telemetry.cdc_connection(:ack_lsn_error, %{
+          reason: reason,
+          slot_name: state.slot_name,
+          publication_name: state.publication_name
+        })
+
+        {:noreply, state}
+    end
+  end
+
+  @impl true
+  def handle_info({:duck_feeder_ack_lsn, lsn}, %State{} = state) do
+    case apply_ack_lsn(state, lsn, :ack_message) do
+      {:ok, {acks, next_state}} ->
+        {:noreply, acks, next_state}
+
+      {:error, reason} ->
+        DuckFeeder.Telemetry.cdc_connection(:ack_lsn_error, %{
+          reason: reason,
+          slot_name: state.slot_name,
+          publication_name: state.publication_name
+        })
+
+        {:noreply, state}
+    end
+  end
+
+  @impl true
   def handle_info(:status_tick, %State{} = state) do
     lag = lag_bytes(state)
 
@@ -317,39 +363,50 @@ defmodule DuckFeeder.CDC.Connection do
      }}
   end
 
-  defp maybe_ack_event(state, %Event.Commit{end_lsn: end_lsn}) do
-    lsn = Lsn.parse!(end_lsn)
-
-    state = %{
-      state
-      | flushed_lsn: max(state.flushed_lsn, lsn),
-        applied_lsn: max(state.applied_lsn, lsn)
-    }
-
-    {[standby_status_update(state)], state}
-  end
-
   defp maybe_ack_event(state, _event), do: {[], state}
 
-  defp maybe_advance_flush_from_keepalive(state, wal_end) do
-    if in_transaction?(state) do
-      state
-    else
-      %{
-        state
-        | flushed_lsn: max(state.flushed_lsn, wal_end),
-          applied_lsn: max(state.applied_lsn, wal_end)
-      }
-    end
-  end
-
-  defp in_transaction?(%State{converter_state: converter_state}) do
-    not is_nil(Map.get(converter_state, :current_xid))
-  end
+  defp maybe_advance_flush_from_keepalive(state, _wal_end), do: state
 
   defp bump_received_lsn(%State{} = state, wal_end) do
     %{state | received_lsn: max(state.received_lsn, wal_end)}
   end
+
+  defp apply_ack_lsn(%State{} = state, lsn, source) when is_atom(source) do
+    with {:ok, ack_lsn} <- normalize_ack_lsn(lsn) do
+      next_applied_lsn =
+        ack_lsn
+        |> min(state.received_lsn)
+        |> max(state.applied_lsn)
+
+      next_state =
+        %{
+          state
+          | flushed_lsn: max(state.flushed_lsn, next_applied_lsn),
+            applied_lsn: next_applied_lsn
+        }
+        |> maybe_track_backpressure(source)
+
+      acks =
+        if next_state.applied_lsn > state.applied_lsn do
+          [standby_status_update(next_state)]
+        else
+          []
+        end
+
+      {:ok, {acks, next_state}}
+    end
+  end
+
+  defp normalize_ack_lsn(lsn) when is_integer(lsn) and lsn >= 0, do: {:ok, lsn}
+
+  defp normalize_ack_lsn(lsn) when is_binary(lsn) do
+    case Lsn.parse(lsn) do
+      {:ok, parsed} -> {:ok, parsed}
+      {:error, reason} -> {:error, {:invalid_ack_lsn, reason}}
+    end
+  end
+
+  defp normalize_ack_lsn(lsn), do: {:error, {:invalid_ack_lsn, lsn}}
 
   defp maybe_enforce_lag(%State{max_lag_bytes: nil}), do: :ok
 

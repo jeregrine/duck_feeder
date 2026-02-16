@@ -5,7 +5,7 @@ use std::sync::Arc;
 use arrow_array::{ArrayRef, BooleanArray, Float64Array, Int64Array, RecordBatch, StringArray};
 use arrow_schema::{DataType, Field, Schema};
 use parquet::arrow::ArrowWriter;
-use rustler::Atom;
+use rustler::{Atom, Term};
 use serde_json::{Number, Value};
 
 mod atoms {
@@ -24,16 +24,16 @@ enum ColumnKind {
 }
 
 #[rustler::nif(schedule = "DirtyIo")]
-fn nif_write_parquet(path: String, rows_json: String) -> Result<Atom, (Atom, String)> {
-    match do_write_parquet(&path, &rows_json) {
+fn nif_write_parquet<'a>(path: String, rows_term: Term<'a>) -> Result<Atom, (Atom, String)> {
+    match do_write_parquet(&path, rows_term) {
         Ok(()) => Ok(atoms::ok()),
         Err(reason) => Err((atoms::error(), reason)),
     }
 }
 
-fn do_write_parquet(path: &str, rows_json: &str) -> Result<(), String> {
+fn do_write_parquet(path: &str, rows_term: Term<'_>) -> Result<(), String> {
     let rows: Vec<Value> =
-        serde_json::from_str(rows_json).map_err(|e| format!("invalid_rows_json: {}", e))?;
+        rustler::serde::from_term(rows_term).map_err(|e| format!("invalid_rows_term: {:?}", e))?;
 
     let columns = collect_columns(&rows);
     let column_specs = columns

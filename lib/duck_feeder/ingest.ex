@@ -41,9 +41,12 @@ defmodule DuckFeeder.Ingest do
     GenServer.start_link(__MODULE__, opts, name: name_opt)
   end
 
-  @spec ingest_transaction(GenServer.server(), map()) :: :ok
-  def ingest_transaction(server, transaction) when is_map(transaction) do
-    GenServer.cast(server, {:ingest_transaction, transaction})
+  @spec ingest_transaction(GenServer.server(), map(), keyword()) :: :ok | {:error, term()}
+  def ingest_transaction(server, transaction, opts \\ []) when is_map(transaction) do
+    timeout = Keyword.get(opts, :timeout, 5_000)
+    GenServer.call(server, {:ingest_transaction, transaction}, timeout)
+  catch
+    :exit, reason -> {:error, {:ingest_transaction_failed, reason}}
   end
 
   @spec flush_table(GenServer.server(), {String.t(), String.t()}) ::
@@ -78,21 +81,14 @@ defmodule DuckFeeder.Ingest do
   end
 
   @impl true
-  def handle_cast({:ingest_transaction, transaction}, state) do
-    routed = Router.route_transaction(transaction, state.designated_tables)
+  def handle_call({:ingest_transaction, transaction}, _from, state) do
+    case ingest_transaction_now(state, transaction) do
+      {:ok, next_state} ->
+        {:reply, :ok, next_state}
 
-    state =
-      Enum.reduce(routed.routes, state, fn {table, changes}, acc_state ->
-        {:ok, pipeline, next_state} = ensure_pipeline(acc_state, table)
-
-        Enum.each(changes, fn change ->
-          TablePipeline.append(pipeline, enrich_change(change, routed), routed.end_lsn)
-        end)
-
-        next_state
-      end)
-
-    {:noreply, state}
+      {:error, reason, next_state} ->
+        {:reply, {:error, reason}, next_state}
+    end
   end
 
   @impl true
@@ -110,6 +106,46 @@ defmodule DuckFeeder.Ingest do
     case ensure_pipeline(state, table) do
       {:ok, pipeline, next_state} -> {:reply, {:ok, pipeline}, next_state}
       {:error, reason} -> {:reply, {:error, reason}, state}
+    end
+  end
+
+  @impl true
+  def handle_cast({:ingest_transaction, transaction}, state) do
+    case ingest_transaction_now(state, transaction) do
+      {:ok, next_state} -> {:noreply, next_state}
+      {:error, _reason, next_state} -> {:noreply, next_state}
+    end
+  end
+
+  defp ingest_transaction_now(%State{} = state, transaction) when is_map(transaction) do
+    routed = Router.route_transaction(transaction, state.designated_tables)
+
+    Enum.reduce_while(routed.routes, {:ok, state}, fn {table, changes}, {:ok, acc_state} ->
+      case ensure_pipeline(acc_state, table) do
+        {:ok, pipeline, next_state} ->
+          append_result =
+            Enum.reduce_while(changes, :ok, fn change, :ok ->
+              case TablePipeline.append(pipeline, enrich_change(change, routed), routed.end_lsn) do
+                :ok -> {:cont, :ok}
+                {:error, reason} -> {:halt, {:error, reason}}
+              end
+            end)
+
+          case append_result do
+            :ok ->
+              {:cont, {:ok, next_state}}
+
+            {:error, reason} ->
+              {:halt, {:error, {:table_pipeline_append_failed, table, reason}, acc_state}}
+          end
+
+        {:error, reason} ->
+          {:halt, {:error, reason, acc_state}}
+      end
+    end)
+    |> case do
+      {:ok, next_state} -> {:ok, next_state}
+      {:error, reason, next_state} -> {:error, reason, next_state}
     end
   end
 

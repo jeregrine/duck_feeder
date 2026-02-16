@@ -119,6 +119,75 @@ defmodule DuckFeeder.Ingest.BatchBuffer do
 
   defp put_lsn_start_if_nil(state, _lsn), do: state
 
-  defp estimate_row_size(row), do: row |> :erlang.term_to_binary() |> byte_size()
+  @max_collection_sample 16
+  @max_depth 4
+
+  defp estimate_row_size(row), do: estimate_term_size(row, 0)
+
+  defp estimate_term_size(_term, depth) when depth >= @max_depth, do: 32
+
+  defp estimate_term_size(value, _depth) when is_binary(value), do: byte_size(value)
+  defp estimate_term_size(value, _depth) when is_integer(value), do: 8
+  defp estimate_term_size(value, _depth) when is_float(value), do: 8
+  defp estimate_term_size(value, _depth) when is_boolean(value), do: 1
+  defp estimate_term_size(nil, _depth), do: 1
+
+  defp estimate_term_size(value, _depth) when is_atom(value), do: 4
+
+  defp estimate_term_size(value, _depth) when is_struct(value) do
+    _ = value
+    32
+  end
+
+  defp estimate_term_size(value, depth) when is_map(value) do
+    entries = Enum.take(value, @max_collection_sample)
+    entry_count = length(entries)
+
+    sampled_bytes =
+      Enum.reduce(entries, 0, fn {k, v}, acc ->
+        acc + estimate_term_size(k, depth + 1) + estimate_term_size(v, depth + 1)
+      end)
+
+    per_entry =
+      sampled_bytes
+      |> safe_div(max(entry_count, 1))
+      |> min(64)
+      |> max(8)
+
+    16 + map_size(value) * per_entry
+  end
+
+  defp estimate_term_size(value, depth) when is_list(value) do
+    {sampled_bytes, sampled_count, truncated?} =
+      Enum.reduce_while(value, {0, 0, false}, fn item, {acc, count, _truncated?} ->
+        if count < @max_collection_sample do
+          {:cont, {acc + estimate_term_size(item, depth + 1), count + 1, false}}
+        else
+          {:halt, {acc, count, true}}
+        end
+      end)
+
+    per_item =
+      sampled_bytes
+      |> safe_div(max(sampled_count, 1))
+      |> min(64)
+      |> max(4)
+
+    base = 8 + sampled_count * per_item
+    if truncated?, do: base + per_item * 8, else: base
+  end
+
+  defp estimate_term_size(value, depth) when is_tuple(value) do
+    value
+    |> Tuple.to_list()
+    |> estimate_term_size(depth + 1)
+    |> Kernel.+(8)
+  end
+
+  defp estimate_term_size(_value, _depth), do: 16
+
+  defp safe_div(_value, 0), do: 0
+  defp safe_div(value, divisor), do: div(value, divisor)
+
   defp monotonic_ms, do: System.monotonic_time(:millisecond)
 end

@@ -40,6 +40,8 @@ defmodule DuckFeeder.Writer.Jsonl do
       |> Map.new()
       |> Map.get(:tmp_dir, System.tmp_dir!())
 
+    _ = DuckFeeder.TempFileReaper.maybe_reap(config, suffixes: [".jsonl"])
+
     name = "duck_feeder_#{System.unique_integer([:positive, :monotonic])}.jsonl"
     {:ok, Path.join(tmp_dir, name)}
   end

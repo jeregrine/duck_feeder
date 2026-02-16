@@ -258,6 +258,21 @@ defmodule DuckFeeder.RuntimeTest do
     end
   end
 
+  defmodule FakeBootstrapCreatedSlot do
+    def bootstrap(:query_conn, attrs) do
+      send(self(), {:fake_bootstrap_created_slot, attrs})
+
+      {:ok,
+       %{
+         publication: :created,
+         slot: {:created, %{slot_name: "slot-a", lsn: "0/30"}},
+         start_lsn: "0/30",
+         current_lsn: "0/40",
+         start_replication_sql: "START_REPLICATION ..."
+       }}
+    end
+  end
+
   defmodule FakeSnapshotRunner do
     def run(:query_conn, designated_tables, opts) do
       send(self(), {:fake_snapshot_runner, designated_tables})
@@ -512,7 +527,7 @@ defmodule DuckFeeder.RuntimeTest do
     Process.exit(cdc_pid, :normal)
   end
 
-  test "start_stream can bootstrap publication/slot and adjust start lsn" do
+  test "start_stream keeps checkpoint start_lsn when bootstrap reports existing slot" do
     storage = %{provider: :s3, bucket: "bucket", adapter: DuckFeeder.Storage.S3}
 
     query_connect_fun = fn connection_opts ->
@@ -525,7 +540,7 @@ defmodule DuckFeeder.RuntimeTest do
       :ok
     end
 
-    assert {:ok, %{service_pid: service_pid, cdc_pid: cdc_pid, start_lsn: "0/30"}} =
+    assert {:ok, %{service_pid: service_pid, cdc_pid: cdc_pid, start_lsn: "0/20"}} =
              Runtime.start_stream(:meta_conn, "source-a", storage,
                meta_module: FakeMeta,
                service_module: FakeService,
@@ -545,6 +560,49 @@ defmodule DuckFeeder.RuntimeTest do
 
     assert_receive {:fake_bootstrap, %{slot_name: "slot-a", publication_name: "pub-a"}}
     assert_receive {:fake_query_disconnect, :query_conn}
+
+    assert_receive {:fake_cdc_start, cdc_opts}
+    assert cdc_opts[:start_lsn] == "0/20"
+
+    GenServer.stop(service_pid)
+    Process.exit(cdc_pid, :normal)
+  end
+
+  test "start_stream uses bootstrap start_lsn when slot is created" do
+    storage = %{provider: :s3, bucket: "bucket", adapter: DuckFeeder.Storage.S3}
+
+    query_connect_fun = fn connection_opts ->
+      send(self(), {:fake_query_connect_created_slot, connection_opts})
+      {:ok, :query_conn}
+    end
+
+    query_disconnect_fun = fn :query_conn ->
+      send(self(), {:fake_query_disconnect_created_slot, :query_conn})
+      :ok
+    end
+
+    assert {:ok, %{service_pid: service_pid, cdc_pid: cdc_pid, start_lsn: "0/30"}} =
+             Runtime.start_stream(:meta_conn, "source-a", storage,
+               meta_module: FakeMeta,
+               service_module: FakeService,
+               cdc_module: FakeCDC,
+               connection_options_module: FakeConnectionOptions,
+               bootstrap_replication?: true,
+               bootstrap_module: FakeBootstrapCreatedSlot,
+               query_connect_fun: query_connect_fun,
+               query_disconnect_fun: query_disconnect_fun,
+               observer_pid: self(),
+               service_name: nil,
+               cdc_name: nil
+             )
+
+    assert_receive {:fake_query_connect_created_slot,
+                    [hostname: "localhost", port: 5432, database: "db", username: "postgres"]}
+
+    assert_receive {:fake_bootstrap_created_slot,
+                    %{slot_name: "slot-a", publication_name: "pub-a"}}
+
+    assert_receive {:fake_query_disconnect_created_slot, :query_conn}
 
     assert_receive {:fake_cdc_start, cdc_opts}
     assert cdc_opts[:start_lsn] == "0/30"

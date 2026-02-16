@@ -42,10 +42,10 @@ defmodule DuckFeeder.CDC.ConnectionTest do
     <<?r, write::64, flush::64, apply::64, _timestamp::64-signed, 0::8>> = ack
 
     assert write == 33
-    assert flush == 33
-    assert apply == 33
+    assert flush == 1
+    assert apply == 1
     assert state.received_lsn == 32
-    assert state.applied_lsn == 32
+    assert state.applied_lsn == 0
   end
 
   test "decodes xlog data, emits events, and acknowledges commit" do
@@ -105,17 +105,39 @@ defmodule DuckFeeder.CDC.ConnectionTest do
 
     commit_payload = <<?C, 0::8, 100::64, 120::64, 1_000_000::64-signed>>
 
-    assert {:noreply, [ack], %State{} = state} =
+    assert {:noreply, [], %State{} = state} =
              Connection.handle_data(xlog(102, 120, commit_payload), state)
 
     assert_receive {:duck_feeder_cdc_event, %Event.Commit{xid: 500, end_lsn: "0/78"}}
+
+    assert state.received_lsn == 120
+    assert state.applied_lsn == 0
+  end
+
+  test "advances applied lsn when durable ack lsn is received" do
+    {:ok, state} =
+      Connection.init(
+        slot_name: "duck_slot",
+        publication_name: "duck_pub",
+        start_lsn: "0/0",
+        event_sink: self(),
+        status_interval_ms: 0
+      )
+
+    {:stream, _query, [], state} = Connection.handle_connect(state)
+
+    assert {:noreply, [], %State{} = state} =
+             Connection.handle_data(<<?k, 120::64, 0::64-signed, 0::8>>, state)
+
+    assert {:noreply, [ack], %State{applied_lsn: 120, flushed_lsn: 120} = state} =
+             Connection.handle_info({:duck_feeder_ack_lsn, "0/78"}, state)
 
     <<?r, write::64, flush::64, apply::64, _timestamp::64-signed, 0::8>> = ack
 
     assert write == 121
     assert flush == 121
     assert apply == 121
-    assert state.applied_lsn == 120
+    assert state.received_lsn == 120
   end
 
   test "disconnects on conversion errors" do
@@ -244,7 +266,7 @@ defmodule DuckFeeder.CDC.ConnectionTest do
     assert metadata.status == :entered
 
     assert {:noreply, [_ack], %State{backpressure_active: false}} =
-             Connection.handle_data(<<?k, 10::64, 0::64-signed, 1::8>>, state)
+             Connection.handle_info({:duck_feeder_ack_lsn, 10}, state)
 
     assert_receive {:telemetry, [:duck_feeder, :cdc, :backpressure], measurements, metadata}, 300
     assert measurements.lag_bytes == 0

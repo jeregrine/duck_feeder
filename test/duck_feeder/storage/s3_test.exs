@@ -91,6 +91,81 @@ defmodule DuckFeeder.Storage.S3Test do
     File.rm(tmp_path)
   end
 
+  test "single put retries transient failures" do
+    {:ok, attempts} = Agent.start_link(fn -> 0 end)
+    tmp_path = write_temp_file(256)
+
+    request_fun = fn _req, _opts ->
+      attempt = Agent.get_and_update(attempts, fn current -> {current + 1, current + 1} end)
+
+      if attempt < 3 do
+        {:ok, Req.Response.new(status: 500, body: "retry")}
+      else
+        {:ok, Req.Response.new(status: 200, headers: [{"etag", "\"etag-final\""}])}
+      end
+    end
+
+    config = %{
+      provider: :s3,
+      bucket: "bucket",
+      access_key_id: "key",
+      secret_access_key: "secret",
+      endpoint: "https://s3.example.test",
+      force_path_style: true,
+      adapter_opts: %{
+        request_fun: request_fun,
+        multipart: false,
+        retry_max_attempts: 3,
+        retry_base_delay_ms: 0,
+        retry_jitter_ms: 0,
+        retry_max_delay_ms: 0
+      }
+    }
+
+    assert {:ok, %{etag: "\"etag-final\"", size: 256}} =
+             S3.put_file(config, tmp_path, %{bucket: "bucket", key: "path/file.parquet"}, [])
+
+    assert Agent.get(attempts, & &1) == 3
+
+    Agent.stop(attempts)
+    File.rm(tmp_path)
+  end
+
+  test "single put returns error when retries are exhausted" do
+    {:ok, attempts} = Agent.start_link(fn -> 0 end)
+    tmp_path = write_temp_file(128)
+
+    request_fun = fn _req, _opts ->
+      _ = Agent.get_and_update(attempts, fn current -> {current + 1, current + 1} end)
+      {:ok, Req.Response.new(status: 503, body: "still-failing")}
+    end
+
+    config = %{
+      provider: :s3,
+      bucket: "bucket",
+      access_key_id: "key",
+      secret_access_key: "secret",
+      endpoint: "https://s3.example.test",
+      force_path_style: true,
+      adapter_opts: %{
+        request_fun: request_fun,
+        multipart: false,
+        retry_max_attempts: 2,
+        retry_base_delay_ms: 0,
+        retry_jitter_ms: 0,
+        retry_max_delay_ms: 0
+      }
+    }
+
+    assert {:error, {:s3_put_failed, 503, "still-failing"}} =
+             S3.put_file(config, tmp_path, %{bucket: "bucket", key: "path/file.parquet"}, [])
+
+    assert Agent.get(attempts, & &1) == 2
+
+    Agent.stop(attempts)
+    File.rm(tmp_path)
+  end
+
   test "multipart upload aborts when a part fails" do
     {:ok, calls_agent} = Agent.start_link(fn -> [] end)
     tmp_path = write_temp_file(6 * 1_024 * 1_024)

@@ -122,21 +122,27 @@ defmodule DuckFeeder.Runtime do
                )
              ) do
           {:ok, cdc_pid} ->
-            case maybe_mark_snapshot_handoff_complete(
-                   meta_module,
-                   meta_conn,
-                   source.id,
-                   snapshot_result,
-                   opts
-                 ) do
-              :ok ->
-                {:ok,
-                 %{
-                   service_pid: service_pid,
-                   cdc_pid: cdc_pid,
-                   start_lsn: start_lsn,
-                   source: source
-                 }}
+            with :ok <- attach_cdc_to_service(service_module, service_pid, cdc_pid),
+                 :ok <-
+                   maybe_mark_snapshot_handoff_complete(
+                     meta_module,
+                     meta_conn,
+                     source.id,
+                     snapshot_result,
+                     opts
+                   ) do
+              {:ok,
+               %{
+                 service_pid: service_pid,
+                 cdc_pid: cdc_pid,
+                 start_lsn: start_lsn,
+                 source: source
+               }}
+            else
+              {:error, {:service_attach_cdc_failed, _} = reason} ->
+                _ = safe_stop_cdc(cdc_pid)
+                _ = safe_stop_service(service_pid)
+                {:error, reason}
 
               {:error, reason} ->
                 _ = safe_stop_cdc(cdc_pid)
@@ -177,6 +183,8 @@ defmodule DuckFeeder.Runtime do
       max_tx_changes: Keyword.get(opts, :max_tx_changes),
       observer_pid: Keyword.get(opts, :observer_pid),
       snapshot_lsn_start: Keyword.get(opts, :snapshot_lsn_start),
+      max_inflight_batches: Keyword.get(opts, :max_inflight_batches),
+      max_pending_batches: Keyword.get(opts, :max_pending_batches),
       meta_module: meta_module
     ]
     |> Enum.reject(fn {_key, value} -> is_nil(value) end)
@@ -267,9 +275,20 @@ defmodule DuckFeeder.Runtime do
           _ = safe_disconnect_query_conn(query_disconnect_fun, query_conn)
 
           case result do
-            {:ok, %{start_lsn: start_lsn}} -> {:ok, start_lsn}
-            {:ok, other} -> {:error, {:invalid_bootstrap_result, other}}
-            {:error, _reason} = error -> error
+            {:ok, %{slot: {:created, _slot}, start_lsn: start_lsn}} when is_binary(start_lsn) ->
+              {:ok, start_lsn}
+
+            {:ok, %{slot: :exists}} ->
+              {:ok, nil}
+
+            {:ok, %{start_lsn: start_lsn}} when is_binary(start_lsn) ->
+              {:ok, start_lsn}
+
+            {:ok, other} ->
+              {:error, {:invalid_bootstrap_result, other}}
+
+            {:error, _reason} = error ->
+              error
           end
 
         {:error, reason} ->
@@ -743,6 +762,25 @@ defmodule DuckFeeder.Runtime do
         max_lsn -> {:cont, {:ok, max_lsn}}
       end
     end)
+  end
+
+  defp attach_cdc_to_service(service_module, service_pid, cdc_pid)
+       when is_atom(service_module) and is_pid(service_pid) and is_pid(cdc_pid) do
+    if function_exported?(service_module, :attach_cdc, 2) do
+      case service_module.attach_cdc(service_pid, cdc_pid) do
+        :ok -> :ok
+        {:error, reason} -> {:error, {:service_attach_cdc_failed, reason}}
+        other -> {:error, {:service_attach_cdc_failed, {:invalid_attach_result, other}}}
+      end
+    else
+      :ok
+    end
+  rescue
+    exception ->
+      {:error, {:service_attach_cdc_failed, {:exception, exception}}}
+  catch
+    kind, reason ->
+      {:error, {:service_attach_cdc_failed, {kind, reason}}}
   end
 
   defp safe_stop_service(service_pid) when is_pid(service_pid) do

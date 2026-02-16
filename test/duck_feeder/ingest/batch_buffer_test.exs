@@ -43,6 +43,21 @@ defmodule DuckFeeder.Ingest.BatchBufferTest do
     assert BatchBuffer.due_flush?(state, 1_501)
   end
 
+  test "estimates row size for nested rows without explicit row_size" do
+    state = BatchBuffer.new(max_rows: 10, max_bytes: 1_000_000, flush_interval_ms: 60_000)
+
+    row = %{
+      "id" => 1,
+      "name" => "duck",
+      "tags" => ["a", "b", "c"],
+      "meta" => %{"active" => true, "score" => 10.5}
+    }
+
+    assert {:ok, next_state} = BatchBuffer.append(state, row, "0/10", now_mono_ms: 100)
+    assert next_state.row_count == 1
+    assert next_state.byte_count > 0
+  end
+
   test "flush returns empty when no rows" do
     state = BatchBuffer.new()
 

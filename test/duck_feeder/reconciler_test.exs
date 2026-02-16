@@ -40,6 +40,20 @@ defmodule DuckFeeder.ReconcilerTest do
       do: {:ok, %{batch_id: "b4", from: :failed, to: :pending}}
   end
 
+  defmodule FakeMetaEncoded do
+    def list_stale_batches(_conn, _opts), do: {:ok, [%{batch_id: "b-encoded", state: "encoded"}]}
+
+    def list_batch_files(_conn, "b-encoded") do
+      {:ok,
+       [
+         %{object_key: "raw/users/file-encoded.parquet"}
+       ]}
+    end
+
+    def transition_batch(_conn, "b-encoded", :pending, error_message: nil),
+      do: {:ok, %{batch_id: "b-encoded", from: :encoded, to: :pending}}
+  end
+
   defmodule FakeMetaVerify do
     def list_stale_batches(_conn, _opts), do: {:ok, [%{batch_id: "b1", state: "uploaded"}]}
 
@@ -139,6 +153,34 @@ defmodule DuckFeeder.ReconcilerTest do
 
     assert_received {:storage_delete_object, "raw/users/file-1.parquet"}
     assert_received {:storage_delete_object, "raw/users/file-2.parquet"}
+  end
+
+  test "retries encoded batches and cleans known files by default" do
+    assert {:ok, summary} =
+             Reconciler.reconcile(%{
+               meta_conn: :fake,
+               meta_module: FakeMetaEncoded,
+               storage_module: FakeStorage,
+               storage: %{provider: :s3, bucket: "bucket"}
+             })
+
+    assert summary.checked == 1
+    assert summary.retried == ["b-encoded"]
+    assert summary.errors == []
+
+    assert_received {:storage_delete_object, "raw/users/file-encoded.parquet"}
+  end
+
+  test "returns error for encoded cleanup when storage is missing" do
+    assert {:ok, summary} =
+             Reconciler.reconcile(%{
+               meta_conn: :fake,
+               meta_module: FakeMetaEncoded
+             })
+
+    assert summary.checked == 1
+    assert summary.retried == []
+    assert summary.errors == [{"b-encoded", :missing_storage_for_encoded_cleanup}]
   end
 
   test "allows failed cleanup with no files by default" do

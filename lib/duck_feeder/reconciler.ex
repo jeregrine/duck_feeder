@@ -3,6 +3,8 @@ defmodule DuckFeeder.Reconciler do
   Reconciliation helpers for stale batches.
 
   Current behavior:
+  - retries `encoded` stale batches by moving them back to `pending`
+    (optionally deleting known files when `cleanup_encoded_uploads?: true`, default)
   - retries `uploaded` stale batches via `commit_uploaded_batch/2`
   - optional failed-batch retry path (`cleanup_failed_uploads?: true`) that:
     - deletes known batch objects from storage
@@ -39,7 +41,7 @@ defmodule DuckFeeder.Reconciler do
     stale_before =
       Keyword.get(opts, :stale_before, DateTime.add(DateTime.utc_now(), -30 * 60, :second))
 
-    states = Keyword.get(opts, :states, [:uploaded, :failed])
+    states = Keyword.get(opts, :states, [:encoded, :uploaded, :failed])
     stop_on_error? = Keyword.get(opts, :stop_on_error?, false)
 
     with {:ok, max_batches} <- normalize_max_batches(Keyword.get(opts, :max_batches)),
@@ -85,6 +87,13 @@ defmodule DuckFeeder.Reconciler do
     end
   end
 
+  defp reconcile_batch(meta, conn, context, opts, %{batch_id: batch_id, state: "encoded"}) do
+    case retry_encoded_batch(meta, conn, context, opts, batch_id) do
+      :ok -> {:retried, batch_id}
+      {:error, reason} -> {:error, batch_id, reason}
+    end
+  end
+
   defp reconcile_batch(meta, conn, context, opts, %{batch_id: batch_id, state: "uploaded"}) do
     with :ok <- maybe_verify_uploaded_batch(meta, conn, context, opts, batch_id),
          {:ok, _result} <- meta.commit_uploaded_batch(conn, batch_id) do
@@ -107,6 +116,33 @@ defmodule DuckFeeder.Reconciler do
 
   defp reconcile_batch(_meta, _conn, _context, _opts, %{batch_id: batch_id, state: state}) do
     {:skipped, "#{batch_id}:#{state}"}
+  end
+
+  defp retry_encoded_batch(meta, conn, context, opts, batch_id) do
+    cleanup_encoded_uploads? = Keyword.get(opts, :cleanup_encoded_uploads?, true)
+
+    with {:ok, files} <- meta.list_batch_files(conn, batch_id),
+         :ok <- maybe_cleanup_encoded_files(context, files, cleanup_encoded_uploads?),
+         {:ok, %{to: :pending}} <-
+           meta.transition_batch(conn, batch_id, :pending, error_message: nil) do
+      :ok
+    end
+  end
+
+  defp maybe_cleanup_encoded_files(_context, _files, false), do: :ok
+
+  defp maybe_cleanup_encoded_files(context, files, true) when is_list(files) do
+    if files == [] do
+      :ok
+    else
+      storage = Map.get(context, :storage)
+
+      if is_map(storage) do
+        delete_batch_files(context, files)
+      else
+        {:error, :missing_storage_for_encoded_cleanup}
+      end
+    end
   end
 
   defp cleanup_failed_batch(meta, conn, context, batch_id, opts) do

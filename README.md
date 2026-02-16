@@ -71,6 +71,14 @@ You can select by format (`:jsonl | :parquet`) or explicit adapter module.
 Optional fallback is supported (e.g. `format: :parquet, fallback_format: :jsonl`).
 For parquet, `datetime_encoding: :unix_microseconds` is available to keep timestamp
 normalization in Elixir and avoid extra Rust parsing dependencies.
+Parquet NIF input now passes normalized Elixir terms directly to Rust (no JSON bridge).
+
+Writer temp-file cleanup is best-effort and configurable via `writer.adapter_opts`:
+- `reap_stale_tmp_files?` (default `true`)
+- `tmp_file_reap_interval_ms` (default `60_000`)
+- `tmp_file_stale_after_seconds` (default `86_400`)
+- `tmp_file_reap_max_files` (default `500`)
+- `tmp_file_prefix` (default `"duck_feeder_"`)
 
 ```elixir
 {:ok, write_result} = DuckFeeder.write_batch(%{}, %{rows: [%{"id" => 1}]})
@@ -210,8 +218,17 @@ recoverable from row-shape inference alone after the fact.
 Replication connection tuning options include:
 - `auto_reconnect: true | false`
 - `reconnect_backoff: milliseconds` (defaults to `1000` when unset)
+- `reconnect_backoff_min_ms` / `reconnect_backoff_max_ms` / `reconnect_backoff_jitter_ms`
 - `max_lag_bytes: non_neg_integer()` (disconnect guard for unacked lag growth)
+- `backpressure_lag_bytes: non_neg_integer()` (enter/clear backpressure telemetry threshold)
 - `event_sink_mode: :pid | :call` (default `:pid`)
+
+Runtime now advances replication ack based on durable checkpoint progress
+(batch commit result -> service ack message -> `CDC.Connection`) instead of commit-decode time.
+
+Batch processing safety options on `start_stream/4` / `start_service/4`:
+- `max_inflight_batches` (default `1`)
+- `max_pending_batches` (default `1000`, service fails closed on overflow)
 
 ## Replication connection API
 
@@ -221,7 +238,8 @@ that decodes pgoutput and emits normalized `DuckFeeder.CDC.Event` values to an `
 ## Reconciliation
 
 `DuckFeeder.Reconciler` provides stale-batch reconciliation helpers.
-It currently retries stale `uploaded` batches via `commit_uploaded_batch/2`.
+It retries stale `uploaded` batches via `commit_uploaded_batch/2` and now also
+retries stale `encoded` batches by moving them back to `pending`.
 
 `DuckFeeder.Reconciler.Worker` runs reconciliation on an interval.
 `DuckFeeder.reconcile/2` supports:
@@ -254,6 +272,8 @@ DuckFeeder.delete_object(storage_config, "events/table=users/part-0001.parquet")
 
 The S3 adapter uses direct HTTP calls with Req + AWS SigV4.
 It supports single PUT and multipart upload modes.
+Default network resiliency policy includes bounded retries/backoff for transient
+HTTP/network failures plus explicit request/connect timeout defaults.
 
 ```elixir
 %{
@@ -269,19 +289,31 @@ It supports single PUT and multipart upload modes.
   adapter_opts: %{
     multipart_threshold: 64 * 1_024 * 1_024,
     part_size: 8 * 1_024 * 1_024,
-    chunk_size: 8 * 1_024 * 1_024
+    chunk_size: 8 * 1_024 * 1_024,
+    timeout_ms: 30_000,
+    retry_max_attempts: 3,
+    retry_base_delay_ms: 100,
+    retry_max_delay_ms: 2_000,
+    retry_jitter_ms: 50
   }
 }
 ```
 
 ## GCS config example
 
+The GCS adapter uses streamed upload bodies, retry/backoff, and explicit timeout defaults.
+
 ```elixir
 %{
   provider: :gcs,
   bucket: "ducklake-data",
   prefix: "prod",
-  token: System.fetch_env!("GCS_OAUTH_TOKEN")
+  token: System.fetch_env!("GCS_OAUTH_TOKEN"),
+  adapter_opts: %{
+    chunk_size: 1_024 * 1_024,
+    timeout_ms: 30_000,
+    retry_max_attempts: 3
+  }
 }
 ```
 

@@ -32,6 +32,21 @@ defmodule DuckFeeder.CDC.ConnectionOptionsTest do
     assert opts[:ssl] == false
   end
 
+  test "accepts known string override keys from maps" do
+    source = %{
+      connection_info: %{
+        "dsn" => "postgres://user:pass@localhost:5432/duck_feeder?sslmode=disable"
+      }
+    }
+
+    assert {:ok, opts} =
+             ConnectionOptions.resolve(source,
+               connection_overrides: %{"hostname" => "db.override.internal"}
+             )
+
+    assert opts[:hostname] == "db.override.internal"
+  end
+
   test "resolves from source connection_info host fields" do
     source = %{
       connection_info: %{
@@ -59,6 +74,17 @@ defmodule DuckFeeder.CDC.ConnectionOptionsTest do
 
     assert {:ok, ^explicit} =
              ConnectionOptions.resolve(%{connection_info: %{}}, connection_opts: explicit)
+  end
+
+  test "rejects unknown connection override keys" do
+    source = %{
+      connection_info: %{
+        "dsn" => "postgres://user:pass@localhost:5432/duck_feeder?sslmode=disable"
+      }
+    }
+
+    assert {:error, {:invalid_connection_override_key, "evil_key"}} =
+             ConnectionOptions.resolve(source, connection_overrides: %{"evil_key" => "x"})
   end
 
   test "returns errors for invalid info" do

@@ -57,9 +57,15 @@ defmodule DuckFeeder.CDC.Pipeline do
         {:reply, :buffering, %{state | buffer: next_buffer}}
 
       {:ok, transaction, next_buffer} ->
-        :ok = Ingest.ingest_transaction(state.ingest_pid, transaction)
-        DuckFeeder.Telemetry.cdc_event(event_type(event), :committed)
-        {:reply, {:committed, transaction}, %{state | buffer: next_buffer}}
+        case Ingest.ingest_transaction(state.ingest_pid, transaction) do
+          :ok ->
+            DuckFeeder.Telemetry.cdc_event(event_type(event), :committed)
+            {:reply, {:committed, transaction}, %{state | buffer: next_buffer}}
+
+          {:error, reason} ->
+            DuckFeeder.Telemetry.cdc_event(event_type(event), :error)
+            {:reply, {:error, {:ingest_failed, reason}}, %{state | buffer: next_buffer}}
+        end
 
       {:error, reason} ->
         DuckFeeder.Telemetry.cdc_event(event_type(event), :error)

@@ -258,25 +258,23 @@ defmodule DuckFeeder.Storage.S3 do
       |> Req.merge(request_opts(config, call_opts))
 
     request_fun = request_fun(config, call_opts)
+    retry_config = retry_config(config, call_opts)
 
-    case request_fun.(req,
-           method: method,
-           url: "/" <> encode_key(key),
-           headers: headers,
-           body: body,
-           params: params,
-           decode_body: false,
-           retry: false
-         ) do
-      {:ok, %Req.Response{} = response} ->
-        {:ok, response}
-
-      {:error, reason} ->
-        {:error, {:s3_http_failed, reason}}
-
-      other ->
-        {:error, {:s3_http_failed, {:unexpected_request_result, other}}}
-    end
+    request_with_retry(
+      request_fun,
+      req,
+      [
+        method: method,
+        url: "/" <> encode_key(key),
+        headers: headers,
+        body: body,
+        params: params,
+        decode_body: false,
+        retry: false
+      ],
+      retry_config,
+      1
+    )
   end
 
   defp credentials(config) do
@@ -311,8 +309,13 @@ defmodule DuckFeeder.Storage.S3 do
   end
 
   defp request_opts(config, call_opts) do
-    merged_adapter_opts(config, call_opts)
+    adapter_opts = merged_adapter_opts(config, call_opts)
+    timeout_ms = timeout_ms(adapter_opts)
+
+    adapter_opts
     |> Map.get(:request_opts, [])
+    |> Keyword.put_new(:receive_timeout, timeout_ms)
+    |> put_connect_timeout(timeout_ms)
   end
 
   defp request_fun(config, call_opts) do
@@ -321,6 +324,103 @@ defmodule DuckFeeder.Storage.S3 do
       _ -> &Req.request/2
     end
   end
+
+  defp request_with_retry(request_fun, req, request_args, retry_config, attempt)
+       when is_function(request_fun, 2) and is_list(request_args) and is_map(retry_config) do
+    case request_fun.(req, request_args) do
+      {:ok, %Req.Response{} = response} ->
+        if retryable_status?(response.status, retry_config) and
+             attempt < retry_config.max_attempts do
+          sleep_before_retry(retry_config, attempt)
+          request_with_retry(request_fun, req, request_args, retry_config, attempt + 1)
+        else
+          {:ok, response}
+        end
+
+      {:error, reason} ->
+        if attempt < retry_config.max_attempts do
+          sleep_before_retry(retry_config, attempt)
+          request_with_retry(request_fun, req, request_args, retry_config, attempt + 1)
+        else
+          {:error, {:s3_http_failed, reason}}
+        end
+
+      other ->
+        {:error, {:s3_http_failed, {:unexpected_request_result, other}}}
+    end
+  end
+
+  defp retry_config(config, call_opts) do
+    adapter_opts = merged_adapter_opts(config, call_opts)
+
+    %{
+      max_attempts: normalize_max_attempts(Map.get(adapter_opts, :retry_max_attempts, 3)),
+      base_delay_ms:
+        normalize_non_neg_integer(Map.get(adapter_opts, :retry_base_delay_ms, 100), 100),
+      max_delay_ms:
+        normalize_non_neg_integer(Map.get(adapter_opts, :retry_max_delay_ms, 2_000), 2_000),
+      jitter_ms: normalize_non_neg_integer(Map.get(adapter_opts, :retry_jitter_ms, 50), 50),
+      retryable_statuses:
+        normalize_retryable_statuses(
+          Map.get(adapter_opts, :retryable_statuses, [408, 425, 429, 500, 502, 503, 504])
+        )
+    }
+  end
+
+  defp retryable_status?(status, %{retryable_statuses: statuses}) when is_integer(status) do
+    status in statuses
+  end
+
+  defp retryable_status?(_status, _retry_config), do: false
+
+  defp sleep_before_retry(retry_config, attempt)
+       when is_map(retry_config) and is_integer(attempt) and attempt >= 1 do
+    exponential =
+      retry_config.base_delay_ms
+      |> Kernel.*(trunc(:math.pow(2, attempt - 1)))
+      |> min(retry_config.max_delay_ms)
+
+    jitter =
+      if retry_config.jitter_ms > 0 do
+        :rand.uniform(retry_config.jitter_ms * 2 + 1) - (retry_config.jitter_ms + 1)
+      else
+        0
+      end
+
+    Process.sleep(max(exponential + jitter, 0))
+  end
+
+  defp timeout_ms(adapter_opts) do
+    normalize_non_neg_integer(Map.get(adapter_opts, :timeout_ms, 30_000), 30_000)
+  end
+
+  defp put_connect_timeout(request_opts, timeout_ms) when is_list(request_opts) do
+    connect_options =
+      request_opts
+      |> Keyword.get(:connect_options, [])
+      |> List.wrap()
+      |> Keyword.put_new(:timeout, timeout_ms)
+
+    Keyword.put(request_opts, :connect_options, connect_options)
+  end
+
+  defp normalize_max_attempts(value) when is_integer(value) and value > 0, do: value
+  defp normalize_max_attempts(_value), do: 3
+
+  defp normalize_non_neg_integer(value, _default) when is_integer(value) and value >= 0, do: value
+  defp normalize_non_neg_integer(_value, default), do: default
+
+  defp normalize_retryable_statuses(statuses) when is_list(statuses) do
+    statuses
+    |> Enum.filter(&(is_integer(&1) and &1 >= 100 and &1 <= 599))
+    |> Enum.uniq()
+    |> case do
+      [] -> [408, 425, 429, 500, 502, 503, 504]
+      values -> values
+    end
+  end
+
+  defp normalize_retryable_statuses(_other), do: [408, 425, 429, 500, 502, 503, 504]
 
   defp multipart_upload?(size, _config, _opts) when size <= 0, do: false
 

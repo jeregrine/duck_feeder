@@ -39,9 +39,12 @@ defmodule DuckFeeder.TablePipeline do
     GenServer.start_link(__MODULE__, opts, name: name_opt)
   end
 
-  @spec append(GenServer.server(), map(), String.t(), keyword()) :: :ok
+  @spec append(GenServer.server(), map(), String.t(), keyword()) :: :ok | {:error, term()}
   def append(server, row, commit_lsn, opts \\ []) do
-    GenServer.cast(server, {:append, row, commit_lsn, opts})
+    timeout = Keyword.get(opts, :timeout, 5_000)
+    GenServer.call(server, {:append, row, commit_lsn, opts}, timeout)
+  catch
+    :exit, reason -> {:error, {:table_pipeline_append_failed, reason}}
   end
 
   @spec flush(GenServer.server()) :: :empty | {:ok, BatchBuffer.batch()}
@@ -80,15 +83,15 @@ defmodule DuckFeeder.TablePipeline do
   end
 
   @impl true
-  def handle_cast({:append, row, commit_lsn, opts}, %State{buffer: buffer} = state) do
-    case BatchBuffer.append(buffer, row, commit_lsn, opts) do
-      {:ok, next_buffer} ->
-        {:noreply, %{state | buffer: next_buffer}}
+  def handle_cast({:append, row, commit_lsn, opts}, %State{} = state) do
+    {_result, next_state} = process_append(state, row, commit_lsn, opts)
+    {:noreply, next_state}
+  end
 
-      {:flush, batch, next_buffer} ->
-        emit_flush(state, batch)
-        {:noreply, %{state | buffer: next_buffer}}
-    end
+  @impl true
+  def handle_call({:append, row, commit_lsn, opts}, _from, %State{} = state) do
+    {result, next_state} = process_append(state, row, commit_lsn, opts)
+    {:reply, result, next_state}
   end
 
   @impl true
@@ -133,6 +136,23 @@ defmodule DuckFeeder.TablePipeline do
       end
 
     {:noreply, schedule_flush_tick(state)}
+  end
+
+  defp process_append(%State{buffer: buffer} = state, row, commit_lsn, opts) do
+    case BatchBuffer.append(buffer, row, commit_lsn, opts) do
+      {:ok, next_buffer} ->
+        {:ok, %{state | buffer: next_buffer}}
+
+      {:flush, batch, next_buffer} ->
+        emit_flush(state, batch)
+        {:ok, %{state | buffer: next_buffer}}
+    end
+  rescue
+    exception ->
+      {{:error, {:table_pipeline_append_exception, exception}}, state}
+  catch
+    kind, reason ->
+      {{:error, {:table_pipeline_append_throw, kind, reason}}, state}
   end
 
   defp emit_flush(%State{table: table, sink_pid: sink_pid, on_flush: on_flush}, batch) do

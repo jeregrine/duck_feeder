@@ -30,6 +30,21 @@ defmodule DuckFeeder.Writer.ParquetNifTest do
     assert :ok = ParquetNif.cleanup(%{}, result)
   end
 
+  test "normalizes atom keys/values for direct term nif input" do
+    row = %{
+      id: 1,
+      flag: true,
+      nullable: nil,
+      tag: :insert,
+      nested: %{source: :cdc, values: [1, 2, 3]}
+    }
+
+    assert {:ok, result} = ParquetNif.write_batch(%{}, %{rows: [row]}, [])
+    assert result.file_size_bytes > 0
+    assert File.exists?(result.local_path)
+    assert :ok = ParquetNif.cleanup(%{}, result)
+  end
+
   test "returns error for empty row list" do
     assert {:error, :empty_rows} = ParquetNif.write_batch(%{}, %{rows: []}, [])
   end

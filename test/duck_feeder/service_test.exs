@@ -93,6 +93,8 @@ defmodule DuckFeeder.ServiceTest do
         observer_pid: self()
       )
 
+    assert :ok = Service.attach_cdc(service, self())
+
     assert :buffering =
              Service.push_event(service, %Event.Relation{id: 1, schema: "public", table: "users"})
 
@@ -107,11 +109,53 @@ defmodule DuckFeeder.ServiceTest do
 
     assert_receive {:duck_feeder_batch_processed, {"raw", "users"}, {:ok, result}, batch}, 1_000
 
+    assert_receive {:duck_feeder_ack_lsn, "0/120"}, 1_000
+
     assert result.status == :committed
     assert result.batch_id == "batch-service"
     assert batch.row_count == 1
 
     refute Service.in_transaction?(service)
+  end
+
+  test "attach_cdc emits latest checkpoint ack after prior commits" do
+    designated_tables = [
+      %{
+        id: 1,
+        source_schema: "public",
+        source_table: "users",
+        target_schema: "raw",
+        target_table: "users"
+      }
+    ]
+
+    {:ok, service} =
+      Service.start_link(
+        designated_tables: designated_tables,
+        meta_module: FakeMeta,
+        meta_conn: :fake_conn,
+        writer: %{adapter: FakeWriter},
+        storage: %{provider: :s3, bucket: "bucket", adapter: FakeStorage},
+        pipeline_opts: %{max_rows: 1, max_bytes: 10_000, flush_interval_ms: 60_000},
+        observer_pid: self()
+      )
+
+    assert :buffering =
+             Service.push_event(service, %Event.Relation{id: 1, schema: "public", table: "users"})
+
+    assert :buffering =
+             Service.push_event(service, %Event.Begin{xid: 701, final_lsn: "0/100"})
+
+    assert :buffering =
+             Service.push_event(service, %Event.Insert{relation_id: 1, record: %{"id" => "2"}})
+
+    assert {:committed, %{xid: 701}} =
+             Service.push_event(service, %Event.Commit{xid: 701, end_lsn: "0/120"})
+
+    assert_receive {:duck_feeder_batch_processed, {"raw", "users"}, {:ok, _result}, _batch}, 1_000
+
+    assert :ok = Service.attach_cdc(service, self())
+    assert_receive {:duck_feeder_ack_lsn, "0/120"}, 1_000
   end
 
   test "returns CDC validation errors" do

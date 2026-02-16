@@ -55,6 +55,40 @@ defmodule DuckFeeder.Config do
             ingest: [type: :keyword_list, default: [], keys: @ingest_schema]
           )
 
+  @known_keys %{
+    "source" => :source,
+    "storage" => :storage,
+    "metadata" => :metadata,
+    "ingest" => :ingest,
+    "postgres_url" => :postgres_url,
+    "slot_name" => :slot_name,
+    "publication_name" => :publication_name,
+    "designated_tables" => :designated_tables,
+    "source_schema" => :source_schema,
+    "source_table" => :source_table,
+    "target_schema" => :target_schema,
+    "target_table" => :target_table,
+    "mode" => :mode,
+    "primary_keys" => :primary_keys,
+    "provider" => :provider,
+    "bucket" => :bucket,
+    "prefix" => :prefix,
+    "adapter_opts" => :adapter_opts,
+    "region" => :region,
+    "endpoint" => :endpoint,
+    "force_path_style" => :force_path_style,
+    "access_key_id" => :access_key_id,
+    "secret_access_key" => :secret_access_key,
+    "session_token" => :session_token,
+    "token" => :token,
+    "token_fun" => :token_fun,
+    "base_url" => :base_url,
+    "max_rows" => :max_rows,
+    "max_bytes" => :max_bytes,
+    "flush_interval_ms" => :flush_interval_ms,
+    "table_worker_concurrency" => :table_worker_concurrency
+  }
+
   @type t :: %{
           source: map(),
           storage: map(),
@@ -201,31 +235,56 @@ defmodule DuckFeeder.Config do
   end
 
   defp to_keyword(map) when is_map(map) do
-    {:ok,
-     map
-     |> Enum.map(fn {key, value} -> {normalize_key(key), normalize_value(value)} end)}
+    map
+    |> Enum.reduce_while({:ok, []}, fn {key, value}, {:ok, acc} ->
+      with {:ok, normalized_key} <- normalize_key(key),
+           {:ok, normalized_value} <- normalize_value_for_key(normalized_key, value) do
+        {:cont, {:ok, [{normalized_key, normalized_value} | acc]}}
+      else
+        {:error, _reason} = error -> {:halt, error}
+      end
+    end)
+    |> case do
+      {:ok, entries} -> {:ok, Enum.reverse(entries)}
+      {:error, _reason} = error -> error
+    end
   end
 
   defp to_keyword(other),
     do: {:error, ArgumentError.exception("expected map/keyword, got: #{inspect(other)}")}
 
-  defp normalize_key(key) when is_atom(key), do: key
+  defp normalize_key(key) when is_atom(key), do: {:ok, key}
 
   defp normalize_key(key) when is_binary(key) do
-    try do
-      String.to_existing_atom(key)
-    rescue
-      ArgumentError -> String.to_atom(key)
+    case Map.fetch(@known_keys, key) do
+      {:ok, normalized} -> {:ok, normalized}
+      :error -> {:error, ArgumentError.exception("unknown config key: #{inspect(key)}")}
     end
   end
 
-  defp normalize_key(key), do: key
+  defp normalize_key(key),
+    do: {:error, ArgumentError.exception("invalid config key: #{inspect(key)}")}
 
-  defp normalize_value(value) when is_map(value),
-    do: value |> Enum.map(fn {k, v} -> {normalize_key(k), normalize_value(v)} end)
+  defp normalize_value_for_key(key, value)
+       when key in [:source, :storage, :metadata, :ingest] and (is_map(value) or is_list(value)) do
+    to_keyword(value)
+  end
 
-  defp normalize_value(value) when is_list(value), do: Enum.map(value, &normalize_value/1)
-  defp normalize_value(value), do: value
+  defp normalize_value_for_key(:designated_tables, value) when is_list(value) do
+    value
+    |> Enum.reduce_while({:ok, []}, fn entry, {:ok, acc} ->
+      case to_keyword(entry) do
+        {:ok, keyword_entry} -> {:cont, {:ok, [keyword_entry | acc]}}
+        {:error, _reason} = error -> {:halt, error}
+      end
+    end)
+    |> case do
+      {:ok, entries} -> {:ok, Enum.reverse(entries)}
+      {:error, _reason} = error -> error
+    end
+  end
+
+  defp normalize_value_for_key(_key, value), do: {:ok, value}
 
   defp deep_to_map(list) when is_list(list) do
     if Keyword.keyword?(list) do

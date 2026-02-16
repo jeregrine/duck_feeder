@@ -46,6 +46,28 @@ defmodule DuckFeeder.ConfigTest do
     assert storage_config.force_path_style == true
   end
 
+  test "preserves storage.adapter_opts maps" do
+    config = %{
+      source: %{
+        postgres_url: "postgres://source",
+        slot_name: "slot",
+        publication_name: "pub",
+        designated_tables: []
+      },
+      storage: %{
+        provider: :s3,
+        bucket: "ducklake-data",
+        access_key_id: "key",
+        secret_access_key: "secret",
+        adapter_opts: %{retry_max_attempts: 5}
+      },
+      metadata: %{postgres_url: "postgres://meta"}
+    }
+
+    assert {:ok, validated} = Config.validate(config)
+    assert validated.storage.adapter_opts == %{retry_max_attempts: 5}
+  end
+
   test "accepts gcs token function" do
     token_fun = fn -> "token" end
 
@@ -91,6 +113,27 @@ defmodule DuckFeeder.ConfigTest do
 
     assert {:error, %ArgumentError{message: message}} = Config.validate(config)
     assert message =~ "storage.access_key_id"
+  end
+
+  test "rejects unknown string keys without atomizing" do
+    config = %{
+      "evil_key" => "boom",
+      source: %{
+        postgres_url: "postgres://source",
+        slot_name: "slot",
+        publication_name: "pub",
+        designated_tables: []
+      },
+      storage: %{
+        provider: :gcs,
+        bucket: "ducklake-data",
+        token: "token"
+      },
+      metadata: %{postgres_url: "postgres://meta"}
+    }
+
+    assert {:error, %ArgumentError{message: message}} = Config.validate(config)
+    assert message =~ "unknown config key"
   end
 
   test "rejects unsupported designated table mode" do

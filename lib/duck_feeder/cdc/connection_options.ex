@@ -3,6 +3,28 @@ defmodule DuckFeeder.CDC.ConnectionOptions do
   Resolves Postgrex connection options for CDC replication connections.
   """
 
+  @known_override_keys %{
+    "hostname" => :hostname,
+    "host" => :host,
+    "port" => :port,
+    "database" => :database,
+    "username" => :username,
+    "user" => :user,
+    "password" => :password,
+    "ssl" => :ssl,
+    "ssl_opts" => :ssl_opts,
+    "socket_options" => :socket_options,
+    "parameters" => :parameters,
+    "timeout" => :timeout,
+    "connect_timeout" => :connect_timeout,
+    "types" => :types,
+    "prepare" => :prepare,
+    "queue_target" => :queue_target,
+    "queue_interval" => :queue_interval,
+    "backoff_type" => :backoff_type,
+    "idle_interval" => :idle_interval
+  }
+
   @type source :: %{optional(:connection_info) => map()}
 
   @spec resolve(source(), keyword()) :: {:ok, keyword()} | {:error, term()}
@@ -126,21 +148,55 @@ defmodule DuckFeeder.CDC.ConnectionOptions do
   defp merge_overrides({:error, _} = error, _overrides), do: error
 
   defp merge_overrides({:ok, opts}, overrides) do
-    overrides = normalize_overrides(overrides)
-    {:ok, Keyword.merge(opts, overrides)}
+    with {:ok, normalized_overrides} <- normalize_overrides(overrides) do
+      {:ok, Keyword.merge(opts, normalized_overrides)}
+    end
   end
 
-  defp normalize_overrides(overrides) when is_list(overrides), do: overrides
+  defp normalize_overrides(overrides) when is_list(overrides) do
+    overrides
+    |> Enum.reduce_while({:ok, []}, fn
+      {key, value}, {:ok, acc} ->
+        case normalize_override_key(key) do
+          {:ok, normalized_key} -> {:cont, {:ok, [{normalized_key, value} | acc]}}
+          {:error, _reason} = error -> {:halt, error}
+        end
+
+      other, _acc ->
+        {:halt, {:error, {:invalid_connection_override, other}}}
+    end)
+    |> case do
+      {:ok, pairs} -> {:ok, Enum.reverse(pairs)}
+      {:error, _reason} = error -> error
+    end
+  end
 
   defp normalize_overrides(overrides) when is_map(overrides) do
-    Enum.map(overrides, fn {k, v} -> {normalize_key(k), v} end)
+    overrides
+    |> Enum.reduce_while({:ok, []}, fn {key, value}, {:ok, acc} ->
+      case normalize_override_key(key) do
+        {:ok, normalized_key} -> {:cont, {:ok, [{normalized_key, value} | acc]}}
+        {:error, _reason} = error -> {:halt, error}
+      end
+    end)
+    |> case do
+      {:ok, pairs} -> {:ok, Enum.reverse(pairs)}
+      {:error, _reason} = error -> error
+    end
   end
 
-  defp normalize_overrides(_), do: []
+  defp normalize_overrides(_), do: {:ok, []}
 
-  defp normalize_key(k) when is_atom(k), do: k
-  defp normalize_key(k) when is_binary(k), do: String.to_atom(k)
-  defp normalize_key(k), do: k
+  defp normalize_override_key(key) when is_atom(key), do: {:ok, key}
+
+  defp normalize_override_key(key) when is_binary(key) do
+    case Map.fetch(@known_override_keys, key) do
+      {:ok, normalized} -> {:ok, normalized}
+      :error -> {:error, {:invalid_connection_override_key, key}}
+    end
+  end
+
+  defp normalize_override_key(key), do: {:error, {:invalid_connection_override_key, key}}
 
   defp parse_optional_integer(nil, default), do: default
   defp parse_optional_integer("", default), do: default
