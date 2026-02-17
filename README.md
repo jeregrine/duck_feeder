@@ -14,6 +14,97 @@ Production-focused Elixir runtime that:
 Current implementation keeps HTTP/storage interactions Req-only and keeps Elixir/Rust dependencies minimal.
 `DuckFeeder.Config` validates runtime config (source/storage/metadata/ingest) with NimbleOptions.
 
+## System topology (quick ASCII)
+
+CDC runtime path:
+
+```text
+Postgres WAL
+   |
+   v
+DuckFeeder.CDC.Connection
+   |
+   v
+DuckFeeder.Service
+   |
+   +--> CDC.Pipeline -> Ingest -> TablePipeline(s)
+   |                                  |
+   |                                  v
+   |                      {:duck_feeder_batch, table, batch}
+   |__________________________________|
+                  |
+                  v
+        DuckFeeder.BatchProcessor
+        (write -> upload -> commit)
+                  |
+                  v
+   checkpoint_lsn persisted in Postgres metadata
+                  |
+                  v
+   Service -> {:duck_feeder_ack_lsn, checkpoint_lsn} -> CDC.Connection
+```
+
+Append stream path:
+
+```text
+producer rows
+   |
+   v
+DuckFeeder.AppendStream -> TablePipeline(s) -> BatchProcessor
+```
+
+## Phoenix/Ecto smart-defaults runtime (repo + schemas)
+
+For typical CRUD SaaS apps, you can use a lightweight module wrapper and let
+DuckFeeder infer source tables/PKs from Ecto schema modules.
+
+```elixir
+# config/runtime.exs
+config :acme_app, AcmeApp.DuckFeeder,
+  enabled: System.get_env("DUCK_FEEDER_ENABLED") == "true",
+  repo: AcmeApp.Repo,
+  # optional, defaults to :repo
+  metadata_repo: AcmeApp.Repo,
+  schemas: [
+    AcmeApp.Tenants,
+    AcmeApp.Users,
+    {AcmeApp.Invoices, target_table: "invoice_events"}
+  ],
+  storage: %{
+    provider: :s3,
+    bucket: System.fetch_env!("DUCK_FEEDER_BUCKET"),
+    access_key_id: System.fetch_env!("AWS_ACCESS_KEY_ID"),
+    secret_access_key: System.fetch_env!("AWS_SECRET_ACCESS_KEY")
+  },
+  runtime_opts: [
+    max_lag_bytes: 128 * 1024 * 1024,
+    backpressure_lag_bytes: 64 * 1024 * 1024
+  ]
+```
+
+```elixir
+# lib/acme_app/duck_feeder.ex
+defmodule AcmeApp.DuckFeeder do
+  use DuckFeeder.Runtime, otp_app: :acme_app
+end
+```
+
+```elixir
+# lib/acme_app/application.ex
+children = [
+  AcmeApp.Repo,
+  AcmeAppWeb.Endpoint,
+  AcmeApp.DuckFeeder
+]
+```
+
+Notes:
+- `metadata_repo` defaults to `repo`.
+- DuckFeeder derives DB connection URLs from repo config (`Repo.config/0`) unless overridden via
+  `source_postgres_url` / `metadata_postgres_url`.
+- `schemas` entries may be `MySchema` or `{MySchema, opts}` where opts can override
+  `source_schema`, `source_table`, `target_schema`, `target_table`, `mode`, `primary_keys`, `enabled?`.
+
 ## Metadata bootstrap from config
 
 You can seed `duckfeeder_meta` source + designated table rows from runtime config.

@@ -1,6 +1,31 @@
 defmodule DuckFeeder.BatchProcessor do
   @moduledoc """
   Processes flushed table batches through write, upload, and meta commit steps.
+
+  Batch state machine:
+
+      pending -> encoded -> uploaded -> committed
+                    |
+                    +--> failed
+
+  Processing path:
+
+      batch rows
+        |
+        v
+      Writer.write_batch
+        |
+        v
+      Storage.put_file
+        |
+        v
+      Meta.put_batch_file
+        |
+        v
+      committer_module.commit_batch
+
+  Optional poison-row mode (`poison_row_mode: :drop`) can isolate bad rows,
+  emit dead-letter signals/telemetry, and continue committing only valid rows.
   """
 
   alias DuckFeeder.{Meta, Storage, Writer}

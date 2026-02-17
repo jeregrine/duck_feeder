@@ -5,6 +5,26 @@ defmodule DuckFeeder.AppendStream do
   Reuses DuckFeeder batching/writer/upload/commit flow for non-CDC producers
   (e.g. telemetry, logs, error streams) by appending rows directly to target
   DuckLake tables.
+
+  Flow:
+
+      append/4
+        |
+        v
+      TablePipeline per target table
+        |
+        v
+      {:duck_feeder_batch, table, batch}
+        |
+        v
+      async bounded queue/tasks
+        |
+        v
+      BatchProcessor (write -> upload -> metadata commit)
+
+  Overload policy:
+  - `overflow_strategy: :fail` (default, fail-closed)
+  - `overflow_strategy: :drop_oldest` (lossy mode for availability-first streams)
   """
 
   use GenServer

@@ -1,12 +1,343 @@
 defmodule DuckFeeder.Runtime do
   @moduledoc """
   Runtime wiring helpers to start `DuckFeeder.Service` from metadata tables.
+
+  High-level startup flow:
+
+      Meta.get_source/list_designated_tables
+                |
+                v
+      resolve start_lsn + snapshot handoff plan
+                |
+                v
+      start Service
+                |
+                v
+      (optional) replay snapshot rows into Service ingest path
+                |
+                v
+      start CDC.Connection
+                |
+                v
+      attach_cdc(Service, cdc_pid) for durable ack feedback
+
+  The runtime keeps restart correctness centered on persisted checkpoint/snapshot
+  handoff state and only acknowledges WAL progression after committed batch
+  checkpoints are available.
+
+  App-facing wrapper mode is also available:
+
+      defmodule MyApp.DuckFeeder do
+        use DuckFeeder.Runtime, otp_app: :my_app
+      end
+
+  In this mode, DuckFeeder can resolve config from `repo` + `schemas` defaults
+  and manage stream startup as a supervised child.
   """
 
-  alias DuckFeeder.{Meta, Service}
+  alias DuckFeeder.{Config, Meta, Service}
   alias DuckFeeder.CDC.{Bootstrap, Connection, ConnectionOptions, Lsn}
 
   @default_reconnect_backoff 1_000
+
+  @callback duckfeeder_config() :: map() | keyword()
+
+  defmacro __using__(opts) do
+    otp_app = Keyword.fetch!(opts, :otp_app)
+
+    quote do
+      @behaviour DuckFeeder.Runtime
+      @duckfeeder_otp_app unquote(otp_app)
+
+      def child_spec(start_opts \\ []) do
+        %{
+          id: __MODULE__,
+          start: {__MODULE__, :start_link, [start_opts]}
+        }
+      end
+
+      def start_link(start_opts \\ []) when is_list(start_opts) do
+        DuckFeeder.Runtime.Embedded.start_link(
+          module: __MODULE__,
+          otp_app: @duckfeeder_otp_app,
+          start_opts: start_opts
+        )
+      end
+
+      @impl true
+      def duckfeeder_config do
+        Application.get_env(@duckfeeder_otp_app, __MODULE__, [])
+      end
+
+      defoverridable child_spec: 1, duckfeeder_config: 0
+    end
+  end
+
+  @doc """
+  Resolves app-facing runtime config into validated DuckFeeder runtime shape.
+
+  Supports two styles:
+  - explicit engine config via `config: %{source: ..., storage: ..., metadata: ...}`
+  - simplified repo/schemas config via `repo`, `schemas`, and `storage`
+  """
+  @spec resolve_app_config(map() | keyword()) :: {:ok, map()} | {:error, term()}
+  def resolve_app_config(config) when is_map(config) or is_list(config) do
+    cfg = mapify(config)
+
+    enabled? = truthy?(Map.get(cfg, :enabled, true))
+
+    if enabled? do
+      runtime_opts = map_get(cfg, :runtime_opts, []) |> List.wrap()
+      source_name = normalize_source_name(map_get(cfg, :source_name, "default"))
+      start_reconciler? = truthy?(map_get(cfg, :start_reconciler?, false))
+      reconcile_opts = map_get(cfg, :reconcile_opts, []) |> List.wrap()
+      reconciler_interval_ms = map_get(cfg, :reconciler_interval_ms)
+
+      with {:ok, runtime_config} <- runtime_config(cfg, source_name),
+           {:ok, validated} <- Config.validate(runtime_config) do
+        {:ok,
+         %{
+           enabled?: true,
+           source_name: source_name,
+           validated_config: validated,
+           storage_config: Config.storage_config(validated),
+           runtime_opts: runtime_opts,
+           start_reconciler?: start_reconciler?,
+           reconcile_opts: reconcile_opts,
+           reconciler_interval_ms: reconciler_interval_ms
+         }}
+      end
+    else
+      {:ok, %{enabled?: false}}
+    end
+  end
+
+  @spec repo_postgres_url(module()) :: {:ok, String.t()} | {:error, term()}
+  def repo_postgres_url(repo) when is_atom(repo) do
+    if function_exported?(repo, :config, 0) do
+      repo
+      |> apply(:config, [])
+      |> mapify()
+      |> repo_config_to_url()
+    else
+      {:error, {:invalid_repo, repo}}
+    end
+  end
+
+  defp runtime_config(cfg, source_name) do
+    case map_get(cfg, :config) do
+      explicit when is_map(explicit) or is_list(explicit) ->
+        {:ok, mapify(explicit)}
+
+      nil ->
+        simplified_runtime_config(cfg, source_name)
+
+      other ->
+        {:error, {:invalid_option, :config, other}}
+    end
+  end
+
+  defp simplified_runtime_config(cfg, source_name) do
+    with {:ok, repo} <- fetch_repo(cfg),
+         {:ok, schemas} <- fetch_schemas(cfg),
+         {:ok, storage} <- fetch_storage(cfg),
+         {:ok, source_postgres_url} <-
+           fetch_or_repo_url(cfg, :source_postgres_url, repo),
+         {:ok, metadata_postgres_url} <-
+           fetch_or_repo_url(cfg, :metadata_postgres_url, map_get(cfg, :metadata_repo, repo)),
+         {:ok, designated_tables} <- infer_designated_tables(schemas, cfg) do
+      slot_name = map_get(cfg, :slot_name, "duck_feeder_#{source_name}_slot")
+      publication_name = map_get(cfg, :publication_name, "duck_feeder_#{source_name}_pub")
+
+      {:ok,
+       %{
+         source: %{
+           postgres_url: source_postgres_url,
+           slot_name: slot_name,
+           publication_name: publication_name,
+           designated_tables: designated_tables
+         },
+         storage: mapify(storage),
+         metadata: %{postgres_url: metadata_postgres_url},
+         ingest: map_get(cfg, :ingest, %{}) |> mapify()
+       }}
+    end
+  end
+
+  defp fetch_repo(cfg) do
+    case map_get(cfg, :repo) do
+      repo when is_atom(repo) -> {:ok, repo}
+      other -> {:error, {:missing_or_invalid_option, :repo, other}}
+    end
+  end
+
+  defp fetch_schemas(cfg) do
+    case map_get(cfg, :schemas) do
+      schemas when is_list(schemas) and schemas != [] -> {:ok, schemas}
+      other -> {:error, {:missing_or_invalid_option, :schemas, other}}
+    end
+  end
+
+  defp fetch_storage(cfg) do
+    case map_get(cfg, :storage) do
+      storage when is_map(storage) or is_list(storage) -> {:ok, storage}
+      other -> {:error, {:missing_or_invalid_option, :storage, other}}
+    end
+  end
+
+  defp fetch_or_repo_url(cfg, key, repo) do
+    case map_get(cfg, key) do
+      value when is_binary(value) and value != "" -> {:ok, normalize_repo_url(value)}
+      nil -> repo_postgres_url(repo)
+      other -> {:error, {:invalid_option, key, other}}
+    end
+  end
+
+  defp infer_designated_tables(schema_entries, cfg) when is_list(schema_entries) do
+    default_target_schema = map_get(cfg, :target_schema, "raw")
+
+    schema_entries
+    |> Enum.reduce_while({:ok, []}, fn entry, {:ok, acc} ->
+      case normalize_schema_entry(entry, default_target_schema) do
+        {:ok, nil} -> {:cont, {:ok, acc}}
+        {:ok, designated_table} -> {:cont, {:ok, [designated_table | acc]}}
+        {:error, _reason} = error -> {:halt, error}
+      end
+    end)
+    |> case do
+      {:ok, tables} -> {:ok, Enum.reverse(tables)}
+      {:error, _reason} = error -> error
+    end
+  end
+
+  defp normalize_schema_entry({schema_module, opts}, default_target_schema)
+       when is_atom(schema_module) and is_list(opts) do
+    if truthy?(Keyword.get(opts, :enabled?, true)) do
+      build_designated_table(schema_module, mapify(opts), default_target_schema)
+    else
+      {:ok, nil}
+    end
+  end
+
+  defp normalize_schema_entry(schema_module, default_target_schema) when is_atom(schema_module) do
+    build_designated_table(schema_module, %{}, default_target_schema)
+  end
+
+  defp normalize_schema_entry(other, _default_target_schema),
+    do: {:error, {:invalid_schema_entry, other}}
+
+  defp build_designated_table(schema_module, overrides, default_target_schema)
+       when is_atom(schema_module) and is_map(overrides) do
+    if function_exported?(schema_module, :__schema__, 1) do
+      source_table =
+        map_get(overrides, :source_table, schema_module.__schema__(:source) |> to_string())
+
+      if is_binary(source_table) and source_table != "" do
+        source_schema =
+          map_get(overrides, :source_schema, schema_module.__schema__(:prefix) || "public")
+
+        target_schema = map_get(overrides, :target_schema, default_target_schema)
+        target_table = map_get(overrides, :target_table, source_table)
+        mode = map_get(overrides, :mode, "cdc_changelog") |> to_string()
+
+        primary_keys =
+          map_get(
+            overrides,
+            :primary_keys,
+            schema_module.__schema__(:primary_key) |> List.wrap() |> Enum.map(&to_string/1)
+          )
+          |> List.wrap()
+          |> Enum.map(&to_string/1)
+
+        {:ok,
+         %{
+           source_schema: to_string(source_schema),
+           source_table: to_string(source_table),
+           target_schema: to_string(target_schema),
+           target_table: to_string(target_table),
+           mode: mode,
+           primary_keys: primary_keys
+         }}
+      else
+        {:error, {:invalid_schema_source, schema_module, source_table}}
+      end
+    else
+      {:error, {:invalid_schema_module, schema_module}}
+    end
+  end
+
+  defp repo_config_to_url(repo_cfg) when is_map(repo_cfg) do
+    case map_get(repo_cfg, :url) do
+      url when is_binary(url) and url != "" ->
+        {:ok, normalize_repo_url(url)}
+
+      _ ->
+        build_repo_url(repo_cfg)
+    end
+  end
+
+  defp build_repo_url(repo_cfg) do
+    database = map_get(repo_cfg, :database)
+
+    if is_binary(database) and database != "" do
+      host = map_get(repo_cfg, :hostname, map_get(repo_cfg, :host, "localhost"))
+      port = map_get(repo_cfg, :port, 5432)
+      username = map_get(repo_cfg, :username, map_get(repo_cfg, :user))
+      password = map_get(repo_cfg, :password)
+      ssl? = truthy?(map_get(repo_cfg, :ssl, false))
+
+      query = if ssl?, do: URI.encode_query(%{"sslmode" => "require"}), else: nil
+
+      userinfo =
+        case {username, password} do
+          {user, pass} when is_binary(user) and user != "" and is_binary(pass) and pass != "" ->
+            URI.encode_www_form(user) <> ":" <> URI.encode_www_form(pass)
+
+          {user, _pass} when is_binary(user) and user != "" ->
+            URI.encode_www_form(user)
+
+          _ ->
+            nil
+        end
+
+      {:ok,
+       URI.to_string(%URI{
+         scheme: "postgres",
+         userinfo: userinfo,
+         host: to_string(host),
+         port: port,
+         path: "/" <> database,
+         query: query
+       })}
+    else
+      {:error, {:invalid_repo_config, :missing_database}}
+    end
+  end
+
+  defp normalize_repo_url(url) when is_binary(url) do
+    if String.starts_with?(url, "ecto://") do
+      "postgres://" <> String.trim_leading(url, "ecto://")
+    else
+      url
+    end
+  end
+
+  defp normalize_source_name(name) when is_binary(name) and name != "", do: name
+  defp normalize_source_name(_name), do: "default"
+
+  defp mapify(value) when is_map(value), do: value
+
+  defp mapify(value) when is_list(value) do
+    if Keyword.keyword?(value), do: Map.new(value), else: %{}
+  end
+
+  defp mapify(_value), do: %{}
+
+  defp map_get(map, key, default \\ nil) when is_map(map) do
+    Map.get(map, key, Map.get(map, Atom.to_string(key), default))
+  end
+
+  defp truthy?(value), do: value in [true, 1, "1", "true", true]
 
   @spec service_options(pid(), String.t(), map(), keyword()) ::
           {:ok, keyword()} | {:error, term()}

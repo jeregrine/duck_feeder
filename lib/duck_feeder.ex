@@ -2,7 +2,41 @@ defmodule DuckFeeder do
   @moduledoc """
   DuckFeeder entrypoint.
 
-  Currently exposes storage writes through a semi-generic interface.
+  This module is the public API facade over runtime/bootstrap/storage/writer/reconcile
+  subsystems.
+
+  System flow (CDC path):
+
+      Postgres WAL
+          |
+          v
+      CDC.Connection
+          |
+          v
+      Service -> CDC.Pipeline -> Ingest -> TablePipeline (flush)
+          |                                    |
+          |<----------- {:duck_feeder_batch, ...} -----------|
+          |
+          v
+      BatchProcessor (write -> upload -> metadata commit)
+          |
+          v
+      checkpoint_lsn persisted in Postgres
+          |
+          v
+      Service -> CDC.Connection ack_lsn
+
+  System flow (append path):
+
+      producer rows
+          |
+          v
+      AppendStream -> TablePipeline (flush)
+          |
+          v
+      BatchProcessor (shared write/upload/commit path)
+
+  Use the delegates in this module when integrating DuckFeeder into your OTP app.
   """
 
   defdelegate validate_config(config), to: DuckFeeder.Config, as: :validate

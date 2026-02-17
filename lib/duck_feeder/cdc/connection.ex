@@ -8,6 +8,22 @@ defmodule DuckFeeder.CDC.Connection do
   - convert wire messages into normalized `DuckFeeder.CDC.Event` structs
   - dispatch normalized events to a sink process/function
   - emit standby status updates (acks)
+
+  Ack model (durable-checkpoint driven):
+
+      WAL frame -> decode -> dispatch event to sink (Service)
+                                            |
+                                            v
+                              batch commit persists checkpoint_lsn
+                                            |
+                                            v
+                             {:duck_feeder_ack_lsn, checkpoint_lsn}
+                                            |
+                                            v
+                         apply_ack_lsn + standby_status_update
+
+  The connection does not eagerly acknowledge commit decode; it advances applied
+  LSN from explicit ack feedback to avoid ack-before-durable-commit loss windows.
   """
 
   use Postgrex.ReplicationConnection

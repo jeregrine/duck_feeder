@@ -44,6 +44,7 @@ Detailed historical inventory moved to `docs/current_status_archive.md`.
 - End-to-end architecture is implemented: **Postgres CDC/WAL → Parquet → object storage → DuckLake metadata in Postgres**.
 - Snapshot/WAL handoff hardening is in place with durable pending/complete markers and explicit resume semantics.
 - Core write/upload/commit flow is shared across CDC runtime and append streams.
+- Added app-facing smart-default runtime wrapper (`use DuckFeeder.Runtime`) with repo/schema inference and configurable `metadata_repo` (defaults to `repo`).
 - Provider-backed integration now covers:
   - storage roundtrips,
   - append-stream commit path,

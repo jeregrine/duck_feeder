@@ -1,8 +1,38 @@
 defmodule DuckFeeder.Service do
   @moduledoc """
-  End-to-end service wiring:
+  End-to-end CDC service orchestrator.
 
-  CDC events -> transaction buffer -> ingest router/pipelines -> batch processor.
+  Main data flow:
+
+      {:duck_feeder_cdc_event, event}
+                 |
+                 v
+           CDC.Pipeline
+                 |
+                 v
+              Ingest
+                 |
+                 v
+          TablePipeline(s)
+                 |
+                 v
+      {:duck_feeder_batch, table, batch}
+                 |
+                 v
+         async bounded queue/tasks
+                 |
+                 v
+            BatchProcessor
+                 |
+                 v
+          committed checkpoint_lsn
+                 |
+                 v
+      {:duck_feeder_ack_lsn, checkpoint_lsn} -> CDC.Connection
+
+  The service is intentionally fail-closed for CDC integrity: queue overflow or
+  task crash stops the process so supervision can restart from durable metadata
+  state.
   """
 
   use GenServer
