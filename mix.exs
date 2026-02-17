@@ -22,13 +22,12 @@ defmodule DuckFeeder.MixProject do
     [
       files: [
         "lib",
-        "native/duck_feeder_parquet/.cargo",
         "native/duck_feeder_parquet/src",
         "native/duck_feeder_parquet/Cargo*",
         "checksum-*.exs",
         "mix.exs",
         "README*",
-        "LICENSE*"
+        "LICENSE"
       ],
       licenses: ["Apache-2.0"],
       links: %{
