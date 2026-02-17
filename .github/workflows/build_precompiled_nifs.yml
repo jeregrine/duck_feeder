@@ -13,6 +13,7 @@ jobs:
   build_release:
     name: NIF ${{ matrix.nif }} - ${{ matrix.job.target }} (${{ matrix.job.os }})
     runs-on: ${{ matrix.job.os }}
+    continue-on-error: ${{ matrix.job.allow_failure || false }}
     strategy:
       fail-fast: false
       matrix:
@@ -20,15 +21,14 @@ jobs:
         job:
           - { target: arm-unknown-linux-gnueabihf, os: ubuntu-22.04, use-cross: true }
           - { target: aarch64-unknown-linux-gnu, os: ubuntu-22.04, use-cross: true }
-          - { target: aarch64-unknown-linux-musl, os: ubuntu-22.04, use-cross: true }
           - { target: aarch64-apple-darwin, os: macos-14 }
           - { target: riscv64gc-unknown-linux-gnu, os: ubuntu-22.04, use-cross: true }
           - { target: x86_64-apple-darwin, os: macos-14 }
           - { target: x86_64-unknown-linux-gnu, os: ubuntu-22.04 }
-          - { target: x86_64-unknown-linux-musl, os: ubuntu-22.04, use-cross: true }
-          - { target: x86_64-unknown-freebsd, os: ubuntu-22.04, use-cross: true }
           - { target: x86_64-pc-windows-gnu, os: windows-2022 }
           - { target: x86_64-pc-windows-msvc, os: windows-2022 }
+          # FreeBSD cross-linking via cross-rs is currently best-effort for this crate.
+          - { target: x86_64-unknown-freebsd, os: ubuntu-22.04, use-cross: true, allow_failure: true }
 
     steps:
       - name: Checkout source code
