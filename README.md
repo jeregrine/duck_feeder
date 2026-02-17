@@ -191,11 +191,15 @@ Postgres WAL ──▶ CDC.Connection ──▶ Service ──▶ TablePipeline(
 
 **Key design choices:**
 
-- **Rust NIF for Parquet** — fast columnar encoding without JVM overhead.
+- **Rust NIF for Parquet (precompiled)** — fast columnar encoding without JVM overhead. Most users do not need a local Rust toolchain.
 - **Postgres for DuckLake metadata** — the same database you already run. DuckDB reads this metadata catalog to locate and query the Parquet files.
 - **Bounded backpressure** — configurable inflight/pending batch limits. CDC fails closed on overflow; append streams optionally shed load (`overflow_strategy: :drop_oldest`).
 - **Crash-safe checkpointing** — WAL position is only acknowledged after metadata is durably committed. Restart replays from the last checkpoint.
 - **Schema evolution** — new columns are auto-detected and registered in DuckLake. Rename/drop/type-change directives are supported.
+
+If you need to build the NIF from source (for local development or unsupported targets), set `DUCK_FEEDER_BUILD_NIF=1`.
+
+For maintainers: precompiled releases require publishing NIF artifacts (see `.github/workflows/build_precompiled_nifs.yml`) and including generated `checksum-*.exs` files in the Hex package (`mix rustler_precompiled.download DuckFeeder.Writer.ParquetNif --all --print`).
 
 ---
 

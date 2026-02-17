@@ -58,3 +58,6 @@ config :duck_feeder, :integration,
   source_database_url: "postgres://#{pg_user}@localhost:5432/duckfeeder_source",
   s3_storage: integration_s3_storage,
   gcs_storage: integration_gcs_storage
+
+# Keep local test/dev in this repo deterministic even when release artifacts are unavailable.
+config :rustler_precompiled, :force_build, duck_feeder: true

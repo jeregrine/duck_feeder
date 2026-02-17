@@ -3,9 +3,16 @@ defmodule DuckFeeder.Writer.ParquetNif do
   Parquet writer backed by a Rustler NIF.
   """
 
-  use Rustler,
+  version = Mix.Project.config()[:version]
+
+  use RustlerPrecompiled,
     otp_app: :duck_feeder,
-    crate: "duck_feeder_parquet"
+    crate: "duck_feeder_parquet",
+    base_url: "https://github.com/jeregrine/duck_feeder/releases/download/v#{version}",
+    version: version,
+    force_build:
+      System.get_env("DUCK_FEEDER_BUILD_NIF") in ["1", "true"] or
+        Application.compile_env(:rustler_precompiled, [:force_build, :duck_feeder], false)
 
   @behaviour DuckFeeder.Writer.Adapter
 
