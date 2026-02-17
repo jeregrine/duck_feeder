@@ -1,4 +1,4 @@
-# DuckFeeder 🦆
+# EXPERIMENTAL: DuckFeeder 🦆
 
 [![Hex.pm](https://img.shields.io/hexpm/v/duck_feeder.svg)](https://hex.pm/packages/duck_feeder)
 [![Hex Docs](https://img.shields.io/badge/hex-docs-blue.svg)](https://hexdocs.pm/duck_feeder)
@@ -210,11 +210,11 @@ For maintainers: precompiled releases require publishing NIF artifacts (see `.gi
 
 DuckFeeder infers table configuration from your Ecto schemas:
 
-| Inferred from | Used for |
-|---|---|
-| `__schema__(:source)` | Source table name |
-| `__schema__(:prefix)` | Source schema (default: `"public"`) |
-| `__schema__(:primary_key)` | Primary key columns |
+| Inferred from              | Used for                            |
+| -------------------------- | ----------------------------------- |
+| `__schema__(:source)`      | Source table name                   |
+| `__schema__(:prefix)`      | Source schema (default: `"public"`) |
+| `__schema__(:primary_key)` | Primary key columns                 |
 
 Override anything per-schema:
 
