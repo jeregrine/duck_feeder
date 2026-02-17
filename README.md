@@ -1,5 +1,8 @@
 # DuckFeeder 🦆
 
+[![Hex.pm](https://img.shields.io/hexpm/v/duck_feeder.svg)](https://hex.pm/packages/duck_feeder)
+[![Hex Docs](https://img.shields.io/badge/hex-docs-blue.svg)](https://hexdocs.pm/duck_feeder)
+
 **Stream every change from your Postgres database into a DuckDB-queryable lakehouse — with one Elixir module.**
 
 DuckFeeder connects to Postgres logical replication (WAL/CDC), writes Parquet files to object storage (S3/GCS), and commits metadata to [DuckLake](https://ducklake.select/) — all inside your OTP supervision tree. The result is a continuously-updated analytic copy of your production data that DuckDB can query directly, with no ETL pipelines, no Kafka, and no Spark jobs.

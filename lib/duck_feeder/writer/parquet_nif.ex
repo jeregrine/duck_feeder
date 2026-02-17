@@ -9,6 +9,17 @@ defmodule DuckFeeder.Writer.ParquetNif do
     otp_app: :duck_feeder,
     crate: "duck_feeder_parquet",
     base_url: "https://github.com/jeregrine/duck_feeder/releases/download/v#{version}",
+    targets: [
+      "aarch64-apple-darwin",
+      "aarch64-unknown-linux-gnu",
+      "arm-unknown-linux-gnueabihf",
+      "riscv64gc-unknown-linux-gnu",
+      "x86_64-apple-darwin",
+      "x86_64-pc-windows-gnu",
+      "x86_64-pc-windows-msvc",
+      "x86_64-unknown-freebsd",
+      "x86_64-unknown-linux-gnu"
+    ],
     nif_versions: ["2.17"],
     version: version,
     force_build:
