@@ -52,6 +52,7 @@ Detailed historical inventory moved to `docs/current_status_archive.md`.
   - snapshot-handoff recovery path (pending → explicit resume).
 - Replication/client observability includes lag/disconnect/backpressure telemetry, service+append queue telemetry, append dropped-batch telemetry, and service ack-vs-checkpoint lag telemetry.
 - Overflow policy is explicit: CDC `Service` remains fail-closed; `AppendStream` supports `overflow_strategy: :drop_oldest` for availability-first lossy workloads.
+- Added `DuckFeeder.TelemetryForwarder` helper for safe app telemetry ingestion (DuckFeeder-event summarization/debounce + recursion suppression).
 - Ecto demo integration exists for realistic B2B SaaS write/update/delete flows with ADBC DuckDB parquet verification.
 
 ## Remaining workstreams (condensed)

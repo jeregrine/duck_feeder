@@ -101,6 +101,14 @@ defmodule DuckFeeder do
   defdelegate start_reconciler(opts), to: DuckFeeder.Reconciler.Worker, as: :start_link
   defdelegate run_reconcile_once(server), to: DuckFeeder.Reconciler.Worker, as: :run_once
 
+  defdelegate start_telemetry_forwarder(opts),
+    to: DuckFeeder.TelemetryForwarder,
+    as: :start_link
+
+  defdelegate flush_telemetry_forwarder(server),
+    to: DuckFeeder.TelemetryForwarder,
+    as: :flush_summaries
+
   defdelegate put_file(storage_config, local_path, relative_key, opts \\ []),
     to: DuckFeeder.Storage
 
