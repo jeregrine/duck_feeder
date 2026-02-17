@@ -1,22 +1,11 @@
 # DuckFeeder
 
-Elixir-first CDC ingest library (Postgres WAL -> Parquet -> object storage -> DuckLake metadata).
+Elixir-first Postgres CDC -> Parquet -> object storage -> DuckLake metadata.
 
-## Project goal
+## What this is
 
-Production-focused Elixir runtime that:
-- runs inside your OTP supervision tree,
-- streams Postgres CDC/WAL,
-- batches writes to Parquet,
-- uploads to object storage,
-- and commits metadata into a DuckLake-compatible Postgres catalog.
-
-Current implementation keeps HTTP/storage interactions Req-only and keeps Elixir/Rust dependencies minimal.
-`DuckFeeder.Config` validates runtime config (source/storage/metadata/ingest) with NimbleOptions.
-
-## System topology (quick ASCII)
-
-CDC runtime path:
+DuckFeeder runs in your OTP supervision tree and keeps an append-only analytic trail
+of Postgres table changes.
 
 ```text
 Postgres WAL
@@ -44,26 +33,35 @@ DuckFeeder.Service
    Service -> {:duck_feeder_ack_lsn, checkpoint_lsn} -> CDC.Connection
 ```
 
-Append stream path:
+Append stream path (non-CDC app events):
 
 ```text
-producer rows
-   |
-   v
-DuckFeeder.AppendStream -> TablePipeline(s) -> BatchProcessor
+producer rows -> DuckFeeder.AppendStream -> TablePipeline(s) -> BatchProcessor
 ```
 
-## Phoenix/Ecto smart-defaults runtime (repo + schemas)
+---
 
-For typical CRUD SaaS apps, you can use a lightweight module wrapper and let
-DuckFeeder infer source tables/PKs from Ecto schema modules.
+## Phoenix/Ecto quick start (smart defaults)
+
+### 1) Add DuckFeeder metadata migrations
+
+```elixir
+defmodule AcmeApp.Repo.Migrations.AddDuckFeeder do
+  use Ecto.Migration
+
+  def up, do: DuckFeeder.Migrations.up(repo: repo())
+  def down, do: DuckFeeder.Migrations.down(repo: repo())
+end
+```
+
+### 2) Configure DuckFeeder from Repo + Schemas
 
 ```elixir
 # config/runtime.exs
 config :acme_app, AcmeApp.DuckFeeder,
   enabled: System.get_env("DUCK_FEEDER_ENABLED") == "true",
   repo: AcmeApp.Repo,
-  # optional, defaults to :repo
+  # optional; defaults to :repo
   metadata_repo: AcmeApp.Repo,
   schemas: [
     AcmeApp.Tenants,
@@ -82,15 +80,23 @@ config :acme_app, AcmeApp.DuckFeeder,
   ]
 ```
 
+Schema inference defaults:
+- source table/schema from `__schema__(:source)` and `__schema__(:prefix)`
+- primary keys from `__schema__(:primary_key)`
+- target schema defaults to `"raw"`
+- entry format can be `MySchema` or `{MySchema, opts}`
+
+### 3) Add a runtime module
+
 ```elixir
-# lib/acme_app/duck_feeder.ex
 defmodule AcmeApp.DuckFeeder do
   use DuckFeeder.Runtime, otp_app: :acme_app
 end
 ```
 
+### 4) Supervise it
+
 ```elixir
-# lib/acme_app/application.ex
 children = [
   AcmeApp.Repo,
   AcmeAppWeb.Endpoint,
@@ -98,518 +104,104 @@ children = [
 ]
 ```
 
-Notes:
-- `metadata_repo` defaults to `repo`.
-- DuckFeeder derives DB connection URLs from repo config (`Repo.config/0`) unless overridden via
-  `source_postgres_url` / `metadata_postgres_url`.
-- `schemas` entries may be `MySchema` or `{MySchema, opts}` where opts can override
-  `source_schema`, `source_table`, `target_schema`, `target_table`, `mode`, `primary_keys`, `enabled?`.
+That is enough for normal CRUD apps.
 
-## Metadata bootstrap from config
+---
 
-You can seed `duckfeeder_meta` source + designated table rows from runtime config.
-When seeding sources, connection info persisted in metadata is sanitized: password/secret/token
-keys are dropped and URL fields are stored in redacted form (userinfo password removed).
+## Is metadata bootstrap required?
 
-Runtime credentials must still be supplied at stream startup time (for example via
-`start_opts[:connection_opts]`, `connection_overrides`, or environment-backed secret resolution
-in your app); do not rely on persisted metadata rows to store DB passwords.
+In smart-default mode (`use DuckFeeder.Runtime`), bootstrap/seeding is handled automatically at startup.
 
-Example:
+Manual `DuckFeeder.seed_meta/3` is an advanced/manual flow (custom orchestration, scripts, tests), not a required step for normal Phoenix setup.
 
-```elixir
-{:ok, validated} = DuckFeeder.validate_config(runtime_config)
-{:ok, %{source_id: _id, designated_table_ids: _ids}} =
-  DuckFeeder.seed_meta(meta_conn, validated, source_name: "primary")
+---
 
-# Optional: select exactly which tables to sync from Elixir opts
-# - "users" keeps default users->users mapping
-# - {"orders_iceberg", "orders"} remaps source orders -> target orders_iceberg
-{:ok, _} =
-  DuckFeeder.seed_meta(meta_conn, validated,
-    source_name: "primary",
-    tables: [
-      "users",
-      {"orders_iceberg", "orders"}
-    ]
-  )
+## Append stream for app events (telemetry/logs/errors)
 
-# Convenience: seed metadata and immediately start stream runtime
-{:ok, %{runtime: %{service_pid: _service, cdc_pid: _cdc}}} =
-  DuckFeeder.seed_and_start_stream(meta_conn, validated,
-    seed_opts: [source_name: "primary"],
-    start_opts: [bootstrap_replication?: false]
-  )
-```
-
-## Ecto migration integration
-
-DuckFeeder provides migration helpers intended to be wrapped by your Ecto migrations:
-
-```elixir
-defmodule MyApp.Repo.Migrations.AddDuckFeeder do
-  use Ecto.Migration
-
-  def up, do: DuckFeeder.Migrations.up(repo: repo())
-  def down, do: DuckFeeder.Migrations.down(repo: repo())
-end
-```
-
-You can also check the applied DuckFeeder migration version:
-
-```elixir
-DuckFeeder.Migrations.migrated_version(repo: MyApp.Repo)
-```
-
-## Writer API
-
-`DuckFeeder.Writer` supports both JSONL and Parquet output.
-`DuckFeeder.Writer.ParquetNif` now writes Parquet via a Rustler NIF.
-
-You can select by format (`:jsonl | :parquet`) or explicit adapter module.
-Optional fallback is supported (e.g. `format: :parquet, fallback_format: :jsonl`).
-For parquet, `datetime_encoding: :unix_microseconds` is available to keep timestamp
-normalization in Elixir and avoid extra Rust parsing dependencies.
-Parquet NIF input now passes normalized Elixir terms directly to Rust (no JSON bridge).
-
-Writer temp-file cleanup is best-effort and configurable via `writer.adapter_opts`:
-- `reap_stale_tmp_files?` (default `true`)
-- `tmp_file_reap_interval_ms` (default `60_000`)
-- `tmp_file_stale_after_seconds` (default `86_400`)
-- `tmp_file_reap_max_files` (default `500`)
-- `tmp_file_prefix` (default `"duck_feeder_"`)
-
-```elixir
-{:ok, write_result} = DuckFeeder.write_batch(%{}, %{rows: [%{"id" => 1}]})
-:ok = DuckFeeder.cleanup_written_batch(%{}, write_result)
-```
-
-## Batch processing API
-
-`DuckFeeder.BatchProcessor` connects flushed batches to write/upload/meta commit steps.
-It supports pluggable committers via `DuckFeeder.DuckLake.Committer` (default no-op committer).
-`DuckFeeder.DuckLake.Committer.Postgres` is available as a transactional scaffold for
-running DuckLake SQL statements + checkpoint commit in one transaction.
-By default it writes spec-aligned rows into DuckLake metadata tables, including
-`ducklake_snapshot`, `ducklake_table`, `ducklake_column`, `ducklake_column_mapping`,
-`ducklake_name_mapping`, `ducklake_data_file`, `ducklake_table_stats`,
-`ducklake_snapshot_changes`, and `ducklake_schema_versions`, plus DuckFeeder control-plane
-history/audit rows in `duckfeeder_meta.schema_history` and `duckfeeder_meta.ducklake_commits`.
-It also supports optional delete-file/compaction transitions via `committer_opts`:
-`:delete_files`, `:delete_files_fun`, `:replace_data_file_ids`, and
-`:validate_delete_files?` (for storage `head_object` verification).
-Replacement flows also mark retired files in
-`ducklake_files_scheduled_for_deletion`, and snapshot summaries include
-`created_table`/`altered_table` conflict hints.
-Optional `:schema_changes` directives are supported for metadata evolution
-(`rename_table`, `rename_column`, `drop_column`, `alter_column_type`), plus
-nested-field style aliases with dotted paths (`rename_field`, `drop_field`, `alter_field_type`).
-Optional partition metadata directives are also supported via
-`:partition_by` and `:partition_values`.
-(override via `committer_opts[:ducklake_sql]`).
-Runtime/service startup accepts `committer_module` and `committer_opts` passthrough.
-
-```elixir
-{:ok, result} = DuckFeeder.process_batch(context, {"raw", "users"}, batch)
-```
-
-## Append event stream pipeline (non-CDC producers)
-
-`DuckFeeder.AppendStream` reuses the same batching/writer/upload/commit flow for
-non-CDC event producers (e.g. `:telemetry`, logs, error streams), keyed by target
-table name.
+Use append stream when you want to write app events that are not row-level CDC.
 
 ```elixir
 {:ok, stream} =
   DuckFeeder.start_append_stream(
-    designated_tables: [%{id: 1, target_schema: "raw", target_table: "events"}],
+    designated_tables: [%{id: 1, target_schema: "raw", target_table: "app_events"}],
     meta_conn: meta_conn,
     storage: storage_config,
     writer: %{format: :parquet},
     pipeline_opts: %{max_rows: 5_000, max_bytes: 64 * 1_024 * 1_024, flush_interval_ms: 2_000}
   )
 
-:ok = DuckFeeder.append_event(stream, "events", %{"kind" => "telemetry", "value" => 1})
-{:ok, _batch} = DuckFeeder.flush_append_table(stream, "events")
+:ok =
+  DuckFeeder.append_event(stream, "app_events", %{
+    "type" => "telemetry",
+    "name" => "user_login",
+    "tenant_id" => tenant_id,
+    "at" => DateTime.utc_now()
+  })
 ```
 
-Append stream batch processing is async + bounded (same model as `DuckFeeder.Service`):
+Queue controls:
 - `max_inflight_batches` (default `1`)
 - `max_pending_batches` (default `1000`)
-- `overflow_strategy: :fail | :drop_oldest` (default `:fail`; use `:drop_oldest` only for lossy append streams)
+- `overflow_strategy: :fail | :drop_oldest` (default `:fail`)
 
-## Runtime service wiring
+Use `:drop_oldest` only for availability-first/loss-tolerant streams.
 
-`DuckFeeder.Runtime` builds and starts `DuckFeeder.Service` using metadata rows.
+---
+
+## Avoid recursive telemetry ingestion
+
+If you forward Telemetry events into DuckFeeder append stream, do **not** forward DuckFeeder's
+own telemetry events back into the same stream.
 
 ```elixir
-{:ok, service_opts} = DuckFeeder.service_options(meta_conn, "source-a", storage_config)
-{:ok, service_pid} = DuckFeeder.start_service(meta_conn, "source-a", storage_config)
-
-# Start both service + replication stream client
-# (publication/slot bootstrap is enabled by default)
-{:ok, %{service_pid: _service, cdc_pid: _cdc}} =
-  DuckFeeder.start_stream(meta_conn, "source-a", storage_config)
-
-# Managed worker variant (monitors service + cdc pids)
-{:ok, worker} =
-  DuckFeeder.start_stream_worker(
-    meta_conn: meta_conn,
-    source_name: "source-a",
-    storage_config: storage_config
-  )
-
-{:ok, _info} = DuckFeeder.stream_worker_info(worker)
-
-# Optional higher-level supervisor wrapper
-{:ok, runtime_sup} =
-  DuckFeeder.start_runtime_supervisor(
-    meta_conn: meta_conn,
-    source_name: "source-a",
-    storage_config: storage_config,
-    start_reconciler?: true
-  )
-
-# Dynamic multi-source manager
-{:ok, mgr} =
-  DuckFeeder.start_runtime_manager(
-    meta_conn: meta_conn,
-    storage_config: storage_config
-  )
-
-{:ok, _pid} = DuckFeeder.start_source_runtime(mgr, "source-a")
-%{"source-a" => _pid} = DuckFeeder.list_source_runtimes(mgr)
-:ok = DuckFeeder.stop_source_runtime(mgr, "source-a")
+:telemetry.attach_many(
+  "acme-app-events",
+  [
+    [:phoenix, :endpoint, :stop],
+    [:ecto, :repo, :query]
+  ],
+  fn event, measurements, metadata, %{stream: stream} ->
+    # guard against recursive/self-ingest
+    unless match?([:duck_feeder | _], event) do
+      DuckFeeder.append_event(stream, "app_events", %{
+        "type" => "telemetry",
+        "event" => Enum.join(Enum.map(event, &to_string/1), "."),
+        "measurements" => measurements,
+        "metadata" => metadata,
+        "at" => DateTime.utc_now()
+      })
+    end
+  end,
+  %{stream: stream}
+)
 ```
 
-Optional snapshot-before-stream mode is available via:
-- `snapshot_before_stream?: true`
-- `snapshot_row_handler: fn designated_table, row -> ... end`
-- `snapshot_on_restart?: true | false` (default `false`; cold-start snapshot by default)
-- `resume_incomplete_snapshot?: true | false` (default `false`; fail closed when durable handoff marker is pending)
-- `snapshot_handoff_mark_retries: non_neg_integer()` (default `2`)
-- `snapshot_handoff_mark_retry_delay_ms: non_neg_integer()` (default `0`)
+---
 
-If no explicit `snapshot_row_handler` is provided, snapshot rows are replayed into the
-service ingest path by default (`snapshot_ingest?: true`). Set `snapshot_ingest?: false`
-to require an explicit row handler.
+## Migration ordering contract (important)
 
-Snapshot replay uses boundary-based synthetic LSN allocation so checkpoint advancement
-tracks the snapshot/WAL handoff boundary more closely.
-
-When snapshot replay is active, runtime persists a durable handoff marker
-(`duckfeeder_meta.snapshot_handoffs`) and only marks it complete after CDC start succeeds.
-If startup is interrupted mid-handoff, next start fails closed unless
-`resume_incomplete_snapshot?: true` is provided.
-When resuming, if checkpoint LSN is already at/after the handoff boundary,
-runtime can finalize the pending handoff without rerunning snapshot rows.
-If checkpoint progress falls within the synthetic snapshot LSN window, runtime skips
-already-replayed snapshot rows and continues from the remaining suffix.
-
-### Migration ordering contract (important)
-
-For schema-evolution semantics (`schema_changes`, snapshot conflict markers, and WAL handoff),
-start DuckFeeder replication/runtime **before** running source DB migrations.
+If you rely on schema-change semantics (`committer_opts[:schema_changes]`), start DuckFeeder first,
+then run source DB migrations.
 
 Recommended rollout order:
-1. Start DuckFeeder (`start_stream/4` / runtime supervisor/manager) and confirm replication is live.
-2. Apply DB migrations.
-3. Ensure matching `committer_opts[:schema_changes]` directives are emitted during the same rollout window.
+1. Deploy app with DuckFeeder runtime enabled (`AcmeApp.DuckFeeder` supervised).
+2. Confirm replication is live (or start explicitly via `DuckFeeder.start_stream/4` in advanced setups).
+3. Run Ecto migrations.
+4. Emit matching `schema_changes` directives in the same rollout window.
 
-This avoids losing schema-intent context around rename/drop/type-change operations that may not be
-recoverable from row-shape inference alone after the fact.
+---
 
-Replication connection tuning options include:
-- `auto_reconnect: true | false`
-- `reconnect_backoff: milliseconds` (defaults to `1000` when unset)
-- `reconnect_backoff_min_ms` / `reconnect_backoff_max_ms` / `reconnect_backoff_jitter_ms`
-- `max_lag_bytes: non_neg_integer()` (disconnect guard for unacked lag growth)
-- `backpressure_lag_bytes: non_neg_integer()` (enter/clear backpressure telemetry threshold)
-- `event_sink_mode: :pid | :call` (default `:pid`)
+## Advanced/low-level APIs
 
-`max_lag_bytes` and `backpressure_lag_bytes` should be treated as production guardrails.
-Because replication ack now advances only after durable batch checkpoint commits,
-unbounded downstream slowdown can otherwise retain WAL indefinitely on the source.
+Most apps should stay with the smart-default runtime wrapper above.
 
-Runtime now advances replication ack based on durable checkpoint progress
-(batch commit result -> service ack message -> `CDC.Connection`) instead of commit-decode time.
-
-Batch processing safety options on `start_stream/4` / `start_service/4`:
-- `max_inflight_batches` (default `1`)
-- `max_pending_batches` (default `1000`, service fails closed on overflow)
-- `poison_row_mode: :fail | :drop` (default `:fail`)
-- `poison_row_sink: pid | (map -> term) | {module, function, args}` (receives `:duck_feeder_poison_row` payloads when `:drop` is enabled)
-
-For `DuckFeeder.AppendStream`, you can optionally set `overflow_strategy: :drop_oldest`
-for availability-first workloads where bounded data loss is acceptable.
-
-## Replication connection API
-
-`DuckFeeder.CDC.Connection` provides a live `Postgrex.ReplicationConnection` client
-that decodes pgoutput and emits normalized `DuckFeeder.CDC.Event` values to an `event_sink`.
-
-## Reconciliation
-
-`DuckFeeder.Reconciler` provides stale-batch reconciliation helpers.
-It retries stale `uploaded` batches via `commit_uploaded_batch/2` and now also
-retries stale `encoded` batches by moving them back to `pending`.
-
-`DuckFeeder.Reconciler.Worker` runs reconciliation on an interval.
-`DuckFeeder.reconcile/2` supports:
-- `cleanup_failed_uploads?: true` to delete known failed batch files and transition
-  failed batches back to `pending`
-- `require_failed_batch_files?: true` to error when a failed batch has no recorded files
-  during cleanup (orphan-safety guard)
-- `verify_uploaded_objects?: true` to HEAD-check uploaded files before committing stale
-  uploaded batches
-- `max_batches: positive_integer()` to cap per-run work
-- `stop_on_error?: true` to halt run after first reconciliation error
-
-```elixir
-{:ok, worker} = DuckFeeder.start_reconciler(context: %{meta_conn: meta_conn})
-{:ok, summary} = DuckFeeder.run_reconcile_once(worker)
-```
-
-## Storage API
-
-```elixir
-{:ok, config} = DuckFeeder.validate_config(runtime_config)
-storage_config = DuckFeeder.Config.storage_config(config)
-
-DuckFeeder.put_file(storage_config, "/tmp/batch.parquet", "events/table=users/part-0001.parquet")
-DuckFeeder.head_object(storage_config, "events/table=users/part-0001.parquet")
-DuckFeeder.delete_object(storage_config, "events/table=users/part-0001.parquet")
-```
-
-## S3 config example
-
-The S3 adapter uses direct HTTP calls with Req + AWS SigV4.
-It supports single PUT and multipart upload modes.
-Default network resiliency policy includes bounded retries/backoff for transient
-HTTP/network failures plus explicit request/connect timeout defaults.
-
-```elixir
-%{
-  provider: :s3,
-  bucket: "ducklake-data",
-  prefix: "prod",
-  region: "us-east-1",
-  access_key_id: System.fetch_env!("AWS_ACCESS_KEY_ID"),
-  secret_access_key: System.fetch_env!("AWS_SECRET_ACCESS_KEY"),
-  session_token: System.get_env("AWS_SESSION_TOKEN"),
-  endpoint: System.get_env("S3_ENDPOINT"), # optional for S3-compatible/localstack
-  force_path_style: true,                   # common for S3-compatible services
-  adapter_opts: %{
-    multipart_threshold: 64 * 1_024 * 1_024,
-    part_size: 8 * 1_024 * 1_024,
-    chunk_size: 8 * 1_024 * 1_024,
-    timeout_ms: 30_000,
-    retry_max_attempts: 3,
-    retry_base_delay_ms: 100,
-    retry_max_delay_ms: 2_000,
-    retry_jitter_ms: 50
-  }
-}
-```
-
-## GCS config example
-
-The GCS adapter uses streamed upload bodies, retry/backoff, and explicit timeout defaults.
-
-```elixir
-%{
-  provider: :gcs,
-  bucket: "ducklake-data",
-  prefix: "prod",
-  token: System.fetch_env!("GCS_OAUTH_TOKEN"),
-  adapter_opts: %{
-    chunk_size: 1_024 * 1_024,
-    timeout_ms: 30_000,
-    retry_max_attempts: 3
-  }
-}
-```
-
-You can also provide `token_fun: fn -> token end` for rotating tokens.
-
-## CDC buffering + routing foundations
-
-Added normalized CDC event and routing modules:
-- `DuckFeeder.CDC.Event`
-- `DuckFeeder.CDC.TransactionBuffer`
-- `DuckFeeder.CDC.Router`
-- `DuckFeeder.CDC.ChangelogRow`
-- `DuckFeeder.CDC.Setup`
-- `DuckFeeder.CDC.Bootstrap`
-- `DuckFeeder.CDC.ReplicationProtocol`
-- `DuckFeeder.CDC.LogicalReplication.Messages`
-- `DuckFeeder.CDC.LogicalReplication.Decoder`
-- `DuckFeeder.CDC.LogicalReplication.Converter`
-- `DuckFeeder.CDC.MessageMapper`
-- `DuckFeeder.CDC.SnapshotBoundary`
-- `DuckFeeder.CDC.InitialSnapshot`
-- `DuckFeeder.CDC.InitialSnapshot.Runner`
+For advanced flows, see module docs for:
+- `DuckFeeder.Runtime` / `DuckFeeder.Runtime.Supervisor` / `DuckFeeder.Runtime.StreamWorker`
 - `DuckFeeder.CDC.Connection`
-- `DuckFeeder.CDC.Pipeline`
-- `DuckFeeder.Service`
+- `DuckFeeder.BatchProcessor`
+- `DuckFeeder.Reconciler`
+- `DuckFeeder.Storage`
+- `DuckFeeder.Writer`
 
-`TransactionBuffer` emits committed transactions only at commit boundaries.
-`Router` maps committed changes to designated target tables.
-
-Added batching/pipeline foundations:
-- `DuckFeeder.Ingest.BatchBuffer`
-- `DuckFeeder.TablePipeline`
-- `DuckFeeder.Ingest`
-
-## Meta schema + checkpoint/batch state machine
-
-Added `duckfeeder_meta` bootstrap SQL:
-- `priv/duckfeeder_meta/create_tables.sql`
-
-Added Postgres-backed control-plane modules:
-- `DuckFeeder.Meta.SQL`
-- `DuckFeeder.Meta.Store`
-- `DuckFeeder.Meta.BatchState`
-- `DuckFeeder.Meta`
-
-Typical bootstrap/use flow:
-
-```elixir
-{:ok, conn} = Postgrex.start_link(...)
-:ok = DuckFeeder.Meta.bootstrap(conn)
-
-{:ok, source_id} = DuckFeeder.Meta.register_source(conn, %{name: "primary"})
-
-{:ok, designated_table_id} =
-  DuckFeeder.Meta.register_designated_table(conn, %{
-    source_id: source_id,
-    source_schema: "public",
-    source_table: "users",
-    target_schema: "raw",
-    target_table: "users"
-  })
-
-{:ok, "0/0"} = DuckFeeder.Meta.fetch_checkpoint(conn, designated_table_id)
-
-# after files are uploaded and batch state is :uploaded
-{:ok, %{checkpoint_lsn: _lsn, committed?: true}} =
-  DuckFeeder.Meta.commit_uploaded_batch(conn, batch_id)
-```
-
-## Integration testing
-
-Requirements:
-- local Postgres instances available for:
-  - metadata DB (`meta_database_url`)
-  - source DB with logical replication enabled (`source_database_url`)
-- source DB must support logical replication (`wal_level=logical`, replication slot/publication privileges)
-- `duckdb` CLI on PATH
-- integration DB URLs configured in `config/test.exs` under `:duck_feeder, :integration`
-
-Example `config/test.exs`:
-
-```elixir
-config :duck_feeder, :integration,
-  meta_database_url: "postgres://postgres:postgres@localhost:5432/duck_feeder_meta_test",
-  source_database_url: "postgres://postgres:postgres@localhost:5432/duck_feeder_source_test",
-  s3_storage: nil,
-  gcs_storage: nil
-```
-
-Ecto-based demo integration (typical B2B SaaS schemas/writes) is available under
-`test/duck_feeder/ecto_integration`, tagged `:ecto_integration`, and excluded by default.
-Run it with:
-
-```bash
-mix test --only ecto_integration
-```
-
-It uses ADBC with DuckDB (no Elixir DuckDB client package), and exercises insert/update/delete
-through Ecto schemas before verifying produced parquet files through ADBC queries.
-
-Optional provider-backed integration tests are tagged `:provider_integration`
-and excluded by default. They currently cover:
-- direct storage adapter roundtrips (put/head/delete)
-- append-stream end-to-end write/upload/commit path against provider storage
-- runtime CDC end-to-end path (wal->parquet->provider object->DuckLake metadata commit)
-- runtime recovery path (snapshot handoff pending -> explicit resume -> WAL continuation)
-
-Run them with:
-
-```bash
-mix test --only provider_integration
-```
-
-They can be enabled via env vars read by `config/test.exs`:
-
-- S3-compatible:
-  - `DUCK_FEEDER_ITEST_S3_BUCKET`
-  - `DUCK_FEEDER_ITEST_S3_ENDPOINT`
-  - `DUCK_FEEDER_ITEST_S3_ACCESS_KEY_ID`
-  - `DUCK_FEEDER_ITEST_S3_SECRET_ACCESS_KEY`
-  - optional: `DUCK_FEEDER_ITEST_S3_REGION`, `DUCK_FEEDER_ITEST_S3_FORCE_PATH_STYLE`
-- GCS (JSON API / emulator-compatible base URL):
-  - `DUCK_FEEDER_ITEST_GCS_BUCKET`
-  - `DUCK_FEEDER_ITEST_GCS_TOKEN`
-  - optional: `DUCK_FEEDER_ITEST_GCS_BASE_URL`
-
-Helper script:
-- `scripts/test_integration.sh`
-
-Run:
-
-```bash
-scripts/test_integration.sh
-```
-
-## Performance benchmarking (Benchee)
-
-Run synthetic benchmarks for ingest-path throughput/latency:
-
-```bash
-mix deps.get
-mix run bench/cdc_single_writer.exs
-mix run bench/append_stream_multi_writer.exs
-```
-
-Quick smoke mode:
-
-```bash
-DUCK_FEEDER_BENCH_QUICK=1 mix run bench/cdc_single_writer.exs
-DUCK_FEEDER_BENCH_QUICK=1 mix run bench/append_stream_multi_writer.exs
-```
-
-Notes:
-- These benchmarks use in-memory fake meta/storage/writer components to stress pipeline mechanics.
-- They are intended for regression tracking and relative tuning, not absolute production sizing.
-
-## Telemetry
-
-Core events currently emitted:
-- `[:duck_feeder, :cdc, :event]`
-- `[:duck_feeder, :cdc, :connection]`
-- `[:duck_feeder, :cdc, :frame]`
-- `[:duck_feeder, :cdc, :lag]`
-- `[:duck_feeder, :cdc, :backpressure]`
-- `[:duck_feeder, :batch, :flushed]`
-- `[:duck_feeder, :batch, :processed]`
-- `[:duck_feeder, :batch, :poison_row]`
-- `[:duck_feeder, :service, :batch_queue]`
-- `[:duck_feeder, :append_stream, :batch_queue]`
-- `[:duck_feeder, :append_stream, :batch_dropped]`
-- `[:duck_feeder, :service, :ack_checkpoint_lag]`
-- `[:duck_feeder, :reconciler, :run]`
-
-## Progress tracking
-
-See `docs/current_status.md` for the canonical status/task list and Apache-2.0 compliance notes.
-
-Convenience helpers:
-- `DuckFeeder.runtime_child_spec/4`
-- `DuckFeeder.runtime_child_spec_from_config/3`
-
-## Notes
-
-- Object keys are built from `prefix + relative_key`.
-- Adapter override is supported via `adapter: MyAdapter` for tests/custom providers.
-- Batch states: `pending -> encoded -> uploaded -> committed` (with `failed` + retry path to `pending`).
+And status/roadmap:
+- `docs/current_status.md`
