@@ -9,6 +9,11 @@ defmodule DuckFeeder.Writer.ParquetNif do
     otp_app: :duck_feeder,
     crate: "duck_feeder_parquet",
     base_url: "https://github.com/jeregrine/duck_feeder/releases/download/v#{version}",
+    targets:
+      Enum.uniq([
+        "x86_64-unknown-freebsd" | RustlerPrecompiled.Config.default_targets()
+      ]),
+    nif_versions: ["2.17"],
     version: version,
     force_build:
       System.get_env("DUCK_FEEDER_BUILD_NIF") in ["1", "true"] or
