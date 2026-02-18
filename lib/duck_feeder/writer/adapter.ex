@@ -2,7 +2,9 @@ defmodule DuckFeeder.Writer.Adapter do
   @moduledoc """
   Write-path adapter behaviour.
 
-  Intended to be implemented by a future Rust-backed Parquet writer adapter.
+  Implementations:
+  - `DuckFeeder.Writer.ParquetNif` — precompiled Rust NIF (default)
+  - `DuckFeeder.Writer.Jsonl` — JSON Lines fallback
   """
 
   @type config :: map()

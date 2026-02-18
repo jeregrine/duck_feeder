@@ -1,9 +1,10 @@
 defmodule DuckFeeder.DuckLake.Committer.Postgres do
   @moduledoc """
-  Transactional DuckLake committer scaffold for Postgres-backed metadata.
+  Transactional DuckLake committer for Postgres-backed metadata.
 
   Executes DuckLake SQL statements and `commit_uploaded_batch_tx/2` inside the
-  same transaction.
+  same transaction to ensure atomicity between DuckLake catalog updates and
+  checkpoint advancement.
   """
 
   @behaviour DuckFeeder.DuckLake.Committer

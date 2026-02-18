@@ -1,6 +1,8 @@
 defmodule DuckFeeder.DuckLake.Committer.Noop do
   @moduledoc """
-  Temporary committer implementation that only advances batch checkpoint state.
+  Checkpoint-only committer that advances batch state without writing DuckLake metadata.
+
+  Delegates to `DuckFeeder.Meta.commit_uploaded_batch/2`.
   """
 
   @behaviour DuckFeeder.DuckLake.Committer

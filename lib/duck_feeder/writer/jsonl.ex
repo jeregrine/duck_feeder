@@ -1,8 +1,9 @@
 defmodule DuckFeeder.Writer.Jsonl do
   @moduledoc """
-  Temporary write adapter used until Parquet writer integration lands.
+  JSON Lines write adapter.
 
-  Writes rows as JSON Lines to local disk.
+  Writes rows as newline-delimited JSON to local disk. Useful as a fallback
+  writer or for debugging when Parquet is not needed.
   """
 
   @behaviour DuckFeeder.Writer.Adapter
