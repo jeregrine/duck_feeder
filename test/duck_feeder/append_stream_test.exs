@@ -124,6 +124,22 @@ defmodule DuckFeeder.AppendStreamTest do
              AppendStream.append(stream, "missing", %{"kind" => "log"})
   end
 
+  test "returns error for invalid explicit lsn without crashing stream" do
+    {:ok, stream} =
+      AppendStream.start_link(
+        designated_tables: [%{id: 1, target_schema: "raw", target_table: "events"}],
+        meta_module: FakeMeta,
+        meta_conn: :fake_conn,
+        writer: %{adapter: FakeWriter},
+        storage: %{provider: :s3, bucket: "bucket", adapter: FakeStorage}
+      )
+
+    assert {:error, {:invalid_lsn, {:invalid_lsn, "bad"}}} =
+             AppendStream.append(stream, "events", %{"kind" => "log"}, lsn: "bad")
+
+    assert Process.alive?(stream)
+  end
+
   test "supports explicit flush for append stream table" do
     {:ok, stream} =
       AppendStream.start_link(

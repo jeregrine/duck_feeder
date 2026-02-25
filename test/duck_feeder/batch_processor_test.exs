@@ -226,6 +226,26 @@ defmodule DuckFeeder.BatchProcessorTest do
     refute_received {:meta_commit_uploaded_batch, "batch-test"}
   end
 
+  test "returns error for invalid committer opts shape" do
+    context = %{
+      meta_module: FakeMeta,
+      meta_conn: :fake_conn,
+      designated_table_by_target: %{{"raw", "users"} => 7},
+      writer: %{adapter: FakeWriter},
+      storage: %{provider: :s3, bucket: "bucket", adapter: FakeStorage},
+      committer_module: FakeCommitter,
+      committer_opts: %{ducklake_sql: ["SELECT 1"]},
+      object_prefix: "cdc"
+    }
+
+    batch = %{rows: [%{"id" => 1}], lsn_start: "0/10", lsn_end: "0/11", row_count: 1}
+
+    assert {:error, {:invalid_committer_opts, %{ducklake_sql: ["SELECT 1"]}}} =
+             BatchProcessor.process_batch(context, {"raw", "users"}, batch)
+
+    assert_received {:meta_transition_batch, "batch-test", :failed, _opts}
+  end
+
   test "materializes and uploads delete files from rows before commit" do
     context = %{
       meta_module: FakeMeta,

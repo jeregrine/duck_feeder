@@ -3,6 +3,16 @@ defmodule DuckFeeder.WriterTest do
 
   alias DuckFeeder.Writer
 
+  defmodule NotImplementedParquetAdapter do
+    @behaviour DuckFeeder.Writer.Adapter
+
+    @impl true
+    def write_batch(_config, _batch, _opts), do: {:error, :parquet_nif_not_implemented}
+
+    @impl true
+    def cleanup(_config, _result), do: :ok
+  end
+
   test "writes parquet batch by default and cleans up file" do
     batch = %{rows: [%{"id" => 1}, %{"id" => 2}]}
 
@@ -38,6 +48,18 @@ defmodule DuckFeeder.WriterTest do
 
   test "supports explicit jsonl format" do
     assert {:ok, result} = Writer.write_batch(%{format: :jsonl}, %{rows: [%{"id" => 1}]})
+    assert result.format == :jsonl
+    assert result.adapter == DuckFeeder.Writer.Jsonl
+    assert :ok = Writer.cleanup(%{format: :jsonl}, result)
+  end
+
+  test "falls back to configured writer when parquet adapter is unavailable" do
+    assert {:ok, result} =
+             Writer.write_batch(
+               %{adapter: NotImplementedParquetAdapter, fallback_format: :jsonl},
+               %{rows: [%{"id" => 1}]}
+             )
+
     assert result.format == :jsonl
     assert result.adapter == DuckFeeder.Writer.Jsonl
     assert :ok = Writer.cleanup(%{format: :jsonl}, result)

@@ -135,9 +135,9 @@ defmodule DuckFeeder.BatchProcessor do
 
   defp finalize_written_batch(context, meta, conn, table, batch, batch_id, write_result) do
     committer_module = Map.get(context, :committer_module, NoopCommitter)
-    committer_opts = Map.get(context, :committer_opts, [])
 
-    with {:ok, object_key} <- object_key(context, table, batch, batch_id, write_result.format),
+    with {:ok, committer_opts} <- normalize_committer_opts(Map.get(context, :committer_opts, [])),
+         {:ok, object_key} <- object_key(context, table, batch, batch_id, write_result.format),
          {:ok, upload_result} <-
            Storage.put_file(context.storage, write_result.local_path, object_key),
          {:ok, _id} <-
@@ -187,6 +187,10 @@ defmodule DuckFeeder.BatchProcessor do
        }}
     end
   end
+
+  defp normalize_committer_opts(opts) when is_list(opts), do: {:ok, opts}
+  defp normalize_committer_opts(nil), do: {:ok, []}
+  defp normalize_committer_opts(other), do: {:error, {:invalid_committer_opts, other}}
 
   defp prepare_delete_file_opts(
          context,

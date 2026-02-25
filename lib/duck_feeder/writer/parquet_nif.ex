@@ -71,12 +71,31 @@ defmodule DuckFeeder.Writer.ParquetNif do
   end
 
   defp run_nif_write(path, rows) when is_list(rows) do
-    case nif_write_parquet(path, rows) do
-      :ok -> :ok
-      {:ok, :ok} -> :ok
-      {:error, reason} -> {:error, reason}
-      {:error, atom, reason} -> {:error, {atom, reason}}
-      other -> {:error, {:unexpected_parquet_nif_result, other}}
+    try do
+      case nif_write_parquet(path, rows) do
+        :ok -> :ok
+        {:ok, :ok} -> :ok
+        {:error, reason} -> {:error, reason}
+        {:error, atom, reason} -> {:error, {atom, reason}}
+        other -> {:error, {:unexpected_parquet_nif_result, other}}
+      end
+    rescue
+      exception in ErlangError ->
+        case exception.original do
+          :nif_not_loaded -> {:error, :parquet_nif_not_implemented}
+          :undef -> {:error, :parquet_nif_not_implemented}
+          {:undef, _} -> {:error, :parquet_nif_not_implemented}
+          other -> {:error, {:parquet_nif_exception, other}}
+        end
+    catch
+      :error, :nif_not_loaded ->
+        {:error, :parquet_nif_not_implemented}
+
+      :error, :undef ->
+        {:error, :parquet_nif_not_implemented}
+
+      kind, reason ->
+        {:error, {:parquet_nif_throw, kind, reason}}
     end
   end
 

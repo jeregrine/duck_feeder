@@ -288,4 +288,52 @@ defmodule DuckFeeder.Meta.StoreIntegrationTest do
                [batch_id, "raw/users/part-0001.parquet"]
              )
   end
+
+  test "list_stale_batches can filter by designated_table_id", %{
+    conn: conn,
+    source_id: source_id,
+    designated_table_id: designated_table_id,
+    unique: unique
+  } do
+    assert {:ok, designated_table_id_2} =
+             Meta.register_designated_table(conn, %{
+               source_id: source_id,
+               source_schema: "public",
+               source_table: "accounts_#{unique}",
+               target_schema: "raw",
+               target_table: "accounts_#{unique}",
+               mode: "cdc_changelog",
+               primary_keys: ["id"]
+             })
+
+    batch_id_1 = "batch_filter_1_#{unique}"
+    batch_id_2 = "batch_filter_2_#{unique}"
+
+    assert {:ok, _} =
+             Meta.insert_batch(conn, %{
+               batch_id: batch_id_1,
+               designated_table_id: designated_table_id,
+               lsn_start: "0/16B6E10",
+               lsn_end: "0/16B6E20",
+               state: :uploaded
+             })
+
+    assert {:ok, _} =
+             Meta.insert_batch(conn, %{
+               batch_id: batch_id_2,
+               designated_table_id: designated_table_id_2,
+               lsn_start: "0/16B6E30",
+               lsn_end: "0/16B6E40",
+               state: :uploaded
+             })
+
+    stale_before = DateTime.add(DateTime.utc_now(), 60, :second)
+
+    assert {:ok, [%{batch_id: ^batch_id_1, designated_table_id: ^designated_table_id}]} =
+             Meta.list_stale_batches(conn,
+               states: [:uploaded],
+               stale_before: stale_before,
+               designated_table_id: designated_table_id
+             )
+  end
 end

@@ -323,7 +323,7 @@ defmodule DuckFeeder.CDC.Connection do
   end
 
   @impl true
-  def handle_info(:status_tick, %State{} = state) do
+  def handle_info(:status_tick, %State{step: :streaming} = state) do
     lag = lag_bytes(state)
 
     DuckFeeder.Telemetry.cdc_frame(:status_tick, :ack_sent, %{applied_lsn: state.applied_lsn})
@@ -347,10 +347,16 @@ defmodule DuckFeeder.CDC.Connection do
     {:noreply, [standby_status_update(state)], schedule_status_tick(state)}
   end
 
+  def handle_info(:status_tick, %State{} = state) do
+    {:noreply, %{state | status_timer_ref: nil}}
+  end
+
   def handle_info(_info, %State{} = state), do: {:noreply, state}
 
   @impl true
   def handle_disconnect(%State{} = state) do
+    if is_reference(state.status_timer_ref), do: Process.cancel_timer(state.status_timer_ref)
+
     now_ms = System.monotonic_time(:millisecond)
     reconnect_count = state.reconnect_count + 1
 
@@ -375,6 +381,7 @@ defmodule DuckFeeder.CDC.Connection do
          last_disconnect_monotonic_ms: now_ms,
          connected_at_monotonic_ms: nil,
          backpressure_active: false,
+         status_timer_ref: nil,
          step: :disconnected
      }}
   end

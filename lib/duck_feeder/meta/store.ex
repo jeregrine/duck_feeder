@@ -196,6 +196,7 @@ defmodule DuckFeeder.Meta.Store do
   FROM duckfeeder_meta.batches
   WHERE state = ANY($1::text[])
     AND updated_at < $2::timestamptz
+    AND ($3::bigint IS NULL OR designated_table_id = $3)
   ORDER BY updated_at ASC
   """
 
@@ -351,15 +352,17 @@ defmodule DuckFeeder.Meta.Store do
     with {:ok, result} <- query(conn, @fetch_snapshot_handoff_sql, [source_id]) do
       case result.rows do
         [[state, boundary_lsn, started_at, completed_at, updated_at]] ->
-          {:ok,
-           %{
-             source_id: source_id,
-             state: String.to_atom(state),
-             boundary_lsn: boundary_lsn,
-             started_at: started_at,
-             completed_at: completed_at,
-             updated_at: updated_at
-           }}
+          with {:ok, normalized_state} <- snapshot_handoff_state_from_db(state) do
+            {:ok,
+             %{
+               source_id: source_id,
+               state: normalized_state,
+               boundary_lsn: boundary_lsn,
+               started_at: started_at,
+               completed_at: completed_at,
+               updated_at: updated_at
+             }}
+          end
 
         [] ->
           {:ok, nil}
@@ -547,7 +550,10 @@ defmodule DuckFeeder.Meta.Store do
     stale_before =
       Keyword.get(opts, :stale_before, DateTime.add(DateTime.utc_now(), -30 * 60, :second))
 
-    with {:ok, result} <- query(conn, @list_stale_batches_sql, [states, stale_before]) do
+    designated_table_id = Keyword.get(opts, :designated_table_id)
+
+    with {:ok, result} <-
+           query(conn, @list_stale_batches_sql, [states, stale_before, designated_table_id]) do
       batches =
         Enum.map(result.rows, fn [
                                    batch_id,
@@ -708,6 +714,12 @@ defmodule DuckFeeder.Meta.Store do
   end
 
   defp normalize_mode(mode), do: {:error, {:invalid_designated_table_mode, mode}}
+
+  defp snapshot_handoff_state_from_db("pending"), do: {:ok, :pending}
+  defp snapshot_handoff_state_from_db("complete"), do: {:ok, :complete}
+
+  defp snapshot_handoff_state_from_db(other),
+    do: {:error, {:invalid_snapshot_handoff_state, other}}
 
   defp state_to_db!(state) do
     case BatchState.to_db(state) do

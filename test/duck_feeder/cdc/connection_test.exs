@@ -221,6 +221,8 @@ defmodule DuckFeeder.CDC.ConnectionTest do
         status_interval_ms: 1_000
       )
 
+    {:stream, _query, [], state} = Connection.handle_connect(state)
+
     assert {:noreply, [_ack], %State{} = _next_state} =
              Connection.handle_info(:status_tick, state)
 
@@ -228,6 +230,20 @@ defmodule DuckFeeder.CDC.ConnectionTest do
     assert measurements.lag_bytes == 0
     assert metadata.source == :status_tick
     assert metadata.slot_name == "duck_slot"
+  end
+
+  test "status tick is ignored while disconnected" do
+    {:ok, state} =
+      Connection.init(
+        slot_name: "duck_slot",
+        publication_name: "duck_pub",
+        start_lsn: "0/0",
+        event_sink: self(),
+        status_interval_ms: 1_000
+      )
+
+    assert {:noreply, %State{status_timer_ref: nil}} =
+             Connection.handle_info(:status_tick, state)
   end
 
   test "backpressure telemetry emits entered and cleared transitions" do
@@ -281,11 +297,19 @@ defmodule DuckFeeder.CDC.ConnectionTest do
         publication_name: "duck_pub",
         start_lsn: "0/0",
         event_sink: self(),
-        status_interval_ms: 0
+        status_interval_ms: 1_000
       )
 
-    assert {:noreply, %State{slot_name: "duck_slot", reconnect_count: 1, step: :disconnected}} =
-             Connection.handle_disconnect(state)
+    {:stream, _query, [], state} = Connection.handle_connect(state)
+    assert is_reference(state.status_timer_ref)
+
+    assert {:noreply,
+            %State{
+              slot_name: "duck_slot",
+              reconnect_count: 1,
+              status_timer_ref: nil,
+              step: :disconnected
+            }} = Connection.handle_disconnect(state)
   end
 
   defp xlog(wal_start, wal_end, payload) do
