@@ -9,6 +9,11 @@ defmodule DuckFeeder.Storage.ProviderCDCRuntimeIntegrationTest do
   @integration_config Application.compile_env(:duck_feeder, :integration, [])
   @s3_storage Keyword.get(@integration_config, :s3_storage)
   @gcs_storage Keyword.get(@integration_config, :gcs_storage)
+  @s3_skip if(is_map(@s3_storage), do: false, else: "configure DUCK_FEEDER_ITEST_S3_* env vars")
+  @gcs_skip if(is_map(@gcs_storage),
+              do: false,
+              else: "configure DUCK_FEEDER_ITEST_GCS_* env vars"
+            )
 
   defmodule FakeCDCFailStart do
     def start_link(_opts), do: {:error, :failed_to_start_cdc}
@@ -39,33 +44,30 @@ defmodule DuckFeeder.Storage.ProviderCDCRuntimeIntegrationTest do
     {:ok, meta_conn: meta_conn, source_conn: source_conn, source_url: source_url}
   end
 
+  @tag skip: @s3_skip
   test "s3 provider runtime cdc end-to-end path", %{
     meta_conn: meta_conn,
     source_conn: source_conn,
     source_url: source_url
   } do
-    assert is_map(@s3_storage), "configure DUCK_FEEDER_ITEST_S3_* env vars"
-
     assert :ok = run_runtime_provider_flow(meta_conn, source_conn, source_url, @s3_storage, :s3)
   end
 
+  @tag skip: @gcs_skip
   test "gcs provider runtime cdc end-to-end path", %{
     meta_conn: meta_conn,
     source_conn: source_conn,
     source_url: source_url
   } do
-    assert is_map(@gcs_storage), "configure DUCK_FEEDER_ITEST_GCS_* env vars"
-
     assert :ok = run_runtime_provider_flow(meta_conn, source_conn, source_url, @gcs_storage, :gcs)
   end
 
+  @tag skip: @s3_skip
   test "s3 provider runtime snapshot handoff resume path", %{
     meta_conn: meta_conn,
     source_conn: source_conn,
     source_url: source_url
   } do
-    assert is_map(@s3_storage), "configure DUCK_FEEDER_ITEST_S3_* env vars"
-
     assert :ok =
              run_runtime_provider_resume_flow(
                meta_conn,
@@ -76,13 +78,12 @@ defmodule DuckFeeder.Storage.ProviderCDCRuntimeIntegrationTest do
              )
   end
 
+  @tag skip: @gcs_skip
   test "gcs provider runtime snapshot handoff resume path", %{
     meta_conn: meta_conn,
     source_conn: source_conn,
     source_url: source_url
   } do
-    assert is_map(@gcs_storage), "configure DUCK_FEEDER_ITEST_GCS_* env vars"
-
     assert :ok =
              run_runtime_provider_resume_flow(
                meta_conn,

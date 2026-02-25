@@ -37,7 +37,7 @@ defmodule DuckFeeder.Service do
 
   use GenServer
 
-  alias DuckFeeder.{BatchProcessor, Ingest, TablePipeline}
+  alias DuckFeeder.{BatchQueue, Ingest, TablePipeline}
   alias DuckFeeder.CDC.{Lsn, Pipeline}
 
   defmodule State do
@@ -251,7 +251,12 @@ defmodule DuckFeeder.Service do
   end
 
   def handle_info({:duck_feeder_batch, table, batch}, %State{} = state) do
-    case enqueue_or_start_batch(state, table, batch) do
+    case BatchQueue.enqueue_or_start_batch(
+           state,
+           table,
+           batch,
+           on_event: &emit_batch_queue_telemetry/3
+         ) do
       {:ok, next_state} ->
         {:noreply, next_state}
 
@@ -287,7 +292,7 @@ defmodule DuckFeeder.Service do
           |> Map.put(:inflight_batch_tasks, next_inflight)
           |> notify_batch_result(table, result, batch)
           |> maybe_ack_checkpoint(result)
-          |> maybe_start_queued_batches()
+          |> BatchQueue.maybe_start_queued_batches(on_event: &emit_batch_queue_telemetry/3)
           |> emit_batch_queue_telemetry(:completed, %{
             table: table,
             result: batch_result_status(result)
@@ -307,7 +312,7 @@ defmodule DuckFeeder.Service do
         {:noreply, state}
 
       %{table: table, batch: batch} ->
-        if normal_down_reason?(reason) do
+        if BatchQueue.normal_down_reason?(reason) do
           {:noreply, state}
         else
           {_task, next_inflight} = Map.pop(inflight, ref)
@@ -329,63 +334,6 @@ defmodule DuckFeeder.Service do
             })
 
           {:stop, error, next_state}
-        end
-    end
-  end
-
-  defp enqueue_or_start_batch(%State{} = state, table, batch) do
-    if map_size(state.inflight_batch_tasks) < state.max_inflight_batches do
-      {:ok, start_batch_task(state, table, batch, :incoming)}
-    else
-      if state.pending_batch_count >= state.max_pending_batches do
-        {:error, {:batch_queue_overflow, state.max_pending_batches}, state}
-      else
-        queued_state =
-          %{
-            state
-            | pending_batches: :queue.in({table, batch}, state.pending_batches),
-              pending_batch_count: state.pending_batch_count + 1
-          }
-          |> emit_batch_queue_telemetry(:enqueued, %{table: table})
-
-        {:ok, queued_state}
-      end
-    end
-  end
-
-  defp start_batch_task(%State{} = state, table, batch, source) when is_atom(source) do
-    task =
-      Task.Supervisor.async_nolink(state.batch_task_supervisor, fn ->
-        BatchProcessor.process_batch(state.context, table, batch)
-      end)
-
-    %{
-      state
-      | inflight_batch_tasks:
-          Map.put(state.inflight_batch_tasks, task.ref, %{table: table, batch: batch})
-    }
-    |> emit_batch_queue_telemetry(:started, %{table: table, source: source})
-  end
-
-  defp maybe_start_queued_batches(%State{} = state) do
-    cond do
-      map_size(state.inflight_batch_tasks) >= state.max_inflight_batches ->
-        state
-
-      state.pending_batch_count == 0 ->
-        state
-
-      true ->
-        case :queue.out(state.pending_batches) do
-          {{:value, {table, batch}}, next_queue} ->
-            state
-            |> Map.put(:pending_batches, next_queue)
-            |> Map.put(:pending_batch_count, state.pending_batch_count - 1)
-            |> start_batch_task(table, batch, :queued)
-            |> maybe_start_queued_batches()
-
-          {:empty, _} ->
-            %{state | pending_batch_count: 0}
         end
     end
   end
@@ -603,11 +551,6 @@ defmodule DuckFeeder.Service do
     do: {:ok, value}
 
   defp normalize_positive_integer(value, key), do: {:error, {:invalid_option, key, value}}
-
-  defp normal_down_reason?(:normal), do: true
-  defp normal_down_reason?(:shutdown), do: true
-  defp normal_down_reason?({:shutdown, _reason}), do: true
-  defp normal_down_reason?(_reason), do: false
 
   defp maybe_put_optional(context, _key, nil), do: context
   defp maybe_put_optional(context, key, value), do: Map.put(context, key, value)

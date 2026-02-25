@@ -9,6 +9,11 @@ defmodule DuckFeeder.Storage.ProviderRuntimeIntegrationTest do
   @integration_config Application.compile_env(:duck_feeder, :integration, [])
   @s3_storage Keyword.get(@integration_config, :s3_storage)
   @gcs_storage Keyword.get(@integration_config, :gcs_storage)
+  @s3_skip if(is_map(@s3_storage), do: false, else: "configure DUCK_FEEDER_ITEST_S3_* env vars")
+  @gcs_skip if(is_map(@gcs_storage),
+              do: false,
+              else: "configure DUCK_FEEDER_ITEST_GCS_* env vars"
+            )
 
   setup_all do
     meta_url = Keyword.get(@integration_config, :meta_database_url)
@@ -28,15 +33,13 @@ defmodule DuckFeeder.Storage.ProviderRuntimeIntegrationTest do
     {:ok, meta_conn: meta_conn}
   end
 
+  @tag skip: @s3_skip
   test "s3 provider append-stream commit path roundtrip", %{meta_conn: meta_conn} do
-    assert is_map(@s3_storage), "configure DUCK_FEEDER_ITEST_S3_* env vars"
-
     assert :ok = run_append_stream_provider_flow(meta_conn, @s3_storage, :s3)
   end
 
+  @tag skip: @gcs_skip
   test "gcs provider append-stream commit path roundtrip", %{meta_conn: meta_conn} do
-    assert is_map(@gcs_storage), "configure DUCK_FEEDER_ITEST_GCS_* env vars"
-
     assert :ok = run_append_stream_provider_flow(meta_conn, @gcs_storage, :gcs)
   end
 

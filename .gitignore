@@ -27,3 +27,4 @@ duck_feeder-*.tar
 /priv/native/
 
 checksum-Elixir.DuckFeeder.Writer.ParquetNif.exs
+/research/
