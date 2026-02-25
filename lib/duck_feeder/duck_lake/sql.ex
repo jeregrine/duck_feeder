@@ -2092,16 +2092,26 @@ defmodule DuckFeeder.DuckLake.SQL do
     cleaned_values = Enum.reject(values, &is_nil/1)
     contains_nan = Enum.any?(cleaned_values, &nan?/1)
 
-    min_max_values =
-      cleaned_values
-      |> Enum.reject(&nan?/1)
-      |> Enum.map(&stat_string/1)
+    comparable_values = Enum.reject(cleaned_values, &nan?/1)
 
     {min_value, max_value} =
-      case min_max_values do
-        [] -> {nil, nil}
-        [single] -> {single, single}
-        values -> {Enum.min(values), Enum.max(values)}
+      case comparable_values do
+        [] ->
+          {nil, nil}
+
+        [single] ->
+          rendered = stat_string(single)
+          {rendered, rendered}
+
+        [first | rest] ->
+          {min_term, max_term} =
+            Enum.reduce(rest, {first, first}, fn value, {min_acc, max_acc} ->
+              next_min = if compare_stat_values(value, min_acc) == :lt, do: value, else: min_acc
+              next_max = if compare_stat_values(value, max_acc) == :gt, do: value, else: max_acc
+              {next_min, next_max}
+            end)
+
+          {stat_string(min_term), stat_string(max_term)}
       end
 
     %{
@@ -2111,6 +2121,52 @@ defmodule DuckFeeder.DuckLake.SQL do
       max_value: max_value,
       contains_nan: contains_nan
     }
+  end
+
+  defp compare_stat_values(left, right)
+
+  defp compare_stat_values(left, right) when is_number(left) and is_number(right) do
+    cond do
+      left < right -> :lt
+      left > right -> :gt
+      true -> :eq
+    end
+  end
+
+  defp compare_stat_values(left, right) when is_boolean(left) and is_boolean(right) do
+    cond do
+      left == right -> :eq
+      left == false and right == true -> :lt
+      true -> :gt
+    end
+  end
+
+  defp compare_stat_values(%DateTime{} = left, %DateTime{} = right),
+    do: DateTime.compare(left, right)
+
+  defp compare_stat_values(%NaiveDateTime{} = left, %NaiveDateTime{} = right),
+    do: NaiveDateTime.compare(left, right)
+
+  defp compare_stat_values(%Date{} = left, %Date{} = right), do: Date.compare(left, right)
+  defp compare_stat_values(%Time{} = left, %Time{} = right), do: Time.compare(left, right)
+
+  defp compare_stat_values(left, right) when is_binary(left) and is_binary(right) do
+    cond do
+      left < right -> :lt
+      left > right -> :gt
+      true -> :eq
+    end
+  end
+
+  defp compare_stat_values(left, right) do
+    left_rendered = stat_string(left)
+    right_rendered = stat_string(right)
+
+    cond do
+      left_rendered < right_rendered -> :lt
+      left_rendered > right_rendered -> :gt
+      true -> :eq
+    end
   end
 
   defp stat_string(value) when is_binary(value), do: value

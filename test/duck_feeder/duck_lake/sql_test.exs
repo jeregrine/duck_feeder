@@ -222,6 +222,23 @@ defmodule DuckFeeder.DuckLake.SQLTest do
     assert String.contains?(partition_signature, "tenant_id")
   end
 
+  test "derives numeric min/max stats using numeric ordering" do
+    statements =
+      SQL.commit_statements("batch-1",
+        object_key: "raw/users/file-1.parquet",
+        write_result: %{row_count: 2, file_size_bytes: 10},
+        batch: %{rows: [%{"value" => 2}, %{"value" => 10}]}
+      )
+
+    {_sql, params} =
+      Enum.find(statements, fn {sql, _params} ->
+        sql =~ "INSERT INTO ducklake_metadata.ducklake_table_column_stats" and
+          sql =~ "$2::text[]"
+      end)
+
+    assert ["batch-1", ["value"], [2], [0], ["2"], ["10"], [false]] = params
+  end
+
   test "supports nested-field style schema_changes aliases" do
     statements =
       SQL.commit_statements("batch-1",
