@@ -37,7 +37,7 @@ defmodule DuckFeeder.Service do
 
   use GenServer
 
-  alias DuckFeeder.{BatchProcessor, Ingest, TablePipeline}
+  alias DuckFeeder.{BatchQueue, Ingest, TablePipeline}
   alias DuckFeeder.CDC.{Lsn, Pipeline}
 
   defmodule State do
@@ -251,7 +251,12 @@ defmodule DuckFeeder.Service do
   end
 
   def handle_info({:duck_feeder_batch, table, batch}, %State{} = state) do
-    case enqueue_or_start_batch(state, table, batch) do
+    case BatchQueue.enqueue_or_start_batch(
+           state,
+           table,
+           batch,
+           on_event: &emit_batch_queue_telemetry/3
+         ) do
       {:ok, next_state} ->
         {:noreply, next_state}
 
@@ -287,7 +292,7 @@ defmodule DuckFeeder.Service do
           |> Map.put(:inflight_batch_tasks, next_inflight)
           |> notify_batch_result(table, result, batch)
           |> maybe_ack_checkpoint(result)
-          |> maybe_start_queued_batches()
+          |> BatchQueue.maybe_start_queued_batches(on_event: &emit_batch_queue_telemetry/3)
           |> emit_batch_queue_telemetry(:completed, %{
             table: table,
             result: batch_result_status(result)
@@ -307,7 +312,7 @@ defmodule DuckFeeder.Service do
         {:noreply, state}
 
       %{table: table, batch: batch} ->
-        if normal_down_reason?(reason) do
+        if BatchQueue.normal_down_reason?(reason) do
           {:noreply, state}
         else
           {_task, next_inflight} = Map.pop(inflight, ref)
@@ -329,63 +334,6 @@ defmodule DuckFeeder.Service do
             })
 
           {:stop, error, next_state}
-        end
-    end
-  end
-
-  defp enqueue_or_start_batch(%State{} = state, table, batch) do
-    if map_size(state.inflight_batch_tasks) < state.max_inflight_batches do
-      {:ok, start_batch_task(state, table, batch, :incoming)}
-    else
-      if state.pending_batch_count >= state.max_pending_batches do
-        {:error, {:batch_queue_overflow, state.max_pending_batches}, state}
-      else
-        queued_state =
-          %{
-            state
-            | pending_batches: :queue.in({table, batch}, state.pending_batches),
-              pending_batch_count: state.pending_batch_count + 1
-          }
-          |> emit_batch_queue_telemetry(:enqueued, %{table: table})
-
-        {:ok, queued_state}
-      end
-    end
-  end
-
-  defp start_batch_task(%State{} = state, table, batch, source) when is_atom(source) do
-    task =
-      Task.Supervisor.async_nolink(state.batch_task_supervisor, fn ->
-        BatchProcessor.process_batch(state.context, table, batch)
-      end)
-
-    %{
-      state
-      | inflight_batch_tasks:
-          Map.put(state.inflight_batch_tasks, task.ref, %{table: table, batch: batch})
-    }
-    |> emit_batch_queue_telemetry(:started, %{table: table, source: source})
-  end
-
-  defp maybe_start_queued_batches(%State{} = state) do
-    cond do
-      map_size(state.inflight_batch_tasks) >= state.max_inflight_batches ->
-        state
-
-      state.pending_batch_count == 0 ->
-        state
-
-      true ->
-        case :queue.out(state.pending_batches) do
-          {{:value, {table, batch}}, next_queue} ->
-            state
-            |> Map.put(:pending_batches, next_queue)
-            |> Map.put(:pending_batch_count, state.pending_batch_count - 1)
-            |> start_batch_task(table, batch, :queued)
-            |> maybe_start_queued_batches()
-
-          {:empty, _} ->
-            %{state | pending_batch_count: 0}
         end
     end
   end
@@ -550,22 +498,89 @@ defmodule DuckFeeder.Service do
          {:ok, source_table} <- fetch_map_string(designated_table, :source_table),
          {:ok, target_schema} <- fetch_map_string(designated_table, :target_schema),
          {:ok, target_table} <- fetch_map_string(designated_table, :target_table) do
+      snapshot_payload = snapshot_payload(row, lsn, source_schema, source_table)
+
       {:ok,
-       %{
-         _op: "I",
-         _commit_lsn: lsn,
-         _xid: nil,
-         _source_ts: nil,
-         _ingest_ts: DateTime.utc_now(),
-         _relation_schema: source_schema,
-         _relation_table: source_table,
-         _record: stringify_keys(row),
-         _old_record: %{},
+       Map.merge(snapshot_payload, %{
          designated_table_id: designated_table_id,
          target_relation: {target_schema, target_table}
-       }}
+       })}
     end
   end
+
+  defp snapshot_payload(row, lsn, source_schema, source_table) when is_map(row) do
+    if pre_tagged_snapshot_row?(row) do
+      %{
+        _op: fetch_map_value_or_default(row, :_op, "R") |> to_string(),
+        _commit_lsn: fetch_map_value_or_default(row, :_commit_lsn, lsn),
+        _xid: fetch_map_value_or_default(row, :_xid, nil),
+        _source_ts: fetch_map_value_or_default(row, :_source_ts, nil),
+        _ingest_ts: fetch_map_value_or_default(row, :_ingest_ts, DateTime.utc_now()),
+        _relation_schema: fetch_map_value_or_default(row, :_relation_schema, source_schema),
+        _relation_table: fetch_map_value_or_default(row, :_relation_table, source_table),
+        _record: snapshot_record_from_tagged_row(row),
+        _old_record: fetch_map_value_or_default(row, :_old_record, %{}) |> normalize_row_map()
+      }
+    else
+      %{
+        _op: "I",
+        _commit_lsn: lsn,
+        _xid: nil,
+        _source_ts: nil,
+        _ingest_ts: DateTime.utc_now(),
+        _relation_schema: source_schema,
+        _relation_table: source_table,
+        _record: stringify_keys(row),
+        _old_record: %{}
+      }
+    end
+  end
+
+  defp pre_tagged_snapshot_row?(row) when is_map(row) do
+    has_metadata_key?(row, :_op) or has_metadata_key?(row, :_record) or
+      has_metadata_key?(row, :_commit_lsn)
+  end
+
+  defp snapshot_record_from_tagged_row(row) when is_map(row) do
+    case fetch_map_value_or_default(row, :_record, nil) do
+      record when is_map(record) ->
+        stringify_keys(record)
+
+      _ ->
+        row
+        |> Enum.reject(fn {key, _value} -> snapshot_metadata_key?(key) end)
+        |> Map.new()
+        |> stringify_keys()
+    end
+  end
+
+  defp normalize_row_map(map) when is_map(map), do: stringify_keys(map)
+  defp normalize_row_map(_other), do: %{}
+
+  defp has_metadata_key?(map, key) when is_map(map) and is_atom(key) do
+    Map.has_key?(map, key) or Map.has_key?(map, Atom.to_string(key))
+  end
+
+  defp snapshot_metadata_key?(key) when is_atom(key),
+    do: snapshot_metadata_key?(Atom.to_string(key))
+
+  defp snapshot_metadata_key?(key) when is_binary(key) do
+    key in [
+      "_op",
+      "_commit_lsn",
+      "_xid",
+      "_source_ts",
+      "_ingest_ts",
+      "_relation_schema",
+      "_relation_table",
+      "_record",
+      "_old_record",
+      "designated_table_id",
+      "target_relation"
+    ]
+  end
+
+  defp snapshot_metadata_key?(_key), do: false
 
   defp next_snapshot_lsn(counter) when is_integer(counter) and counter >= 0 do
     next_counter = counter + 1
@@ -599,15 +614,14 @@ defmodule DuckFeeder.Service do
     end
   end
 
+  defp fetch_map_value_or_default(map, key, default) when is_map(map) and is_atom(key) do
+    Map.get(map, key, Map.get(map, Atom.to_string(key), default))
+  end
+
   defp normalize_positive_integer(value, _key) when is_integer(value) and value > 0,
     do: {:ok, value}
 
   defp normalize_positive_integer(value, key), do: {:error, {:invalid_option, key, value}}
-
-  defp normal_down_reason?(:normal), do: true
-  defp normal_down_reason?(:shutdown), do: true
-  defp normal_down_reason?({:shutdown, _reason}), do: true
-  defp normal_down_reason?(_reason), do: false
 
   defp maybe_put_optional(context, _key, nil), do: context
   defp maybe_put_optional(context, key, value), do: Map.put(context, key, value)

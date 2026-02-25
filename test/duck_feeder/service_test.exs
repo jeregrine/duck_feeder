@@ -158,6 +158,49 @@ defmodule DuckFeeder.ServiceTest do
     assert_receive {:duck_feeder_ack_lsn, "0/120"}, 1_000
   end
 
+  test "ingests pre-tagged snapshot rows without re-wrapping metadata into _record" do
+    designated_table = %{
+      id: 1,
+      source_schema: "public",
+      source_table: "users",
+      target_schema: "raw",
+      target_table: "users"
+    }
+
+    {:ok, service} =
+      Service.start_link(
+        designated_tables: [designated_table],
+        meta_module: FakeMeta,
+        meta_conn: :fake_conn,
+        writer: %{adapter: FakeWriter},
+        storage: %{provider: :s3, bucket: "bucket", adapter: FakeStorage},
+        pipeline_opts: %{max_rows: 1, max_bytes: 10_000, flush_interval_ms: 60_000},
+        observer_pid: self()
+      )
+
+    tagged_row = %{
+      "id" => 1,
+      "name" => "snapshot-duck",
+      _op: "R",
+      _commit_lsn: "0/10",
+      _xid: 0,
+      _source_ts: nil,
+      _ingest_ts: DateTime.utc_now(),
+      _relation_schema: "public",
+      _relation_table: "users"
+    }
+
+    assert :ok = Service.ingest_snapshot_row(service, designated_table, tagged_row)
+
+    assert_receive {:duck_feeder_batch_processed, {"raw", "users"}, {:ok, _result}, batch}, 1_000
+
+    [row] = batch.rows
+    assert row._op == "R"
+    assert row._record["id"] == 1
+    refute Map.has_key?(row._record, "_op")
+    refute Map.has_key?(row._record, "_commit_lsn")
+  end
+
   test "returns CDC validation errors" do
     {:ok, service} =
       Service.start_link(

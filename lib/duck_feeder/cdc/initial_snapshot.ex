@@ -46,8 +46,7 @@ defmodule DuckFeeder.CDC.InitialSnapshot do
         list when is_list(list) and list != [] -> Enum.map_join(list, ", ", &quote_ident/1)
       end
 
-    where_sql =
-      if is_binary(where_clause) and where_clause != "", do: " WHERE #{where_clause}", else: ""
+    where_sql = build_where_sql(where_clause)
 
     order_sql =
       case order_by do
@@ -61,6 +60,15 @@ defmodule DuckFeeder.CDC.InitialSnapshot do
     "SELECT #{select_columns} FROM #{quote_ident(schema)}.#{quote_ident(table)}#{where_sql}#{order_sql}"
   end
 
+  @spec row_to_snapshot([String.t()], list(), String.t(), keyword()) :: map()
+  def row_to_snapshot(columns, row, boundary_lsn, opts \\ [])
+      when is_list(columns) and is_list(row) and is_binary(boundary_lsn) do
+    columns
+    |> Enum.zip(row)
+    |> Map.new()
+    |> SnapshotBoundary.tag_snapshot_row(boundary_lsn, opts)
+  end
+
   @spec result_rows_to_snapshot(Postgrex.Result.t(), String.t(), keyword()) :: [map()]
   def result_rows_to_snapshot(
         %Postgrex.Result{columns: columns, rows: rows},
@@ -69,11 +77,31 @@ defmodule DuckFeeder.CDC.InitialSnapshot do
       )
       when is_binary(boundary_lsn) do
     Enum.map(rows, fn row ->
-      columns
-      |> Enum.zip(row)
-      |> Map.new()
-      |> SnapshotBoundary.tag_snapshot_row(boundary_lsn, opts)
+      row_to_snapshot(columns, row, boundary_lsn, opts)
     end)
+  end
+
+  defp build_where_sql(nil), do: ""
+
+  defp build_where_sql(where_clause) when is_binary(where_clause) do
+    case String.trim(where_clause) do
+      "" ->
+        ""
+
+      trimmed ->
+        if safe_where_clause?(trimmed) do
+          " WHERE #{trimmed}"
+        else
+          raise ArgumentError,
+                "unsafe snapshot where clause: rejected ';', '--', or block comment tokens"
+        end
+    end
+  end
+
+  defp build_where_sql(_other), do: ""
+
+  defp safe_where_clause?(where_clause) when is_binary(where_clause) do
+    not String.contains?(where_clause, [";", "--", "/*", "*/"])
   end
 
   defp quote_ident(identifier) do

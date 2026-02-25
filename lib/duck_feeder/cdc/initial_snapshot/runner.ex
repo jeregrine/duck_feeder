@@ -46,15 +46,25 @@ defmodule DuckFeeder.CDC.InitialSnapshot.Runner do
       sql = snapshot_module.copy_query(schema, table)
 
       case query_fun.(conn, sql, []) do
-        {:ok, result} ->
-          rows = snapshot_module.result_rows_to_snapshot(result, boundary_lsn)
-
-          with :ok <- dispatch_rows(designated_table, rows, row_handler) do
+        {:ok, %Postgrex.Result{columns: columns, rows: rows}} ->
+          with {:ok, row_count} <-
+                 dispatch_result_rows(
+                   designated_table,
+                   columns,
+                   rows,
+                   boundary_lsn,
+                   row_handler,
+                   snapshot_module
+                 ) do
             key = {schema, table}
-            {:cont, {:ok, Map.put(counts, key, length(rows))}}
+            {:cont, {:ok, Map.put(counts, key, row_count)}}
           else
             {:error, reason} -> {:halt, {:error, reason}}
           end
+
+        {:ok, other} ->
+          {:halt,
+           {:error, {:snapshot_query_failed, {schema, table}, {:unexpected_result, other}}}}
 
         {:error, reason} ->
           {:halt, {:error, {:snapshot_query_failed, {schema, table}, reason}}}
@@ -62,12 +72,24 @@ defmodule DuckFeeder.CDC.InitialSnapshot.Runner do
     end)
   end
 
-  defp dispatch_rows(_designated_table, [], _row_handler), do: :ok
+  defp dispatch_result_rows(
+         designated_table,
+         columns,
+         rows,
+         boundary_lsn,
+         row_handler,
+         snapshot_module
+       )
+       when is_map(designated_table) and is_list(columns) and is_list(rows) and
+              is_binary(boundary_lsn) and is_function(row_handler, 2) and is_atom(snapshot_module) do
+    rows
+    |> Enum.reduce_while({:ok, 0}, fn row_values, {:ok, count} ->
+      snapshot_row = snapshot_module.row_to_snapshot(columns, row_values, boundary_lsn)
 
-  defp dispatch_rows(designated_table, [row | rest], row_handler) do
-    case row_handler.(designated_table, row) do
-      :ok -> dispatch_rows(designated_table, rest, row_handler)
-      {:error, _reason} = error -> error
-    end
+      case row_handler.(designated_table, snapshot_row) do
+        :ok -> {:cont, {:ok, count + 1}}
+        {:error, reason} -> {:halt, {:error, reason}}
+      end
+    end)
   end
 end

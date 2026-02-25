@@ -670,22 +670,25 @@ defmodule DuckFeeder.Runtime do
                 Keyword.merge(snapshot_runner_opts, row_handler: row_handler)
               )
 
-            rows = collect_rows.()
+            rows_source = collect_rows.()
             _ = safe_disconnect_query_conn(query_disconnect_fun, query_conn)
 
             case result do
               {:ok, %{boundary_lsn: boundary_lsn}} ->
-                {:ok, %{boundary_lsn: boundary_lsn, rows: rows}}
+                {:ok, %{boundary_lsn: boundary_lsn, rows: rows_source}}
 
               {:ok, other} ->
+                _ = cleanup_snapshot_rows_source(rows_source)
                 {:error, {:initial_snapshot_failed, {:invalid_snapshot_result, other}}}
 
               {:error, reason} ->
+                _ = cleanup_snapshot_rows_source(rows_source)
                 {:error, {:initial_snapshot_failed, reason}}
             end
 
           {:error, reason} ->
-            _ = collect_rows.()
+            rows_source = collect_rows.()
+            _ = cleanup_snapshot_rows_source(rows_source)
             {:error, {:query_connection_failed, reason}}
         end
 
@@ -904,27 +907,55 @@ defmodule DuckFeeder.Runtime do
 
       _ ->
         if Keyword.get(opts, :snapshot_ingest?, true) do
-          case Agent.start_link(fn -> [] end) do
-            {:ok, collector} ->
-              row_handler = fn designated_table, row ->
-                snapshot_collector_push(collector, designated_table, row)
-              end
-
-              collect_rows = fn -> snapshot_collector_drain(collector) end
-
-              {:ok, row_handler, collect_rows}
-
-            {:error, reason} ->
-              {:error, {:snapshot_collector_start_failed, reason}}
-          end
+          build_snapshot_spool_collector()
         else
           {:error, :missing_snapshot_row_handler}
         end
     end
   end
 
-  defp snapshot_collector_push(collector, designated_table, row) when is_pid(collector) do
-    Agent.update(collector, fn rows -> [{designated_table, row} | rows] end)
+  defp build_snapshot_spool_collector do
+    path =
+      Path.join(
+        System.tmp_dir!(),
+        "duck_feeder_snapshot_rows_#{System.unique_integer([:positive, :monotonic])}.spool"
+      )
+
+    case File.open(path, [:write, :binary]) do
+      {:ok, io_device} ->
+        counter = :atomics.new(1, [])
+
+        row_handler = fn designated_table, row ->
+          snapshot_spool_push(io_device, counter, designated_table, row)
+        end
+
+        collect_rows = fn ->
+          _ = safe_close_snapshot_spool(io_device)
+          {:spooled_snapshot_rows, path, :atomics.get(counter, 1)}
+        end
+
+        {:ok, row_handler, collect_rows}
+
+      {:error, reason} ->
+        {:error, {:snapshot_collector_start_failed, reason}}
+    end
+  end
+
+  defp snapshot_spool_push(io_device, counter, designated_table, row)
+       when is_pid(io_device) and is_reference(counter) do
+    encoded =
+      {designated_table, row}
+      |> :erlang.term_to_binary()
+      |> Base.encode64()
+
+    case IO.binwrite(io_device, encoded <> "\n") do
+      :ok ->
+        _ = :atomics.add_get(counter, 1, 1)
+        :ok
+
+      {:error, reason} ->
+        {:error, {:snapshot_collector_push_failed, reason}}
+    end
   rescue
     exception ->
       {:error, {:snapshot_collector_push_exception, exception}}
@@ -934,27 +965,10 @@ defmodule DuckFeeder.Runtime do
 
     kind, reason ->
       {:error, {:snapshot_collector_push_throw, kind, reason}}
-  else
-    :ok -> :ok
-    other -> {:error, {:invalid_snapshot_collector_push_result, other}}
   end
 
-  defp snapshot_collector_drain(collector) when is_pid(collector) do
-    rows =
-      try do
-        Agent.get_and_update(collector, fn current_rows -> {Enum.reverse(current_rows), []} end)
-      rescue
-        _ -> []
-      catch
-        _, _ -> []
-      end
-
-    _ = safe_stop_collector(collector)
-    rows
-  end
-
-  defp safe_stop_collector(collector) when is_pid(collector) do
-    if Process.alive?(collector), do: Agent.stop(collector)
+  defp safe_close_snapshot_spool(io_device) when is_pid(io_device) do
+    File.close(io_device)
     :ok
   rescue
     _ -> :ok
@@ -962,37 +976,92 @@ defmodule DuckFeeder.Runtime do
     _, _ -> :ok
   end
 
-  defp snapshot_replay_plan(meta_start_lsn, %{boundary_lsn: nil, rows: rows})
-       when is_binary(meta_start_lsn) and is_list(rows) do
+  defp cleanup_snapshot_rows_source([]), do: :ok
+
+  defp cleanup_snapshot_rows_source({:spooled_snapshot_rows, path, _row_count})
+       when is_binary(path),
+       do: safe_delete_snapshot_spool(path)
+
+  defp cleanup_snapshot_rows_source({:spooled_snapshot_rows, path, _skip_count, _row_count})
+       when is_binary(path),
+       do: safe_delete_snapshot_spool(path)
+
+  defp cleanup_snapshot_rows_source(_other), do: :ok
+
+  defp safe_delete_snapshot_spool(path) when is_binary(path) do
+    case File.rm(path) do
+      :ok -> :ok
+      {:error, :enoent} -> :ok
+      {:error, _reason} -> :ok
+    end
+  end
+
+  defp snapshot_replay_plan(meta_start_lsn, %{boundary_lsn: nil, rows: rows_source})
+       when is_binary(meta_start_lsn) do
+    _ = cleanup_snapshot_rows_source(rows_source)
     {:ok, %{rows: [], snapshot_lsn_start: nil}}
   end
 
-  defp snapshot_replay_plan(meta_start_lsn, %{boundary_lsn: boundary_lsn, rows: rows})
-       when is_binary(meta_start_lsn) and is_binary(boundary_lsn) and is_list(rows) do
-    row_count = length(rows)
+  defp snapshot_replay_plan(meta_start_lsn, %{boundary_lsn: boundary_lsn, rows: rows_source})
+       when is_binary(meta_start_lsn) and is_binary(boundary_lsn) do
+    row_count = snapshot_row_source_count(rows_source)
 
     case Lsn.compare(meta_start_lsn, boundary_lsn) do
       :lt ->
         with {:ok, snapshot_lsn_start_counter} <-
                snapshot_lsn_start_counter(boundary_lsn, row_count),
              {:ok, replayed_count} <-
-               replayed_snapshot_row_count(meta_start_lsn, snapshot_lsn_start_counter, row_count) do
-          remaining_rows = Enum.drop(rows, replayed_count)
+               replayed_snapshot_row_count(meta_start_lsn, snapshot_lsn_start_counter, row_count),
+             {:ok, remaining_rows_source} <-
+               snapshot_remaining_rows_source(rows_source, replayed_count) do
           snapshot_lsn_start = Lsn.to_string(snapshot_lsn_start_counter + replayed_count)
 
-          {:ok, %{rows: remaining_rows, snapshot_lsn_start: snapshot_lsn_start}}
+          {:ok, %{rows: remaining_rows_source, snapshot_lsn_start: snapshot_lsn_start}}
         end
 
       :eq ->
+        _ = cleanup_snapshot_rows_source(rows_source)
         {:ok, %{rows: [], snapshot_lsn_start: nil}}
 
       :gt ->
+        _ = cleanup_snapshot_rows_source(rows_source)
         {:ok, %{rows: [], snapshot_lsn_start: nil}}
 
       {:error, reason} ->
+        _ = cleanup_snapshot_rows_source(rows_source)
         {:error, {:invalid_snapshot_handoff_lsn, reason}}
     end
   end
+
+  defp snapshot_row_source_count(rows) when is_list(rows), do: length(rows)
+
+  defp snapshot_row_source_count({:spooled_snapshot_rows, _path, row_count})
+       when is_integer(row_count) and row_count >= 0,
+       do: row_count
+
+  defp snapshot_row_source_count(_rows_source), do: 0
+
+  defp snapshot_remaining_rows_source(rows, replayed_count)
+       when is_list(rows) and is_integer(replayed_count) and replayed_count >= 0 do
+    {:ok, Enum.drop(rows, replayed_count)}
+  end
+
+  defp snapshot_remaining_rows_source(
+         {:spooled_snapshot_rows, path, row_count},
+         replayed_count
+       )
+       when is_binary(path) and is_integer(row_count) and row_count >= 0 and
+              is_integer(replayed_count) and replayed_count >= 0 do
+    if replayed_count >= row_count do
+      _ = safe_delete_snapshot_spool(path)
+      {:ok, []}
+    else
+      {:ok, {:spooled_snapshot_rows, path, replayed_count, row_count}}
+    end
+  end
+
+  defp snapshot_remaining_rows_source(rows_source, _replayed_count),
+    do: {:error, {:invalid_snapshot_rows_source, rows_source}}
 
   defp snapshot_lsn_start_counter(boundary_lsn, row_count)
        when is_binary(boundary_lsn) and is_integer(row_count) and row_count >= 0 do
@@ -1034,6 +1103,63 @@ defmodule DuckFeeder.Runtime do
         _ = safe_stop_service(service_pid)
         error
     end
+  end
+
+  defp maybe_replay_snapshot_rows(
+         service_module,
+         service_pid,
+         {:spooled_snapshot_rows, path, skip_count, row_count}
+       )
+       when is_binary(path) and is_integer(skip_count) and skip_count >= 0 and
+              is_integer(row_count) and row_count >= 0 do
+    replay_result =
+      path
+      |> File.stream!([], :line)
+      |> Stream.drop(skip_count)
+      |> Enum.reduce_while(:ok, fn line, :ok ->
+        with {:ok, {designated_table, row}} <- decode_snapshot_spooled_row(line),
+             :ok <- safe_snapshot_ingest(service_module, service_pid, designated_table, row) do
+          {:cont, :ok}
+        else
+          {:error, reason} -> {:halt, {:error, {:snapshot_replay_failed, reason}}}
+        end
+      end)
+
+    _ = safe_delete_snapshot_spool(path)
+
+    case replay_result do
+      :ok ->
+        :ok
+
+      {:error, _reason} = error ->
+        _ = safe_stop_service(service_pid)
+        error
+    end
+  rescue
+    exception ->
+      _ = safe_delete_snapshot_spool(path)
+      _ = safe_stop_service(service_pid)
+      {:error, {:snapshot_replay_failed, {:snapshot_spool_exception, exception}}}
+  catch
+    kind, reason ->
+      _ = safe_delete_snapshot_spool(path)
+      _ = safe_stop_service(service_pid)
+      {:error, {:snapshot_replay_failed, {:snapshot_spool_throw, kind, reason}}}
+  end
+
+  defp decode_snapshot_spooled_row(line) when is_binary(line) do
+    trimmed = String.trim(line)
+
+    with {:ok, binary} <- Base.decode64(trimmed),
+         {designated_table, row} <- :erlang.binary_to_term(binary, [:safe]) do
+      {:ok, {designated_table, row}}
+    else
+      :error -> {:error, {:invalid_snapshot_spool_row, trimmed}}
+      other -> {:error, {:invalid_snapshot_spool_row, other}}
+    end
+  rescue
+    exception ->
+      {:error, {:invalid_snapshot_spool_row, exception}}
   end
 
   defp safe_bootstrap(

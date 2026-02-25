@@ -38,6 +38,12 @@ defmodule DuckFeeder.CDC.InitialSnapshotTest do
              "SELECT \"id\", \"name\" FROM \"public\".\"users\" WHERE id > 10 ORDER BY \"id\""
   end
 
+  test "rejects unsafe where clause tokens" do
+    assert_raise ArgumentError, fn ->
+      InitialSnapshot.copy_query("public", "users", where: "id > 10; DROP TABLE users")
+    end
+  end
+
   test "converts query result rows to snapshot-tagged rows" do
     result = %Postgrex.Result{columns: ["id", "name"], rows: [[1, "duck"]]}
 
