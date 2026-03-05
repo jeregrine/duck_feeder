@@ -7,6 +7,14 @@ defmodule DuckFeeder.CDC.Setup do
 
   @type query_fun :: (pid(), String.t(), list() -> {:ok, Postgrex.Result.t()} | {:error, term()})
 
+  @replica_identity_sql """
+  SELECT c.relreplident
+  FROM pg_class c
+  JOIN pg_namespace n ON n.oid = c.relnamespace
+  WHERE n.nspname = $1
+    AND c.relname = $2
+  """
+
   @spec publication_exists?(pid(), String.t(), keyword()) :: {:ok, boolean()} | {:error, term()}
   def publication_exists?(conn, publication_name, opts \\ []) when is_binary(publication_name) do
     query_fun = Keyword.get(opts, :query_fun, &Postgrex.query/3)
@@ -53,6 +61,25 @@ defmodule DuckFeeder.CDC.Setup do
       {:error, _reason} = error ->
         error
     end
+  end
+
+  @spec ensure_replica_identity_full(pid(), [map()], keyword()) :: :ok | {:error, term()}
+  def ensure_replica_identity_full(conn, designated_tables, opts \\ [])
+      when is_list(designated_tables) do
+    query_fun = Keyword.get(opts, :query_fun, &Postgrex.query/3)
+
+    designated_tables
+    |> Enum.reduce_while(:ok, fn designated_table, :ok ->
+      with {:ok, schema} <- fetch_required(designated_table, :source_schema),
+           {:ok, source_table} <- fetch_required(designated_table, :source_table),
+           {:ok, result} <- query_fun.(conn, @replica_identity_sql, [schema, source_table]),
+           {:ok, relreplident} <- extract_replica_identity(result.rows, schema, source_table),
+           :ok <- validate_replica_identity(relreplident, schema, source_table) do
+        {:cont, :ok}
+      else
+        {:error, _reason} = error -> {:halt, error}
+      end
+    end)
   end
 
   @spec slot_exists?(pid(), String.t(), keyword()) :: {:ok, boolean()} | {:error, term()}
@@ -165,6 +192,29 @@ defmodule DuckFeeder.CDC.Setup do
       {:error, _reason} = error -> error
     end
   end
+
+  defp extract_replica_identity([[relreplident]], _schema, _source_table)
+       when is_binary(relreplident),
+       do: {:ok, relreplident}
+
+  defp extract_replica_identity([], schema, source_table),
+    do: {:error, {:source_table_not_found, {schema, source_table}}}
+
+  defp extract_replica_identity(rows, schema, source_table),
+    do: {:error, {:unexpected_replica_identity_rows, {schema, source_table}, rows}}
+
+  defp validate_replica_identity("f", _schema, _source_table), do: :ok
+
+  defp validate_replica_identity(relreplident, schema, source_table) do
+    {:error,
+     {:replica_identity_not_full, {schema, source_table}, decode_replica_identity(relreplident)}}
+  end
+
+  defp decode_replica_identity("d"), do: :default
+  defp decode_replica_identity("n"), do: :nothing
+  defp decode_replica_identity("f"), do: :all_columns
+  defp decode_replica_identity("i"), do: :index
+  defp decode_replica_identity(other), do: {:unknown, other}
 
   defp fetch_required(map, key) do
     case Map.get(map, key) do

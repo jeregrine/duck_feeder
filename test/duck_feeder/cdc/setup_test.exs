@@ -57,6 +57,47 @@ defmodule DuckFeeder.CDC.SetupTest do
              )
   end
 
+  test "ensure_replica_identity_full validates all designated tables" do
+    {:ok, calls, query_fun} =
+      fake_query_fun([
+        {:ok, %Postgrex.Result{rows: [["f"]]}},
+        {:ok, %Postgrex.Result{rows: [["f"]]}}
+      ])
+
+    assert :ok =
+             Setup.ensure_replica_identity_full(
+               :conn,
+               [
+                 %{source_schema: "public", source_table: "users"},
+                 %{source_schema: "public", source_table: "orders"}
+               ],
+               query_fun: query_fun
+             )
+
+    calls = Agent.get(calls, &Enum.reverse/1)
+
+    assert [
+             {sql, ["public", "users"]},
+             {sql, ["public", "orders"]}
+           ] = calls
+
+    assert sql =~ "SELECT c.relreplident"
+  end
+
+  test "ensure_replica_identity_full rejects non-full replica identity" do
+    {:ok, _calls, query_fun} =
+      fake_query_fun([
+        {:ok, %Postgrex.Result{rows: [["d"]]}}
+      ])
+
+    assert {:error, {:replica_identity_not_full, {"public", "users"}, :default}} =
+             Setup.ensure_replica_identity_full(
+               :conn,
+               [%{source_schema: "public", source_table: "users"}],
+               query_fun: query_fun
+             )
+  end
+
   test "ensure_slot returns :exists for matching existing logical slot" do
     {:ok, _calls, query_fun} =
       fake_query_fun([

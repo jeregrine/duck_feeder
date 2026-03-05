@@ -169,6 +169,67 @@ defmodule DuckFeeder.BatchProcessorTest do
     end
   end
 
+  defmodule UploadedMeta do
+    def build_batch_id(_designated_table_id, _lsn_start, _lsn_end, _indexes), do: "batch-uploaded"
+
+    def insert_batch(_conn, attrs) do
+      Process.put({:designated_table_id, attrs.batch_id}, attrs.designated_table_id)
+      {:ok, %{batch_id: attrs.batch_id, inserted?: false, state: :uploaded}}
+    end
+
+    def list_batch_files(_conn, "batch-uploaded") do
+      {:ok,
+       [
+         %{
+           id: 1,
+           batch_id: "batch-uploaded",
+           object_key: "cdc/raw.users/main.parquet",
+           row_count: 3,
+           file_size: 33,
+           checksum: nil,
+           etag: "etag-main"
+         },
+         %{
+           id: 2,
+           batch_id: "batch-uploaded",
+           object_key: "cdc/raw.users/main-deletes-1.parquet",
+           row_count: 1,
+           file_size: 11,
+           checksum: nil,
+           etag: "etag-delete"
+         }
+       ]}
+    end
+
+    def transition_batch(_conn, batch_id, to_state, opts \\ []) do
+      if pid = Process.get(:test_pid),
+        do: send(pid, {:meta_transition_batch, batch_id, to_state, opts})
+
+      {:ok, %{batch_id: batch_id, from: :uploaded, to: to_state}}
+    end
+
+    def get_source_id_for_batch(batch_id), do: Process.get({:designated_table_id, batch_id})
+  end
+
+  defmodule UploadedMetaMissingFiles do
+    def build_batch_id(_designated_table_id, _lsn_start, _lsn_end, _indexes),
+      do: "batch-uploaded-missing"
+
+    def insert_batch(_conn, attrs) do
+      Process.put({:designated_table_id, attrs.batch_id}, attrs.designated_table_id)
+      {:ok, %{batch_id: attrs.batch_id, inserted?: false, state: :uploaded}}
+    end
+
+    def list_batch_files(_conn, _batch_id), do: {:ok, []}
+
+    def transition_batch(_conn, batch_id, to_state, opts \\ []) do
+      if pid = Process.get(:test_pid),
+        do: send(pid, {:meta_transition_batch, batch_id, to_state, opts})
+
+      {:ok, %{batch_id: batch_id, from: :uploaded, to: to_state}}
+    end
+  end
+
   setup do
     Process.put(:test_pid, self())
     :ok
@@ -377,6 +438,72 @@ defmodule DuckFeeder.BatchProcessorTest do
              BatchProcessor.process_batch(context, {"raw", "users"}, batch)
 
     assert_received {:meta_transition_batch, "batch-test", :failed, _opts}
+  end
+
+  test "recovers uploaded batches by reusing previously uploaded files" do
+    context = %{
+      meta_module: UploadedMeta,
+      meta_conn: :fake_conn,
+      designated_table_by_target: %{{"raw", "users"} => 7},
+      writer: %{adapter: FakeWriter},
+      storage: %{provider: :s3, bucket: "bucket", adapter: FakeStorage},
+      committer_module: FakeCommitter,
+      committer_opts: [
+        delete_files_fun: fn _, _, _ -> [] end,
+        replace_data_file_ids: [1, "2", "bad"]
+      ],
+      object_prefix: "cdc"
+    }
+
+    batch = %{
+      rows: [%{"id" => 1}, %{"id" => 2}, %{"id" => 3}],
+      lsn_start: "0/10",
+      lsn_end: "0/11",
+      row_count: 3
+    }
+
+    assert {:ok, result} = BatchProcessor.process_batch(context, {"raw", "users"}, batch)
+
+    assert result.status == :committed
+    assert result.batch_id == "batch-uploaded"
+    assert result.object_key == "cdc/raw.users/main.parquet"
+    assert result.row_count == 3
+    assert result.file_size_bytes == 33
+
+    assert_received {:committer_commit_batch, "batch-uploaded", opts}
+    assert opts[:object_key] == "cdc/raw.users/main.parquet"
+    assert opts[:write_result].row_count == 3
+    assert opts[:write_result].file_size_bytes == 33
+    assert opts[:write_result].format == :parquet
+    assert opts[:replace_data_file_ids] == [1, 2]
+
+    assert [%{path: "cdc/raw.users/main-deletes-1.parquet", delete_count: 1}] =
+             opts[:delete_files]
+
+    refute_received {:writer_write_batch, _rows}
+    refute_received {:storage_put_file, _object_ref}
+  end
+
+  test "marks uploaded batch failed when uploaded file metadata is missing" do
+    context = %{
+      meta_module: UploadedMetaMissingFiles,
+      meta_conn: :fake_conn,
+      designated_table_by_target: %{{"raw", "users"} => 7},
+      writer: %{adapter: FakeWriter},
+      storage: %{provider: :s3, bucket: "bucket", adapter: FakeStorage},
+      committer_module: FakeCommitter,
+      object_prefix: "cdc"
+    }
+
+    batch = %{rows: [%{"id" => 1}], lsn_start: "0/10", lsn_end: "0/11", row_count: 1}
+
+    assert {:error, {:missing_uploaded_batch_files, "batch-uploaded-missing"}} =
+             BatchProcessor.process_batch(context, {"raw", "users"}, batch)
+
+    assert_received {:meta_transition_batch, "batch-uploaded-missing", :failed, opts}
+    assert Keyword.get(opts, :error_message)
+
+    refute_received {:committer_commit_batch, _, _}
   end
 
   test "returns error for unknown designated table target" do

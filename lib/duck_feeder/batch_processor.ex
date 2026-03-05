@@ -96,6 +96,17 @@ defmodule DuckFeeder.BatchProcessor do
     end
   end
 
+  defp process_uncommitted_batch(context, meta, conn, table, batch, batch_id, :uploaded) do
+    case recover_uploaded_batch(context, meta, conn, table, batch, batch_id) do
+      {:ok, _committed} = ok ->
+        ok
+
+      {:error, reason} = error ->
+        mark_failed(meta, conn, batch_id, reason)
+        error
+    end
+  end
+
   defp process_uncommitted_batch(context, meta, conn, table, batch, batch_id, current_state) do
     with {:ok, :encoded} <- advance_to(meta, conn, batch_id, current_state, :encoded),
          {:ok, write_result, effective_batch} <- write_batch_with_poison_policy(context, batch) do
@@ -185,6 +196,128 @@ defmodule DuckFeeder.BatchProcessor do
          row_count: write_result.row_count,
          file_size_bytes: write_result.file_size_bytes
        }}
+    end
+  end
+
+  defp recover_uploaded_batch(context, meta, conn, table, batch, batch_id) do
+    committer_module = Map.get(context, :committer_module, NoopCommitter)
+
+    with {:ok, committer_opts} <- normalize_committer_opts(Map.get(context, :committer_opts, [])),
+         {:ok, recovered_file_info} <- recover_uploaded_file_info(meta, conn, batch_id, batch),
+         {:ok, prepared_committer_opts} <-
+           prepare_recovered_committer_opts(committer_opts, recovered_file_info.delete_files),
+         {:ok, commit_result} <-
+           committer_module.commit_batch(
+             conn,
+             batch_id,
+             Keyword.merge(
+               prepared_committer_opts,
+               meta_module: meta,
+               table: table,
+               batch: batch,
+               object_key: recovered_file_info.object_key,
+               write_result: recovered_file_info.write_result
+             )
+           ) do
+      {:ok,
+       %{
+         status: :committed,
+         batch_id: batch_id,
+         designated_table_id: commit_result.designated_table_id,
+         checkpoint_lsn: commit_result.checkpoint_lsn,
+         object_key: recovered_file_info.object_key,
+         row_count: recovered_file_info.write_result.row_count,
+         file_size_bytes: recovered_file_info.write_result.file_size_bytes
+       }}
+    end
+  end
+
+  defp recover_uploaded_file_info(meta, conn, batch_id, batch) do
+    fallback_row_count = Map.get(batch, :row_count, length(Map.get(batch, :rows, [])))
+
+    with {:ok, files} <- meta.list_batch_files(conn, batch_id),
+         [main_file | delete_files] <- files,
+         object_key when is_binary(object_key) and object_key != "" <-
+           batch_file_field(main_file, :object_key) do
+      row_count =
+        normalize_non_neg_integer(
+          batch_file_field(main_file, :row_count, fallback_row_count),
+          fallback_row_count
+        )
+
+      file_size = normalize_non_neg_integer(batch_file_field(main_file, :file_size, 0), 0)
+
+      {:ok,
+       %{
+         object_key: object_key,
+         write_result: %{
+           row_count: row_count,
+           file_size_bytes: file_size,
+           format: infer_file_format_from_key(object_key)
+         },
+         delete_files: recover_delete_files(delete_files)
+       }}
+    else
+      [] ->
+        {:error, {:missing_uploaded_batch_files, batch_id}}
+
+      nil ->
+        {:error, {:invalid_uploaded_batch_file, batch_id}}
+
+      {:error, _reason} = error ->
+        error
+
+      other ->
+        {:error, {:invalid_uploaded_batch_files, batch_id, other}}
+    end
+  end
+
+  defp prepare_recovered_committer_opts(committer_opts, recovered_delete_files)
+       when is_list(committer_opts) do
+    {:ok,
+     committer_opts
+     |> Keyword.delete(:delete_files_fun)
+     |> Keyword.delete(:validate_delete_files?)
+     |> maybe_put_keyword(:delete_files, recovered_delete_files)
+     |> maybe_put_keyword(
+       :replace_data_file_ids,
+       keyword_bigint_list(committer_opts, :replace_data_file_ids)
+     )}
+  end
+
+  defp recover_delete_files(files) when is_list(files) do
+    Enum.flat_map(files, fn file ->
+      case batch_file_field(file, :object_key) do
+        path when is_binary(path) and path != "" ->
+          [
+            %{
+              path: path,
+              data_file_id: nil,
+              path_is_relative: true,
+              format: infer_file_format_from_key(path) |> Atom.to_string(),
+              delete_count: normalize_non_neg_integer(batch_file_field(file, :row_count, 0), 0),
+              file_size_bytes:
+                normalize_non_neg_integer(batch_file_field(file, :file_size, 0), 0),
+              footer_size: 0,
+              encryption_key: nil
+            }
+          ]
+
+        _ ->
+          []
+      end
+    end)
+  end
+
+  defp batch_file_field(file, key, default \\ nil) when is_map(file) and is_atom(key) do
+    Map.get(file, key, Map.get(file, Atom.to_string(key), default))
+  end
+
+  defp infer_file_format_from_key(object_key) when is_binary(object_key) do
+    case object_key |> Path.extname() |> String.downcase() do
+      ".jsonl" -> :jsonl
+      ".parquet" -> :parquet
+      _ -> :parquet
     end
   end
 

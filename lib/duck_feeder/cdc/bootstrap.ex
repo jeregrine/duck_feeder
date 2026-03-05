@@ -25,6 +25,14 @@ defmodule DuckFeeder.CDC.Bootstrap do
          {:ok, slot_name} <- fetch_required(attrs, :slot_name),
          {:ok, designated_tables} <- fetch_required(attrs, :designated_tables),
          plugin <- Map.get(attrs, :plugin, "pgoutput"),
+         :ok <-
+           maybe_ensure_replica_identity_full(
+             setup_module,
+             conn,
+             designated_tables,
+             query_fun,
+             opts
+           ),
          {:ok, publication_result} <-
            setup_module.ensure_publication(conn, publication_name, designated_tables,
              query_fun: query_fun
@@ -59,6 +67,16 @@ defmodule DuckFeeder.CDC.Bootstrap do
 
   defp resolve_start_lsn(:exists, current_lsn) when is_binary(current_lsn), do: {:ok, current_lsn}
   defp resolve_start_lsn(other, _current_lsn), do: {:error, {:invalid_slot_result, other}}
+
+  defp maybe_ensure_replica_identity_full(setup_module, conn, designated_tables, query_fun, opts)
+       when is_atom(setup_module) do
+    if Keyword.get(opts, :enforce_replica_identity_full?, true) and
+         function_exported?(setup_module, :ensure_replica_identity_full, 3) do
+      setup_module.ensure_replica_identity_full(conn, designated_tables, query_fun: query_fun)
+    else
+      :ok
+    end
+  end
 
   defp fetch_required(attrs, key) do
     case Map.get(attrs, key) do

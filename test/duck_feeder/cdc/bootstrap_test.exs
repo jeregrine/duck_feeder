@@ -18,6 +18,16 @@ defmodule DuckFeeder.CDC.BootstrapTest do
     def ensure_slot(_conn, _slot_name, _plugin, _opts), do: {:ok, :exists}
   end
 
+  defmodule SetupReplicaIdentityError do
+    def ensure_replica_identity_full(_conn, _designated_tables, _opts),
+      do: {:error, {:replica_identity_not_full, {"public", "users"}, :default}}
+
+    def ensure_publication(_conn, _publication_name, _designated_tables, _opts),
+      do: {:ok, :exists}
+
+    def ensure_slot(_conn, _slot_name, _plugin, _opts), do: {:ok, :exists}
+  end
+
   test "bootstrap uses created slot lsn as start lsn" do
     query_fun = fn _conn, "SELECT pg_current_wal_lsn()::text", [] ->
       {:ok, %Postgrex.Result{rows: [["0/60"]]}}
@@ -62,6 +72,43 @@ defmodule DuckFeeder.CDC.BootstrapTest do
     assert result.publication == :exists
     assert result.slot == :exists
     assert result.start_lsn == "0/60"
+  end
+
+  test "bootstrap enforces full replica identity by default when setup supports validation" do
+    query_fun = fn _conn, "SELECT pg_current_wal_lsn()::text", [] ->
+      {:ok, %Postgrex.Result{rows: [["0/60"]]}}
+    end
+
+    assert {:error, {:replica_identity_not_full, {"public", "users"}, :default}} =
+             Bootstrap.bootstrap(
+               :conn,
+               %{
+                 publication_name: "duck_pub",
+                 slot_name: "duck_slot",
+                 designated_tables: [%{source_schema: "public", source_table: "users"}]
+               },
+               setup_module: SetupReplicaIdentityError,
+               query_fun: query_fun
+             )
+  end
+
+  test "bootstrap can skip replica identity enforcement" do
+    query_fun = fn _conn, "SELECT pg_current_wal_lsn()::text", [] ->
+      {:ok, %Postgrex.Result{rows: [["0/60"]]}}
+    end
+
+    assert {:ok, %{start_lsn: "0/60"}} =
+             Bootstrap.bootstrap(
+               :conn,
+               %{
+                 publication_name: "duck_pub",
+                 slot_name: "duck_slot",
+                 designated_tables: [%{source_schema: "public", source_table: "users"}]
+               },
+               setup_module: SetupReplicaIdentityError,
+               query_fun: query_fun,
+               enforce_replica_identity_full?: false
+             )
   end
 
   test "returns error when required keys are missing" do
