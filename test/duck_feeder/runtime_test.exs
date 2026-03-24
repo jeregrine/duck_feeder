@@ -5,111 +5,15 @@ defmodule DuckFeeder.RuntimeTest do
 
   defmodule FakeMeta do
     @state_table :duck_feeder_runtime_test_state
-    def get_source(_conn, "source-a") do
-      {:ok,
-       %{
-         id: 10,
-         name: "source-a",
-         connection_info: %{"dsn" => "postgres://user:pass@localhost:5432/source_a"},
-         slot_name: "slot-a",
-         publication_name: "pub-a"
-       }}
+
+    def fetch_start_lsn(_conn, checkpoint_keys, default_lsn) do
+      case Enum.sort(checkpoint_keys) do
+        ["source-a:raw.users"] -> {:ok, "0/20"}
+        ["source-resume:raw.users"] -> {:ok, "0/40"}
+        ["source-partial:raw.users"] -> {:ok, "0/34"}
+        _ -> {:ok, default_lsn}
+      end
     end
-
-    def get_source(_conn, "source-missing-slot") do
-      {:ok,
-       %{
-         id: 11,
-         name: "source-missing-slot",
-         connection_info: %{"dsn" => "postgres://user:pass@localhost:5432/source_b"},
-         slot_name: nil,
-         publication_name: "pub-b"
-       }}
-    end
-
-    def get_source(_conn, "source-resume") do
-      {:ok,
-       %{
-         id: 12,
-         name: "source-resume",
-         connection_info: %{"dsn" => "postgres://user:pass@localhost:5432/source_c"},
-         slot_name: "slot-resume",
-         publication_name: "pub-resume"
-       }}
-    end
-
-    def get_source(_conn, "source-partial") do
-      {:ok,
-       %{
-         id: 13,
-         name: "source-partial",
-         connection_info: %{"dsn" => "postgres://user:pass@localhost:5432/source_d"},
-         slot_name: "slot-partial",
-         publication_name: "pub-partial"
-       }}
-    end
-
-    def get_source(_conn, other), do: {:error, {:source_not_found, other}}
-
-    def list_designated_tables(_conn, source_id: 10) do
-      {:ok,
-       [
-         %{
-           id: 1,
-           source_id: 10,
-           source_schema: "public",
-           source_table: "users",
-           target_schema: "raw",
-           target_table: "users",
-           mode: "cdc_changelog",
-           primary_keys: ["id"],
-           partition_config: %{}
-         }
-       ]}
-    end
-
-    def list_designated_tables(_conn, source_id: 11), do: {:ok, []}
-
-    def list_designated_tables(_conn, source_id: 12) do
-      {:ok,
-       [
-         %{
-           id: 2,
-           source_id: 12,
-           source_schema: "public",
-           source_table: "users",
-           target_schema: "raw",
-           target_table: "users",
-           mode: "cdc_changelog",
-           primary_keys: ["id"],
-           partition_config: %{}
-         }
-       ]}
-    end
-
-    def list_designated_tables(_conn, source_id: 13) do
-      {:ok,
-       [
-         %{
-           id: 3,
-           source_id: 13,
-           source_schema: "public",
-           source_table: "users",
-           target_schema: "raw",
-           target_table: "users",
-           mode: "cdc_changelog",
-           primary_keys: ["id"],
-           partition_config: %{}
-         }
-       ]}
-    end
-
-    def list_designated_tables(_conn, _opts), do: {:ok, []}
-
-    def fetch_source_start_lsn(_conn, 10, _default), do: {:ok, "0/20"}
-    def fetch_source_start_lsn(_conn, 11, default), do: {:ok, default}
-    def fetch_source_start_lsn(_conn, 12, _default), do: {:ok, "0/40"}
-    def fetch_source_start_lsn(_conn, 13, _default), do: {:ok, "0/34"}
 
     def fetch_snapshot_handoff(_conn, source_id) do
       ensure_state_table()
@@ -397,7 +301,7 @@ defmodule DuckFeeder.RuntimeTest do
     :ok
   end
 
-  test "builds service options from metadata" do
+  test "builds service options from explicit runtime config" do
     duckdb = %{
       path:
         Path.join(
@@ -409,6 +313,8 @@ defmodule DuckFeeder.RuntimeTest do
     assert {:ok, opts} =
              Runtime.service_options(:meta_conn, "source-a", nil,
                meta_module: FakeMeta,
+               source: runtime_source("source-a"),
+               designated_tables: runtime_tables("source-a"),
                observer_pid: self(),
                object_prefix: "prefix",
                duckdb: duckdb
@@ -422,7 +328,7 @@ defmodule DuckFeeder.RuntimeTest do
     assert opts[:meta_module] == FakeMeta
   end
 
-  test "builds DuckDB service options from metadata without storage" do
+  test "builds DuckDB service options from explicit runtime config without storage" do
     duckdb = %{
       path:
         Path.join(
@@ -434,6 +340,8 @@ defmodule DuckFeeder.RuntimeTest do
     assert {:ok, opts} =
              Runtime.service_options(:meta_conn, "source-a", nil,
                meta_module: FakeMeta,
+               source: runtime_source("source-a"),
+               designated_tables: runtime_tables("source-a"),
                observer_pid: self(),
                duckdb: duckdb
              )
@@ -443,12 +351,14 @@ defmodule DuckFeeder.RuntimeTest do
     assert opts[:sink_module] == DuckFeeder.Sink.DuckDB
   end
 
-  test "starts service from metadata" do
+  test "starts service from explicit runtime config" do
     duckdb = %{}
 
     assert {:ok, pid} =
              Runtime.start_service(:meta_conn, "source-a", duckdb,
                meta_module: FakeMeta,
+               source: runtime_source("source-a"),
+               designated_tables: runtime_tables("source-a"),
                name: nil,
                observer_pid: self()
              )
@@ -465,6 +375,8 @@ defmodule DuckFeeder.RuntimeTest do
     assert {:ok, %{service_pid: service_pid, cdc_pid: cdc_pid, start_lsn: "0/20"}} =
              Runtime.start_stream(:meta_conn, "source-a", duckdb,
                meta_module: FakeMeta,
+               source: runtime_source("source-a"),
+               designated_tables: runtime_tables("source-a"),
                service_module: FakeService,
                cdc_module: FakeCDC,
                connection_options_module: FakeConnectionOptions,
@@ -509,6 +421,8 @@ defmodule DuckFeeder.RuntimeTest do
     assert {:ok, %{service_pid: service_pid, cdc_pid: cdc_pid, start_lsn: "0/20"}} =
              Runtime.start_stream(:meta_conn, "source-a", nil,
                meta_module: FakeMeta,
+               source: runtime_source("source-a"),
+               designated_tables: runtime_tables("source-a"),
                service_module: FakeService,
                cdc_module: FakeCDC,
                connection_options_module: FakeConnectionOptions,
@@ -540,6 +454,8 @@ defmodule DuckFeeder.RuntimeTest do
     assert {:ok, %{service_pid: service_pid, cdc_pid: cdc_pid, start_lsn: "0/20"}} =
              Runtime.start_stream(:meta_conn, "source-a", duckdb,
                meta_module: FakeMeta,
+               source: runtime_source("source-a"),
+               designated_tables: runtime_tables("source-a"),
                service_module: FakeService,
                cdc_module: FakeCDC,
                connection_options_module: FakeConnectionOptions,
@@ -563,6 +479,8 @@ defmodule DuckFeeder.RuntimeTest do
     assert {:ok, %{service_pid: service_pid, cdc_pid: cdc_pid, start_lsn: "0/20"}} =
              Runtime.start_stream(:meta_conn, "source-a", duckdb,
                meta_module: FakeMeta,
+               source: runtime_source("source-a"),
+               designated_tables: runtime_tables("source-a"),
                service_module: FakeService,
                cdc_module: FakeCDC,
                connection_options_module: FakeConnectionOptions,
@@ -590,6 +508,8 @@ defmodule DuckFeeder.RuntimeTest do
     assert {:ok, %{service_pid: service_pid, cdc_pid: cdc_pid, start_lsn: "0/20"}} =
              Runtime.start_stream(:meta_conn, "source-a", duckdb,
                meta_module: FakeMeta,
+               source: runtime_source("source-a"),
+               designated_tables: runtime_tables("source-a"),
                service_module: FakeService,
                cdc_module: FakeCDC,
                connection_options_module: FakeConnectionOptions,
@@ -630,6 +550,8 @@ defmodule DuckFeeder.RuntimeTest do
     assert {:ok, %{service_pid: service_pid, cdc_pid: cdc_pid, start_lsn: "0/20"}} =
              Runtime.start_stream(:meta_conn, "source-a", duckdb,
                meta_module: FakeMeta,
+               source: runtime_source("source-a"),
+               designated_tables: runtime_tables("source-a"),
                service_module: FakeService,
                cdc_module: FakeCDC,
                connection_options_module: FakeConnectionOptions,
@@ -671,6 +593,8 @@ defmodule DuckFeeder.RuntimeTest do
     assert {:ok, %{service_pid: service_pid, cdc_pid: cdc_pid, start_lsn: "0/30"}} =
              Runtime.start_stream(:meta_conn, "source-a", duckdb,
                meta_module: FakeMeta,
+               source: runtime_source("source-a"),
+               designated_tables: runtime_tables("source-a"),
                service_module: FakeService,
                cdc_module: FakeCDC,
                connection_options_module: FakeConnectionOptions,
@@ -713,6 +637,8 @@ defmodule DuckFeeder.RuntimeTest do
     assert {:error, {:bootstrap_exception, %RuntimeError{message: "bootstrap boom"}}} =
              Runtime.start_stream(:meta_conn, "source-a", duckdb,
                meta_module: FakeMeta,
+               source: runtime_source("source-a"),
+               designated_tables: runtime_tables("source-a"),
                service_module: FakeService,
                cdc_module: FakeCDC,
                connection_options_module: FakeConnectionOptions,
@@ -749,6 +675,8 @@ defmodule DuckFeeder.RuntimeTest do
     assert {:ok, %{service_pid: service_pid, cdc_pid: cdc_pid, start_lsn: "0/35"}} =
              Runtime.start_stream(:meta_conn, "source-a", duckdb,
                meta_module: FakeMeta,
+               source: runtime_source("source-a"),
+               designated_tables: runtime_tables("source-a"),
                service_module: FakeService,
                cdc_module: FakeCDC,
                connection_options_module: FakeConnectionOptions,
@@ -782,6 +710,8 @@ defmodule DuckFeeder.RuntimeTest do
     assert {:ok, %{service_pid: service_pid, cdc_pid: cdc_pid, start_lsn: "0/35"}} =
              Runtime.start_stream(:meta_conn, "source-a", duckdb,
                meta_module: FakeMeta,
+               source: runtime_source("source-a"),
+               designated_tables: runtime_tables("source-a"),
                service_module: FakeService,
                cdc_module: FakeCDC,
                connection_options_module: FakeConnectionOptions,
@@ -810,6 +740,8 @@ defmodule DuckFeeder.RuntimeTest do
     assert {:ok, %{service_pid: service_pid, cdc_pid: cdc_pid, start_lsn: "0/35"}} =
              Runtime.start_stream(:meta_conn, "source-partial", duckdb,
                meta_module: FakeMeta,
+               source: runtime_source("source-partial"),
+               designated_tables: runtime_tables("source-partial"),
                service_module: FakeService,
                cdc_module: FakeCDC,
                connection_options_module: FakeConnectionOptions,
@@ -848,6 +780,8 @@ defmodule DuckFeeder.RuntimeTest do
     assert {:error, {:initial_snapshot_failed, {:snapshot_runner_exception, %RuntimeError{}}}} =
              Runtime.start_stream(:meta_conn, "source-a", duckdb,
                meta_module: FakeMeta,
+               source: runtime_source("source-a"),
+               designated_tables: runtime_tables("source-a"),
                service_module: FakeService,
                cdc_module: FakeCDC,
                connection_options_module: FakeConnectionOptions,
@@ -871,6 +805,8 @@ defmodule DuckFeeder.RuntimeTest do
     assert {:error, {:snapshot_replay_failed, {:snapshot_ingest_exit, _reason}}} =
              Runtime.start_stream(:meta_conn, "source-a", duckdb,
                meta_module: FakeMeta,
+               source: runtime_source("source-a"),
+               designated_tables: runtime_tables("source-a"),
                service_module: FakeSnapshotIngestCrashService,
                cdc_module: FakeCDC,
                connection_options_module: FakeConnectionOptions,
@@ -892,6 +828,8 @@ defmodule DuckFeeder.RuntimeTest do
     assert {:error, :failed_to_start_cdc} =
              Runtime.start_stream(:meta_conn, "source-a", duckdb,
                meta_module: FakeMeta,
+               source: runtime_source("source-a"),
+               designated_tables: runtime_tables("source-a"),
                service_module: FakeService,
                cdc_module: FakeCDCFailStart,
                connection_options_module: FakeConnectionOptions,
@@ -912,6 +850,8 @@ defmodule DuckFeeder.RuntimeTest do
     assert {:error, {:snapshot_handoff_incomplete, %{source_id: 10, state: :pending}}} =
              Runtime.start_stream(:meta_conn, "source-a", duckdb,
                meta_module: FakeMeta,
+               source: runtime_source("source-a"),
+               designated_tables: runtime_tables("source-a"),
                service_module: FakeService,
                cdc_module: FakeCDC,
                connection_options_module: FakeConnectionOptions,
@@ -925,6 +865,8 @@ defmodule DuckFeeder.RuntimeTest do
     assert {:ok, %{service_pid: service_pid, cdc_pid: cdc_pid}} =
              Runtime.start_stream(:meta_conn, "source-a", duckdb,
                meta_module: FakeMeta,
+               source: runtime_source("source-a"),
+               designated_tables: runtime_tables("source-a"),
                service_module: FakeService,
                cdc_module: FakeCDC,
                connection_options_module: FakeConnectionOptions,
@@ -952,6 +894,8 @@ defmodule DuckFeeder.RuntimeTest do
     assert {:error, {:snapshot_replay_failed, {:snapshot_ingest_exit, _reason}}} =
              Runtime.start_stream(:meta_conn, "source-a", duckdb,
                meta_module: FakeMeta,
+               source: runtime_source("source-a"),
+               designated_tables: runtime_tables("source-a"),
                service_module: FakeSnapshotIngestCrashService,
                cdc_module: FakeCDC,
                connection_options_module: FakeConnectionOptions,
@@ -979,6 +923,8 @@ defmodule DuckFeeder.RuntimeTest do
             {:snapshot_resume_requires_snapshot_before_stream, %{source_id: 10, state: :pending}}} =
              Runtime.start_stream(:meta_conn, "source-a", duckdb,
                meta_module: FakeMeta,
+               source: runtime_source("source-a"),
+               designated_tables: runtime_tables("source-a"),
                service_module: FakeService,
                cdc_module: FakeCDC,
                connection_options_module: FakeConnectionOptions,
@@ -997,6 +943,8 @@ defmodule DuckFeeder.RuntimeTest do
     assert {:error, :failed_to_start_cdc} =
              Runtime.start_stream(:meta_conn, "source-a", duckdb,
                meta_module: FakeMeta,
+               source: runtime_source("source-a"),
+               designated_tables: runtime_tables("source-a"),
                service_module: FakeService,
                cdc_module: FakeCDCFailStart,
                connection_options_module: FakeConnectionOptions,
@@ -1022,6 +970,8 @@ defmodule DuckFeeder.RuntimeTest do
     assert {:error, :forced_mark_pending_failure} =
              Runtime.start_stream(:meta_conn, "source-a", duckdb,
                meta_module: FakeMeta,
+               source: runtime_source("source-a"),
+               designated_tables: runtime_tables("source-a"),
                service_module: FakeService,
                cdc_module: FakeCDC,
                connection_options_module: FakeConnectionOptions,
@@ -1045,6 +995,8 @@ defmodule DuckFeeder.RuntimeTest do
     assert {:ok, %{service_pid: service_pid, cdc_pid: cdc_pid}} =
              Runtime.start_stream(:meta_conn, "source-a", duckdb,
                meta_module: FakeMeta,
+               source: runtime_source("source-a"),
+               designated_tables: runtime_tables("source-a"),
                service_module: FakeService,
                cdc_module: FakeCDC,
                connection_options_module: FakeConnectionOptions,
@@ -1073,6 +1025,8 @@ defmodule DuckFeeder.RuntimeTest do
     assert {:error, {:snapshot_handoff_mark_complete_failed, :forced_mark_complete_failure}} =
              Runtime.start_stream(:meta_conn, "source-a", duckdb,
                meta_module: FakeMeta,
+               source: runtime_source("source-a"),
+               designated_tables: runtime_tables("source-a"),
                service_module: FakeService,
                cdc_module: FakeCDC,
                connection_options_module: FakeConnectionOptions,
@@ -1097,6 +1051,8 @@ defmodule DuckFeeder.RuntimeTest do
     assert {:error, {:snapshot_handoff_incomplete, %{source_id: 12, state: :pending}}} =
              Runtime.start_stream(:meta_conn, "source-resume", duckdb,
                meta_module: FakeMeta,
+               source: runtime_source("source-resume"),
+               designated_tables: runtime_tables("source-resume"),
                service_module: FakeService,
                cdc_module: FakeCDC,
                connection_options_module: FakeConnectionOptions,
@@ -1116,6 +1072,8 @@ defmodule DuckFeeder.RuntimeTest do
     assert {:ok, %{service_pid: service_pid, cdc_pid: cdc_pid, start_lsn: "0/40"}} =
              Runtime.start_stream(:meta_conn, "source-resume", duckdb,
                meta_module: FakeMeta,
+               source: runtime_source("source-resume"),
+               designated_tables: runtime_tables("source-resume"),
                service_module: FakeService,
                cdc_module: FakeCDC,
                connection_options_module: FakeConnectionOptions,
@@ -1143,6 +1101,8 @@ defmodule DuckFeeder.RuntimeTest do
     assert {:ok, %{service_pid: service_pid, cdc_pid: cdc_pid, start_lsn: "0/40"}} =
              Runtime.start_stream(:meta_conn, "source-resume", duckdb,
                meta_module: FakeMeta,
+               source: runtime_source("source-resume"),
+               designated_tables: runtime_tables("source-resume"),
                service_module: FakeService,
                cdc_module: FakeCDC,
                connection_options_module: FakeConnectionOptions,
@@ -1170,6 +1130,8 @@ defmodule DuckFeeder.RuntimeTest do
     assert {:error, :missing_snapshot_row_handler} =
              Runtime.start_stream(:meta_conn, "source-a", duckdb,
                meta_module: FakeMeta,
+               source: runtime_source("source-a"),
+               designated_tables: runtime_tables("source-a"),
                service_module: FakeService,
                cdc_module: FakeCDC,
                connection_options_module: FakeConnectionOptions,
@@ -1186,8 +1148,18 @@ defmodule DuckFeeder.RuntimeTest do
   test "returns error when source is missing" do
     duckdb = %{}
 
-    assert {:error, {:source_not_found, "missing"}} =
+    assert {:error, {:missing_runtime_source, "missing"}} =
              Runtime.service_options(:meta_conn, "missing", duckdb, meta_module: FakeMeta)
+  end
+
+  test "returns error when designated tables are missing" do
+    duckdb = %{}
+
+    assert {:error, {:missing_designated_tables, "source-a"}} =
+             Runtime.service_options(:meta_conn, "source-a", duckdb,
+               meta_module: FakeMeta,
+               source: runtime_source("source-a")
+             )
   end
 
   test "returns error when source fields are missing for stream startup" do
@@ -1196,10 +1168,102 @@ defmodule DuckFeeder.RuntimeTest do
     assert {:error, {:missing_source_field, :slot_name}} =
              Runtime.start_stream(:meta_conn, "source-missing-slot", duckdb,
                meta_module: FakeMeta,
+               source: runtime_source("source-missing-slot"),
+               designated_tables: runtime_tables("source-missing-slot"),
                service_module: FakeService,
                cdc_module: FakeCDC,
                connection_options_module: FakeConnectionOptions,
                observer_pid: self()
              )
+  end
+
+  defp runtime_source("source-a") do
+    %{
+      id: 10,
+      name: "source-a",
+      connection_info: %{"dsn" => "postgres://user:pass@localhost:5432/source_a"},
+      slot_name: "slot-a",
+      publication_name: "pub-a"
+    }
+  end
+
+  defp runtime_source("source-missing-slot") do
+    %{
+      id: 11,
+      name: "source-missing-slot",
+      connection_info: %{"dsn" => "postgres://user:pass@localhost:5432/source_b"},
+      slot_name: nil,
+      publication_name: "pub-b"
+    }
+  end
+
+  defp runtime_source("source-resume") do
+    %{
+      id: 12,
+      name: "source-resume",
+      connection_info: %{"dsn" => "postgres://user:pass@localhost:5432/source_c"},
+      slot_name: "slot-resume",
+      publication_name: "pub-resume"
+    }
+  end
+
+  defp runtime_source("source-partial") do
+    %{
+      id: 13,
+      name: "source-partial",
+      connection_info: %{"dsn" => "postgres://user:pass@localhost:5432/source_d"},
+      slot_name: "slot-partial",
+      publication_name: "pub-partial"
+    }
+  end
+
+  defp runtime_tables("source-a") do
+    [
+      %{
+        id: 1,
+        source_id: 10,
+        source_schema: "public",
+        source_table: "users",
+        target_schema: "raw",
+        target_table: "users",
+        mode: "cdc_changelog",
+        primary_keys: ["id"],
+        partition_config: %{}
+      }
+    ]
+  end
+
+  defp runtime_tables("source-missing-slot"), do: []
+
+  defp runtime_tables("source-resume") do
+    [
+      %{
+        id: 2,
+        source_id: 12,
+        source_schema: "public",
+        source_table: "users",
+        target_schema: "raw",
+        target_table: "users",
+        mode: "cdc_changelog",
+        primary_keys: ["id"],
+        partition_config: %{}
+      }
+    ]
+  end
+
+  defp runtime_tables("source-partial") do
+    [
+      %{
+        id: 3,
+        source_id: 13,
+        source_schema: "public",
+        source_table: "users",
+        target_schema: "raw",
+        target_table: "users",
+        mode: "cdc_changelog",
+        primary_keys: ["id"],
+        partition_config: %{}
+      }
+    ]
   end
 end

@@ -403,63 +403,43 @@ defmodule DuckFeeder.Runtime do
   defp implied_sink_module_from_duckdb(nil), do: nil
   defp implied_sink_module_from_duckdb(_duckdb), do: DuckFeeder.Sink.DuckDB
 
-  defp resolve_runtime_source(meta_module, meta_conn, source_name, opts)
-       when is_atom(meta_module) and is_binary(source_name) and is_list(opts) do
+  defp resolve_runtime_source(source_name, opts)
+       when is_binary(source_name) and is_list(opts) do
     case Keyword.get(opts, :source) do
       source when is_map(source) ->
         {:ok, normalize_runtime_source(source_name, source)}
 
       nil ->
-        if function_exported?(meta_module, :get_source, 2) do
-          with {:ok, source} <- meta_module.get_source(meta_conn, source_name) do
-            {:ok, normalize_runtime_source(source_name, source)}
-          end
-        else
-          {:error, {:missing_runtime_source, source_name}}
-        end
+        {:error, {:missing_runtime_source, source_name}}
 
       other ->
         {:error, {:invalid_option, :source, other}}
     end
   end
 
-  defp resolve_runtime_designated_tables(meta_module, meta_conn, source_name, source, opts)
-       when is_atom(meta_module) and is_binary(source_name) and is_map(source) and is_list(opts) do
+  defp resolve_runtime_designated_tables(source_name, opts)
+       when is_binary(source_name) and is_list(opts) do
     case Keyword.get(opts, :designated_tables) do
       designated_tables when is_list(designated_tables) ->
         {:ok, put_runtime_checkpoint_keys(source_name, designated_tables)}
 
       nil ->
-        if function_exported?(meta_module, :list_designated_tables, 2) and
-             Map.has_key?(source, :id) do
-          with {:ok, designated_tables} <-
-                 meta_module.list_designated_tables(meta_conn, source_id: source.id) do
-            {:ok, put_runtime_checkpoint_keys(source_name, designated_tables)}
-          end
-        else
-          {:error, {:missing_designated_tables, source_name}}
-        end
+        {:error, {:missing_designated_tables, source_name}}
 
       other ->
         {:error, {:invalid_option, :designated_tables, other}}
     end
   end
 
-  defp fetch_runtime_start_lsn(meta_module, meta_conn, source, designated_tables, opts)
-       when is_atom(meta_module) and is_map(source) and is_list(designated_tables) and
-              is_list(opts) do
+  defp fetch_runtime_start_lsn(meta_module, meta_conn, designated_tables, opts)
+       when is_atom(meta_module) and is_list(designated_tables) and is_list(opts) do
     default_start_lsn = Keyword.get(opts, :default_start_lsn, "0/0")
     checkpoint_keys = DesignatedTable.checkpoint_keys(designated_tables)
 
-    cond do
-      function_exported?(meta_module, :fetch_start_lsn, 3) ->
-        meta_module.fetch_start_lsn(meta_conn, checkpoint_keys, default_start_lsn)
-
-      function_exported?(meta_module, :fetch_source_start_lsn, 3) and Map.has_key?(source, :id) ->
-        meta_module.fetch_source_start_lsn(meta_conn, source.id, default_start_lsn)
-
-      true ->
-        {:ok, default_start_lsn}
+    if function_exported?(meta_module, :fetch_start_lsn, 3) do
+      meta_module.fetch_start_lsn(meta_conn, checkpoint_keys, default_start_lsn)
+    else
+      {:ok, default_start_lsn}
     end
   end
 
@@ -495,9 +475,8 @@ defmodule DuckFeeder.Runtime do
 
     with {:ok, sink_module} <- resolve_sink_module_option(opts),
          {:ok, duckdb} <- normalize_duckdb(duckdb || Keyword.get(opts, :duckdb)),
-         {:ok, source} <- resolve_runtime_source(meta_module, meta_conn, source_name, opts),
-         {:ok, designated_tables} <-
-           resolve_runtime_designated_tables(meta_module, meta_conn, source_name, source, opts) do
+         {:ok, source} <- resolve_runtime_source(source_name, opts),
+         {:ok, designated_tables} <- resolve_runtime_designated_tables(source_name, opts) do
       {:ok,
        [
          name: Keyword.get(opts, :name),
@@ -536,13 +515,12 @@ defmodule DuckFeeder.Runtime do
 
     with {:ok, sink_module} <- resolve_sink_module_option(opts),
          {:ok, duckdb} <- normalize_duckdb(duckdb || Keyword.get(opts, :duckdb)),
-         {:ok, source} <- resolve_runtime_source(meta_module, meta_conn, source_name, opts),
-         {:ok, designated_tables} <-
-           resolve_runtime_designated_tables(meta_module, meta_conn, source_name, source, opts),
+         {:ok, source} <- resolve_runtime_source(source_name, opts),
+         {:ok, designated_tables} <- resolve_runtime_designated_tables(source_name, opts),
          {:ok, slot_name} <- require_source_field(source, :slot_name),
          {:ok, publication_name} <- require_source_field(source, :publication_name),
          {:ok, meta_start_lsn} <-
-           fetch_runtime_start_lsn(meta_module, meta_conn, source, designated_tables, opts),
+           fetch_runtime_start_lsn(meta_module, meta_conn, designated_tables, opts),
          {:ok, snapshot_handoff} <-
            fetch_snapshot_handoff(meta_module, meta_conn, source_name, source),
          {:ok, snapshot_plan} <- snapshot_plan(meta_start_lsn, snapshot_handoff, opts),
