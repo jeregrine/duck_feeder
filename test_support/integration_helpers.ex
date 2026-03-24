@@ -119,26 +119,16 @@ defmodule DuckFeeder.TestSupport.IntegrationHelpers do
   end
 
   def query_duckdb!(duckdb, sql) when is_map(duckdb) and is_binary(sql) do
-    {:ok, server} =
-      DuckDBConnection.start_link(name: nil, path: Map.get(duckdb, :path))
-
-    conn = DuckDBConnection.get_conn(server)
-
-    try do
-      Enum.each(Map.get(duckdb, :setup_sql, []), fn statement ->
-        :ok = DuckDBClient.execute(conn, statement)
-      end)
-
-      case Map.get(duckdb, :setup_fun) do
-        fun when is_function(fun, 1) -> :ok = fun.(conn)
-        _ -> :ok
-      end
-
+    with_duckdb_conn!(duckdb, fn conn ->
       {:ok, result} = DuckDBClient.query_map(conn, sql)
       result
-    after
-      safe_stop(server)
-    end
+    end)
+  end
+
+  def execute_duckdb!(duckdb, sql) when is_map(duckdb) and is_binary(sql) do
+    with_duckdb_conn!(duckdb, fn conn ->
+      :ok = DuckDBClient.execute(conn, sql)
+    end)
   end
 
   def flush_ducklake_inlined_data!(duckdb) when is_map(duckdb) do
@@ -161,6 +151,27 @@ defmodule DuckFeeder.TestSupport.IntegrationHelpers do
   end
 
   def safe_stop(_other), do: :ok
+
+  defp with_duckdb_conn!(duckdb, fun) when is_map(duckdb) and is_function(fun, 1) do
+    {:ok, server} = DuckDBConnection.start_link(name: nil, path: Map.get(duckdb, :path))
+
+    conn = DuckDBConnection.get_conn(server)
+
+    try do
+      Enum.each(Map.get(duckdb, :setup_sql, []), fn statement ->
+        :ok = DuckDBClient.execute(conn, statement)
+      end)
+
+      case Map.get(duckdb, :setup_fun) do
+        fun when is_function(fun, 1) -> :ok = fun.(conn)
+        _ -> :ok
+      end
+
+      fun.(conn)
+    after
+      safe_stop(server)
+    end
+  end
 
   defp fetch_database_url!(kind) when kind in [:source, :meta] do
     config = integration_config()

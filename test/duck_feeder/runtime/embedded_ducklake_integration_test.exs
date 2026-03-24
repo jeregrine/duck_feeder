@@ -319,6 +319,107 @@ defmodule DuckFeeder.Runtime.EmbeddedDuckLakeIntegrationTest do
     end)
   end
 
+  test "embedded runtime reruns a pending snapshot handoff when checkpoint is behind boundary", %{
+    source_conn: source_conn,
+    meta_conn: meta_conn,
+    source_name: source_name,
+    checkpoint_key: checkpoint_key,
+    duckdb: duckdb
+  } do
+    assert {:ok, _} =
+             Postgrex.query(
+               source_conn,
+               ~s|INSERT INTO public."#{@source_table}" (id, name) VALUES (10, 'ivy'), (11, 'jules')|,
+               []
+             )
+
+    pending_boundary_lsn = current_wal_lsn!(source_conn)
+
+    assert {:ok, ^pending_boundary_lsn} =
+             Meta.mark_snapshot_handoff_pending(meta_conn, source_name, pending_boundary_lsn)
+
+    assert {:ok, runtime} = RuntimeModule.start_link()
+    Process.unlink(runtime)
+
+    on_exit(fn ->
+      safe_stop(runtime)
+    end)
+
+    assert_batch_processed!({"raw", @source_table})
+
+    assert_eventually(fn ->
+      query_duckdb!(duckdb, "SELECT id, name FROM lake.raw.#{@source_table} ORDER BY id") ==
+        %{"id" => [10, 11], "name" => ["ivy", "jules"]}
+    end)
+
+    assert_eventually(fn ->
+      case Meta.fetch_snapshot_handoff(meta_conn, source_name) do
+        {:ok, %{state: :complete}} -> true
+        _ -> false
+      end
+    end)
+
+    assert_eventually(fn ->
+      case Meta.fetch_checkpoint(meta_conn, checkpoint_key) do
+        {:ok, lsn} when is_binary(lsn) and lsn != "0/0" -> true
+        _ -> false
+      end
+    end)
+  end
+
+  test "embedded runtime completes pending snapshot handoff without rerunning snapshot when checkpoint is at boundary",
+       %{
+         source_conn: source_conn,
+         meta_conn: meta_conn,
+         source_name: source_name,
+         checkpoint_key: checkpoint_key,
+         duckdb: duckdb
+       } do
+    assert {:ok, _} =
+             Postgrex.query(
+               source_conn,
+               ~s|INSERT INTO public."#{@source_table}" (id, name) VALUES (20, 'mila'), (21, 'nora')|,
+               []
+             )
+
+    boundary_lsn = current_wal_lsn!(source_conn)
+
+    :ok = execute_duckdb!(duckdb, "CREATE SCHEMA IF NOT EXISTS lake.raw")
+
+    :ok =
+      execute_duckdb!(
+        duckdb,
+        "CREATE TABLE lake.raw.#{@source_table} AS SELECT * FROM (VALUES (20, 'mila'), (21, 'nora')) AS __src(id, name)"
+      )
+
+    assert {:ok, ^boundary_lsn} =
+             Meta.mark_snapshot_handoff_pending(meta_conn, source_name, boundary_lsn)
+
+    assert {:ok, ^boundary_lsn} = Meta.upsert_checkpoint(meta_conn, checkpoint_key, boundary_lsn)
+
+    assert {:ok, runtime} = RuntimeModule.start_link()
+    Process.unlink(runtime)
+
+    on_exit(fn ->
+      safe_stop(runtime)
+    end)
+
+    refute_receive {:duck_feeder_batch_processed, {"raw", @source_table}, {:ok, _result}, _batch},
+                   2_000
+
+    assert %{"id" => [20, 21], "name" => ["mila", "nora"]} =
+             query_duckdb!(duckdb, "SELECT id, name FROM lake.raw.#{@source_table} ORDER BY id")
+
+    assert_eventually(fn ->
+      case Meta.fetch_snapshot_handoff(meta_conn, source_name) do
+        {:ok, %{state: :complete}} -> true
+        _ -> false
+      end
+    end)
+
+    assert {:ok, ^boundary_lsn} = Meta.fetch_checkpoint(meta_conn, checkpoint_key)
+  end
+
   defp assert_batch_processed!(table, timeout_ms \\ 15_000) when is_tuple(table) do
     assert_receive {:duck_feeder_batch_processed, ^table, {:ok, _result}, _batch}, timeout_ms
   end
@@ -329,6 +430,13 @@ defmodule DuckFeeder.Runtime.EmbeddedDuckLakeIntegrationTest do
     after
       0 -> :ok
     end
+  end
+
+  defp current_wal_lsn!(source_conn) when is_pid(source_conn) do
+    assert {:ok, %Postgrex.Result{rows: [[lsn]]}} =
+             Postgrex.query(source_conn, "SELECT pg_current_wal_lsn()::text", [])
+
+    lsn
   end
 
   defp cleanup_stale_runtime_replication_artifacts(source_conn, prefix)
