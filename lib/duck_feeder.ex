@@ -2,8 +2,8 @@ defmodule DuckFeeder do
   @moduledoc """
   DuckFeeder entrypoint.
 
-  This module is the public API facade over runtime/bootstrap/storage/writer/reconcile
-  subsystems.
+  This module is the public API facade over bootstrap, runtime, CDC, sink, and
+  append-stream subsystems.
 
   System flow (CDC path):
 

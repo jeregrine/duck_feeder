@@ -220,27 +220,27 @@ Target removals include:
 
 ## Current branch status
 
-- `DuckFeeder.Sink` now exists as the downstream seam.
-- `DuckFeeder.Service` and `DuckFeeder.AppendStream` dispatch through the sink instead of calling the legacy batch processor directly.
-- `DuckFeeder.Sink.DuckDB` now works for:
-  - append inserts into real DuckDB tables,
-  - CDC `MERGE` / `DELETE` / `TRUNCATE` table operations,
-  - durable checkpoint persistence via `DuckFeeder.Meta.upsert_checkpoint/3`.
-- Tests now cover the new DuckDB sink directly and through service/append entrypoints.
+- `DuckFeeder.Sink.DuckDB` is now the default downstream path.
+- `DuckFeeder.Service` and `DuckFeeder.AppendStream` write through the DuckDB sink.
+- The old downstream stack has been deleted:
+  - batch processor,
+  - writer modules,
+  - storage modules,
+  - custom DuckLake commit modules,
+  - reconciler,
+  - temp file reaper,
+  - old NIF/precompiled release plumbing,
+  - stale generated docs and old benchmarks.
+- Runtime/config now use `duckdb` config instead of storage-shaped config.
+- Tests now target the DuckDB sink and the reduced runtime surface.
 
 ## Next execution steps
 
-1. Make the DuckDB sink the default runtime path.
-2. Add the minimal runtime config needed for DuckDB/DuckLake setup.
-3. Delete the old downstream stack aggressively:
-   - `lib/duck_feeder/batch_processor.ex`
-   - `lib/duck_feeder/storage.ex`
-   - `lib/duck_feeder/storage/*`
-   - `lib/duck_feeder/writer.ex`
-   - `lib/duck_feeder/writer/*`
-   - `lib/duck_feeder/duck_lake/*`
-4. Rewrite tests/docs around the new sink and remove old architecture assumptions.
-5. Keep CDC/runtime/meta pieces; delete anything else that only exists for the old object-storage/parquet commit flow.
+1. Keep rewriting docs and public API wording around DuckDB-first behavior.
+2. Tighten runtime/service options so only the intended end-state surface remains.
+3. Improve DuckDB setup/attach ergonomics for the final warehouse shape.
+4. Add more mirror-mode coverage around schema evolution and failure behavior.
+5. Continue deleting any code that still exists only because of the old architecture.
 
 ## Relevant files / read these first
 

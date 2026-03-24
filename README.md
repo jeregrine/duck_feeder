@@ -1,39 +1,38 @@
-# EXPERIMENTAL: DuckFeeder 🦆
+# DuckFeeder
 
 [![Hex.pm](https://img.shields.io/hexpm/v/duck_feeder.svg)](https://hex.pm/packages/duck_feeder)
 [![Hex Docs](https://img.shields.io/badge/hex-docs-blue.svg)](https://hexdocs.pm/duck_feeder)
 
-**Stream every change from your Postgres database into a DuckDB-queryable lakehouse — with one Elixir module.**
+DuckFeeder streams Postgres WAL/CDC into real DuckDB-managed tables from inside your Elixir app.
 
-DuckFeeder connects to Postgres logical replication (WAL/CDC), writes Parquet files to object storage (S3/GCS), and commits metadata to [DuckLake](https://ducklake.select/) — all inside your OTP supervision tree. The result is a continuously-updated analytic copy of your production data that DuckDB can query directly, with no ETL pipelines, no Kafka, and no Spark jobs.
+Current direction:
+- snapshot selected tables,
+- follow logical replication,
+- apply inserts/updates/deletes into target tables,
+- persist checkpoints in Postgres,
+- support append streams for app events.
+
+The old Parquet/object-storage/custom DuckLake pipeline has been removed from the runtime path.
+
+## Status
+
+Experimental, but the core shape is now:
 
 ```text
-┌──────────────┐       ┌──────────────┐       ┌──────────────┐       ┌──────────────┐
-│  Postgres    │  WAL  │  DuckFeeder  │ .parq │    S3/GCS    │ read  │   DuckDB     │
-│  (source)    │──────▶│  (Elixir)    │──────▶│  (storage)   │◀──────│  (analytics) │
-│              │       │              │──┐    │              │       │              │
-└──────────────┘       └──────────────┘  │    └──────────────┘       └──────────────┘
-                                         │    ┌──────────────┐
-                                         └───▶│  Postgres    │
-                                     metadata │  (DuckLake)  │
-                                              └──────────────┘
+Postgres WAL
+  -> DuckFeeder CDC pipeline
+  -> DuckDB sink
+  -> checkpoint in Postgres
+  -> WAL ack
 ```
 
-### Why?
+Durability rule:
 
-Most teams eventually need analytics on their production data. The usual path is a warehouse, an ETL tool, and a pipeline to keep them in sync. DuckFeeder collapses that into a library you add to your existing Elixir app:
-
-- **No external services** — runs in your supervision tree alongside Phoenix/Ecto.
-- **Parquet on object storage** — cheap, columnar, open format. Query from DuckDB, Snowflake, pandas, Polars, or anything else.
-- **DuckLake metadata** — DuckDB's open table format with snapshot isolation, schema evolution, and column-level stats. One `ATTACH` and you're querying.
-- **WAL-based CDC** — captures inserts, updates, and deletes with transactional ordering. No polling, no triggers, no dual-writes.
-- **Append streams** — also push non-CDC events (telemetry, audit logs, domain events) through the same Parquet pipeline.
-
----
+- WAL ACK only advances after downstream table changes are committed and the checkpoint is persisted.
 
 ## Quick start
 
-### 1. Migration
+### 1. Add the metadata tables
 
 ```elixir
 defmodule MyApp.Repo.Migrations.AddDuckFeeder do
@@ -44,7 +43,7 @@ defmodule MyApp.Repo.Migrations.AddDuckFeeder do
 end
 ```
 
-### 2. Config
+### 2. Configure a runtime module
 
 ```elixir
 # config/runtime.exs
@@ -52,15 +51,10 @@ config :my_app, MyApp.DuckFeeder,
   enabled: System.get_env("DUCK_FEEDER_ENABLED") == "true",
   repo: MyApp.Repo,
   schemas: [MyApp.Users, MyApp.Orders, MyApp.Products],
-  storage: %{
-    provider: :s3,
-    bucket: System.fetch_env!("DUCK_FEEDER_BUCKET"),
-    access_key_id: System.fetch_env!("AWS_ACCESS_KEY_ID"),
-    secret_access_key: System.fetch_env!("AWS_SECRET_ACCESS_KEY")
+  duckdb: %{
+    path: System.get_env("DUCK_FEEDER_DUCKDB_PATH") || "/var/lib/my_app/analytics.duckdb"
   }
 ```
-
-### 3. Runtime module
 
 ```elixir
 defmodule MyApp.DuckFeeder do
@@ -68,10 +62,9 @@ defmodule MyApp.DuckFeeder do
 end
 ```
 
-### 4. Supervise it
+### 3. Supervise it
 
 ```elixir
-# application.ex
 children = [
   MyApp.Repo,
   MyAppWeb.Endpoint,
@@ -79,207 +72,125 @@ children = [
 ]
 ```
 
-That's it. DuckFeeder will create the replication slot, start streaming WAL changes, write Parquet batches to S3, and commit DuckLake metadata — all automatically.
+That starts the managed runtime wrapper:
+- resolves tables from your Ecto schemas,
+- seeds metadata,
+- starts snapshot/WAL streaming,
+- writes into DuckDB tables.
 
----
+## Query the data
 
-## Query with DuckDB
+If your DuckDB path is `/var/lib/my_app/analytics.duckdb`:
 
-The whole point is making your data queryable. Once DuckFeeder is running, open a DuckDB session and attach the lakehouse:
+```bash
+duckdb /var/lib/my_app/analytics.duckdb
+```
+
+Then query your mirrored tables directly:
 
 ```sql
--- Connect DuckDB to your DuckLake metadata
-ATTACH 'ducklake:postgres:host=localhost dbname=my_app_dev' AS lake;
+SELECT * FROM raw.users LIMIT 10;
 
--- Browse what's there
-SHOW ALL TABLES;
-
--- Query CDC data directly — DuckDB reads Parquet from S3 automatically
-SELECT
-    user_id,
-    count(*) AS order_count,
-    sum(total_cents) / 100.0 AS revenue
-FROM lake.raw.orders
-WHERE _df_op = 'insert'
+SELECT user_id, count(*) AS order_count
+FROM raw.orders
 GROUP BY user_id
-ORDER BY revenue DESC
-LIMIT 10;
-
--- Time-travel: see the state at a previous snapshot
-FROM ducklake_snapshot_at(lake, 42, 'raw', 'orders')
-SELECT count(*);
-
--- Changelog queries — reconstruct what changed and when
-SELECT _df_op, _df_timestamp, id, status
-FROM lake.raw.orders
-WHERE id = 1234
-ORDER BY _df_timestamp;
+ORDER BY order_count DESC
+LIMIT 20;
 ```
 
-Every row includes CDC metadata columns (`_df_op`, `_df_timestamp`, `_df_lsn`) so you can distinguish inserts from updates from deletes, reconstruct change history, and build incremental materializations.
+## Append streams
 
----
-
-## Append streams (non-CDC events)
-
-Push telemetry, audit logs, or domain events through the same pipeline — no CDC required:
+DuckFeeder also supports append-only streams for telemetry, audit logs, or app events.
 
 ```elixir
-# Start an append stream for custom events
-{:ok, stream} = DuckFeeder.start_append_stream(
-  designated_tables: [%{id: 1, target_schema: "raw", target_table: "app_events"}],
-  meta_conn: meta_conn,
-  storage: storage_config
-)
+{:ok, stream} =
+  DuckFeeder.start_append_stream(
+    designated_tables: [
+      %{id: 1, target_schema: "raw", target_table: "app_events"}
+    ],
+    meta_conn: meta_conn,
+    duckdb: %{path: "/var/lib/my_app/analytics.duckdb"}
+  )
 
-# Push events from anywhere in your app
-DuckFeeder.append_event(stream, "app_events", %{
-  "type" => "page_view",
-  "path" => "/dashboard",
-  "user_id" => user_id,
-  "at" => DateTime.utc_now()
-})
+:ok =
+  DuckFeeder.append_event(stream, "app_events", %{
+    "type" => "page_view",
+    "path" => "/dashboard",
+    "user_id" => 123,
+    "at" => DateTime.utc_now()
+  })
 ```
 
-Then query them the same way:
+## Runtime config shape
 
-```sql
-SELECT date_trunc('hour', at) AS hour, count(*) AS views
-FROM lake.raw.app_events
-WHERE type = 'page_view'
-GROUP BY 1
-ORDER BY 1;
-```
-
-### Safe telemetry forwarding
-
-Forward Phoenix/Ecto telemetry events without recursive ingestion loops:
+Validated config now looks like:
 
 ```elixir
-DuckFeeder.start_telemetry_forwarder(
-  stream: stream,
-  table: "app_events",
-  events: [
-    [:phoenix, :endpoint, :stop],
-    [:ecto, :repo, :query]
-  ],
-  summarize_duck_feeder?: true
-)
-```
-
----
-
-## How it works
-
-```text
-Postgres WAL ──▶ CDC.Connection ──▶ Service ──▶ TablePipeline(s)
-                                                       │
-                                               flush batches
-                                                       │
-                                                       ▼
-                                               BatchProcessor
-                                          (encode → upload → commit)
-                                                       │
-                                    ┌──────────────────┼──────────────────┐
-                                    ▼                  ▼                  ▼
-                              Write Parquet     Upload to S3/GCS   Commit DuckLake
-                              (Rust NIF)                           metadata to PG
-                                                                         │
-                                                                         ▼
-                                                              Checkpoint LSN in PG
-                                                                         │
-                                                                         ▼
-                                                              Ack to CDC.Connection
-```
-
-**Key design choices:**
-
-- **Rust NIF for Parquet (precompiled)** — fast columnar encoding without JVM overhead. Most users do not need a local Rust toolchain.
-- **Postgres for DuckLake metadata** — the same database you already run. DuckDB reads this metadata catalog to locate and query the Parquet files.
-- **Bounded backpressure** — configurable inflight/pending batch limits. CDC fails closed on overflow; append streams optionally shed load (`overflow_strategy: :drop_oldest`).
-- **Crash-safe checkpointing** — WAL position is only acknowledged after metadata is durably committed. Restart replays from the last checkpoint.
-- **Schema evolution** — new columns are auto-detected and registered in DuckLake. Rename/drop/type-change directives are supported.
-
-If you need to build the NIF from source (for local development or unsupported targets), set `DUCK_FEEDER_BUILD_NIF=1`.
-
-For maintainers: precompiled releases require publishing NIF artifacts (see `.github/workflows/build_precompiled_nifs.yml`) and including generated `checksum-*.exs` files in the Hex package (`mix rustler_precompiled.download DuckFeeder.Writer.ParquetNif --all --print`).
-
----
-
-## Schema inference
-
-DuckFeeder infers table configuration from your Ecto schemas:
-
-| Inferred from              | Used for                            |
-| -------------------------- | ----------------------------------- |
-| `__schema__(:source)`      | Source table name                   |
-| `__schema__(:prefix)`      | Source schema (default: `"public"`) |
-| `__schema__(:primary_key)` | Primary key columns                 |
-
-Override anything per-schema:
-
-```elixir
-schemas: [
-  MyApp.Users,
-  {MyApp.Orders, target_table: "order_events", target_schema: "analytics"},
-  {MyApp.InternalAudit, enabled?: false}
-]
-```
-
----
-
-## Production configuration
-
-```elixir
-config :my_app, MyApp.DuckFeeder,
-  repo: MyApp.Repo,
-  schemas: [MyApp.Users, MyApp.Orders],
-  storage: %{
-    provider: :s3,
-    bucket: "my-data-lake",
-    access_key_id: System.fetch_env!("AWS_ACCESS_KEY_ID"),
-    secret_access_key: System.fetch_env!("AWS_SECRET_ACCESS_KEY")
+%{
+  source: %{
+    postgres_url: "postgres://...",
+    slot_name: "duck_feeder_default_slot",
+    publication_name: "duck_feeder_default_pub",
+    designated_tables: [
+      %{
+        source_schema: "public",
+        source_table: "users",
+        target_schema: "raw",
+        target_table: "users",
+        primary_keys: ["id"]
+      }
+    ]
   },
-  # Replication slot/publication names (auto-generated if omitted)
-  slot_name: "duck_feeder_prod_slot",
-  publication_name: "duck_feeder_prod_pub",
-  # Backpressure — effectively required for bounded WAL retention
-  runtime_opts: [
-    max_lag_bytes: 128 * 1024 * 1024,
-    backpressure_lag_bytes: 64 * 1024 * 1024
-  ]
+  duckdb: %{
+    path: "/var/lib/my_app/analytics.duckdb",
+    catalog: nil,
+    setup_sql: [],
+    setup_fun: nil
+  },
+  metadata: %{
+    postgres_url: "postgres://..."
+  },
+  ingest: %{
+    max_rows: 10_000,
+    max_bytes: 134_217_728,
+    flush_interval_ms: 5_000
+  }
+}
 ```
 
-### Migration ordering
+Useful DuckDB options:
+- `path` — database file path; omit for in-memory
+- `catalog` — optional catalog prefix for fully-qualified relations
+- `setup_sql` — SQL statements to run before writes
+- `setup_fun` — custom one-arg setup callback receiving the ADBC connection
 
-If you rely on schema-change directives, deploy DuckFeeder first, then run migrations:
+## Mirror semantics
 
-1. Deploy with DuckFeeder enabled.
-2. Confirm replication is live.
-3. Run Ecto migrations.
+DuckFeeder currently applies CDC batches as direct table operations:
+- inserts and replica rows -> upsert
+- updates -> upsert, plus delete old PK row when the primary key changed
+- deletes -> delete by primary key
+- truncates -> clear the target table
 
----
+Primary keys are required for correct update/delete semantics.
 
-## Advanced APIs
+Additive schema evolution is handled by adding missing columns on the target table.
+Ambiguous destructive changes should fail closed rather than be guessed.
 
-Most apps should use the `DuckFeeder.Runtime` wrapper above. For custom orchestration, see module docs for:
+## Public API highlights
 
-- `DuckFeeder.Runtime.Supervisor` / `DuckFeeder.Runtime.StreamWorker`
-- `DuckFeeder.CDC.Connection`
-- `DuckFeeder.BatchProcessor`
-- `DuckFeeder.Reconciler`
-- `DuckFeeder.TelemetryForwarder`
-- `DuckFeeder.Storage` (S3, GCS)
-- `DuckFeeder.Writer` (Parquet, JSONL)
+Main entrypoints:
+- `DuckFeeder.start_stream/4`
+- `DuckFeeder.start_service/4`
+- `DuckFeeder.start_append_stream/1`
+- `DuckFeeder.append_event/4`
+- `DuckFeeder.seed_meta/3`
+- `DuckFeeder.seed_and_start_stream/3`
 
----
+## Development notes
 
-## Status
+This branch is intentionally optimized for the new end state, not backward compatibility.
 
-End-to-end architecture is implemented: **Postgres CDC → Parquet → S3/GCS → DuckLake metadata → DuckDB queries**.
+If you are looking for the old Parquet/object-storage/DuckLake implementation, it has been removed from the active runtime path and much of it has been deleted outright.
 
-See [`docs/plan.md`](docs/plan.md) for the current direction.
-
-## License
-
-See LICENSE file.
+See `docs/plan.md` for the branch direction.

@@ -95,7 +95,7 @@ defmodule DuckFeeder.ServiceTest do
     refute Service.in_transaction?(service)
   end
 
-  test "auto-selects DuckDB sink and starts internal DuckDB connection without legacy storage" do
+  test "auto-selects DuckDB sink and starts an internal DuckDB connection" do
     path =
       Path.join(
         System.tmp_dir!(),
@@ -155,7 +155,7 @@ defmodule DuckFeeder.ServiceTest do
              query_duckdb_file(path, "SELECT id, name FROM raw.users ORDER BY id")
   end
 
-  test "supports custom sink module without legacy storage config" do
+  test "supports custom sink modules without default DuckDB config" do
     designated_tables = [
       %{
         id: 1,

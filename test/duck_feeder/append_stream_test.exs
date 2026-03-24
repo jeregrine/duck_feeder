@@ -90,7 +90,7 @@ defmodule DuckFeeder.AppendStreamTest do
     assert batch.row_count == 1
   end
 
-  test "supports custom sink module without legacy storage config" do
+  test "supports custom sink modules without default DuckDB config" do
     designated_tables = [
       %{id: 1, target_schema: "raw", target_table: "events"}
     ]
@@ -118,7 +118,7 @@ defmodule DuckFeeder.AppendStreamTest do
     assert result.batch_id == "append-sink-batch"
   end
 
-  test "auto-selects DuckDB sink and starts internal DuckDB connection without legacy storage" do
+  test "auto-selects DuckDB sink and starts an internal DuckDB connection" do
     path =
       Path.join(
         System.tmp_dir!(),
