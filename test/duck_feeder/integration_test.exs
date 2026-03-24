@@ -17,7 +17,7 @@ defmodule DuckFeeder.IntegrationTest do
     assert opts[:name] == :duck_runtime
     assert opts[:meta_conn] == :meta_conn
     assert opts[:source_name] == "source-a"
-    assert opts[:duckdb_config] == duckdb
+    assert opts[:duckdb] == duckdb
   end
 
   test "builds child spec from runtime config" do
@@ -42,7 +42,7 @@ defmodule DuckFeeder.IntegrationTest do
 
     assert {DuckFeeder.Runtime.Supervisor, :start_link, [opts]} = child_spec.start
     assert opts[:source_name] == "source-a"
-    assert opts[:duckdb_config][:path] == "/tmp/source-a.duckdb"
-    assert opts[:duckdb_config][:catalog] == "lake"
+    assert opts[:duckdb][:path] == "/tmp/source-a.duckdb"
+    assert opts[:duckdb][:catalog] == "lake"
   end
 end

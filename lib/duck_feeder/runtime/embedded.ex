@@ -22,6 +22,7 @@ defmodule DuckFeeder.Runtime.Embedded do
   use GenServer
 
   alias DuckFeeder.CDC.ConnectionOptions
+  alias DuckFeeder.Runtime.Shared
 
   defmodule State do
     @enforce_keys [:module, :otp_app, :config]
@@ -107,14 +108,14 @@ defmodule DuckFeeder.Runtime.Embedded do
         with {:ok, meta_conn} <-
                start_metadata_connection(resolved.validated_config.metadata.postgres_url),
              {:ok, _seed} <-
-               DuckFeeder.seed_meta(meta_conn, resolved.validated_config,
+               DuckFeeder.Bootstrap.seed_meta_validated(meta_conn, resolved.validated_config,
                  source_name: resolved.source_name
                ),
              {:ok, runtime_supervisor} <-
                DuckFeeder.Runtime.Supervisor.start_link(
                  meta_conn: meta_conn,
                  source_name: resolved.source_name,
-                 duckdb_config: resolved.duckdb_config,
+                 duckdb: resolved.duckdb,
                  runtime_opts: runtime_opts
                ) do
           monitors = %{
@@ -150,17 +151,9 @@ defmodule DuckFeeder.Runtime.Embedded do
 
   defp merge_start_opts(config, start_opts) do
     config
-    |> mapify()
-    |> Map.merge(mapify(start_opts))
+    |> Shared.mapify()
+    |> Map.merge(Shared.mapify(start_opts))
   end
-
-  defp mapify(value) when is_map(value), do: value
-
-  defp mapify(value) when is_list(value) do
-    if Keyword.keyword?(value), do: Map.new(value), else: %{}
-  end
-
-  defp mapify(_value), do: %{}
 
   defp stop_if_alive(pid) when is_pid(pid) do
     if Process.alive?(pid), do: GenServer.stop(pid, :shutdown)

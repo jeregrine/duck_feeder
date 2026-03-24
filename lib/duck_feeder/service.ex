@@ -37,9 +37,8 @@ defmodule DuckFeeder.Service do
 
   use GenServer
 
-  alias DuckFeeder.{BatchQueue, DesignatedTable, Ingest, Sink, TablePipeline}
+  alias DuckFeeder.{BatchQueue, DesignatedTable, Ingest, StreamSupport, TablePipeline}
   alias DuckFeeder.CDC.{Lsn, Pipeline}
-  alias DuckFeeder.DuckDB.Connection, as: DuckDBConnection
 
   defmodule State do
     @enforce_keys [
@@ -151,31 +150,32 @@ defmodule DuckFeeder.Service do
 
     observer_pid = Keyword.get(opts, :observer_pid, self())
 
-    with {:ok, sink_module} <- resolve_sink_module_option(opts),
-         {:ok, duckdb} <- resolve_duckdb(opts, sink_module),
+    with {:ok, sink_module} <- StreamSupport.resolve_sink_module_option(opts),
+         {:ok, duckdb} <- StreamSupport.resolve_duckdb(opts, sink_module),
          {:ok, snapshot_lsn_counter} <- snapshot_lsn_counter(opts),
          {:ok, max_inflight_batches} <-
-           normalize_positive_integer(
+           StreamSupport.normalize_positive_integer(
              Keyword.get(opts, :max_inflight_batches, 1),
              :max_inflight_batches
            ),
          {:ok, max_pending_batches} <-
-           normalize_positive_integer(
+           StreamSupport.normalize_positive_integer(
              Keyword.get(opts, :max_pending_batches, 1_000),
              :max_pending_batches
            ) do
       context =
         %{
           meta_conn: Keyword.fetch!(opts, :meta_conn),
-          designated_table_by_target: designated_table_mapping(designated_tables),
-          designated_table_config_by_target: designated_table_config_mapping(designated_tables),
+          designated_table_by_target: StreamSupport.designated_table_mapping(designated_tables),
+          designated_table_config_by_target:
+            StreamSupport.designated_table_config_mapping(designated_tables),
           object_prefix: Keyword.get(opts, :object_prefix, "duck_feeder"),
           sink_module: sink_module
         }
-        |> maybe_put_optional(:duckdb, duckdb)
-        |> maybe_put_optional(:meta_module, Keyword.get(opts, :meta_module))
-        |> maybe_put_optional(:poison_row_mode, Keyword.get(opts, :poison_row_mode))
-        |> maybe_put_optional(:poison_row_sink, Keyword.get(opts, :poison_row_sink))
+        |> StreamSupport.maybe_put_optional(:duckdb, duckdb)
+        |> StreamSupport.maybe_put_optional(:meta_module, Keyword.get(opts, :meta_module))
+        |> StreamSupport.maybe_put_optional(:poison_row_mode, Keyword.get(opts, :poison_row_mode))
+        |> StreamSupport.maybe_put_optional(:poison_row_sink, Keyword.get(opts, :poison_row_sink))
 
       {:ok,
        %State{
@@ -295,7 +295,7 @@ defmodule DuckFeeder.Service do
           |> BatchQueue.maybe_start_queued_batches(on_event: &emit_batch_queue_telemetry/3)
           |> emit_batch_queue_telemetry(:completed, %{
             table: table,
-            result: batch_result_status(result)
+            result: StreamSupport.batch_result_status(result)
           })
 
         {:noreply, next_state}
@@ -390,19 +390,16 @@ defmodule DuckFeeder.Service do
 
   defp emit_batch_queue_telemetry(%State{} = state, status, metadata)
        when is_atom(status) and is_map(metadata) do
-    measurements = %{
-      pending_batch_count: state.pending_batch_count,
-      inflight_batch_count: map_size(state.inflight_batch_tasks),
-      max_pending_batches: state.max_pending_batches,
-      max_inflight_batches: state.max_inflight_batches
-    }
-
     metadata =
       metadata
       |> Map.put(:status, status)
-      |> maybe_put_table_metadata()
+      |> StreamSupport.maybe_put_table_metadata()
 
-    DuckFeeder.Telemetry.service_batch_queue(measurements, metadata)
+    DuckFeeder.Telemetry.service_batch_queue(
+      StreamSupport.batch_queue_measurements(state),
+      metadata
+    )
+
     state
   end
 
@@ -454,40 +451,6 @@ defmodule DuckFeeder.Service do
   defp parse_optional_lsn(lsn) when is_binary(lsn), do: Lsn.parse(lsn)
   defp parse_optional_lsn(nil), do: {:error, :missing_ack_lsn}
   defp parse_optional_lsn(_other), do: {:error, :invalid_ack_lsn}
-
-  defp batch_result_status({:ok, _result}), do: :ok
-  defp batch_result_status({:error, _reason}), do: :error
-  defp batch_result_status(_result), do: :unknown
-
-  defp maybe_put_table_metadata(metadata) when is_map(metadata) do
-    case Map.get(metadata, :table) do
-      {schema, table} when is_binary(schema) and is_binary(table) ->
-        metadata
-        |> Map.put(:table_schema, schema)
-        |> Map.put(:table_name, table)
-
-      _ ->
-        metadata
-    end
-  end
-
-  defp designated_table_mapping(designated_tables) do
-    designated_tables
-    |> Enum.reduce(%{}, fn designated_table, acc ->
-      target = DesignatedTable.target_relation(designated_table)
-      Map.put(acc, target, DesignatedTable.checkpoint_key(designated_table))
-    end)
-  end
-
-  defp designated_table_config_mapping(designated_tables) do
-    Enum.reduce(designated_tables, %{}, fn designated_table, acc ->
-      target =
-        {Map.fetch!(designated_table, :target_schema),
-         Map.fetch!(designated_table, :target_table)}
-
-      Map.put(acc, target, designated_table)
-    end)
-  end
 
   defp snapshot_target_relation(designated_table) when is_map(designated_table) do
     with {:ok, target_schema} <- fetch_map_string(designated_table, :target_schema),
@@ -605,7 +568,7 @@ defmodule DuckFeeder.Service do
   end
 
   defp fetch_map_string(map, key) when is_map(map) and is_atom(key) do
-    case Map.get(map, key) do
+    case fetch_map_value_or_default(map, key, nil) do
       value when is_binary(value) and value != "" -> {:ok, value}
       _ -> {:error, {:invalid_designated_table_field, key}}
     end
@@ -614,63 +577,4 @@ defmodule DuckFeeder.Service do
   defp fetch_map_value_or_default(map, key, default) when is_map(map) and is_atom(key) do
     Map.get(map, key, Map.get(map, Atom.to_string(key), default))
   end
-
-  defp resolve_sink_module_option(opts) when is_list(opts) do
-    sink_module =
-      Keyword.get(opts, :sink_module) ||
-        implied_sink_module_from_duckdb(Keyword.get(opts, :duckdb))
-
-    Sink.normalize_module(sink_module)
-  end
-
-  defp resolve_duckdb(opts, sink_module) when is_list(opts) and is_atom(sink_module) do
-    case Keyword.fetch(opts, :duckdb) do
-      {:ok, duckdb} when is_map(duckdb) or is_list(duckdb) ->
-        duckdb
-        |> Map.new()
-        |> maybe_start_duckdb_connection(sink_module)
-
-      {:ok, other} ->
-        {:error, {:invalid_option, :duckdb, other}}
-
-      :error ->
-        if sink_module == DuckFeeder.Sink.DuckDB do
-          maybe_start_duckdb_connection(%{}, sink_module)
-        else
-          {:ok, nil}
-        end
-    end
-  end
-
-  defp maybe_start_duckdb_connection(%{conn: conn} = duckdb, DuckFeeder.Sink.DuckDB)
-       when is_pid(conn),
-       do: {:ok, duckdb}
-
-  defp maybe_start_duckdb_connection(%{conn: other}, DuckFeeder.Sink.DuckDB),
-    do: {:error, {:invalid_duckdb_conn, other}}
-
-  defp maybe_start_duckdb_connection(duckdb, DuckFeeder.Sink.DuckDB) when is_map(duckdb) do
-    start_opts =
-      [name: nil, path: Map.get(duckdb, :path)]
-      |> Enum.reject(fn {key, value} -> is_nil(value) and key != :name end)
-
-    with {:ok, server} <- DuckDBConnection.start_link(start_opts) do
-      {:ok, Map.put(duckdb, :conn, DuckDBConnection.get_conn(server))}
-    else
-      {:error, reason} -> {:error, {:duckdb_connection_start_failed, reason}}
-    end
-  end
-
-  defp maybe_start_duckdb_connection(duckdb, _sink_module), do: {:ok, duckdb}
-
-  defp implied_sink_module_from_duckdb(nil), do: nil
-  defp implied_sink_module_from_duckdb(_duckdb), do: DuckFeeder.Sink.DuckDB
-
-  defp normalize_positive_integer(value, _key) when is_integer(value) and value > 0,
-    do: {:ok, value}
-
-  defp normalize_positive_integer(value, key), do: {:error, {:invalid_option, key, value}}
-
-  defp maybe_put_optional(context, _key, nil), do: context
-  defp maybe_put_optional(context, key, value), do: Map.put(context, key, value)
 end

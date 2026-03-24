@@ -5,10 +5,13 @@ defmodule DuckFeeder.Runtime.Supervisor do
 
   use Supervisor
 
+  alias DuckFeeder.Runtime.Shared
+
   @type option ::
           {:name, Supervisor.name()}
           | {:meta_conn, term()}
           | {:source_name, String.t()}
+          | {:duckdb, map() | nil}
           | {:duckdb_config, map() | nil}
           | {:runtime_opts, keyword()}
           | {:runtime_module, module()}
@@ -26,7 +29,7 @@ defmodule DuckFeeder.Runtime.Supervisor do
   def init(opts) do
     meta_conn = Keyword.fetch!(opts, :meta_conn)
     source_name = Keyword.fetch!(opts, :source_name)
-    duckdb_config = Keyword.fetch!(opts, :duckdb_config)
+    duckdb = Shared.fetch_duckdb!(opts)
 
     stream_worker_module =
       Keyword.get(opts, :stream_worker_module, DuckFeeder.Runtime.StreamWorker)
@@ -37,12 +40,12 @@ defmodule DuckFeeder.Runtime.Supervisor do
          name: Keyword.get(opts, :stream_worker_name),
          meta_conn: meta_conn,
          source_name: source_name,
-         duckdb_config: duckdb_config,
+         duckdb: duckdb,
          runtime_opts: Keyword.get(opts, :runtime_opts, []),
          runtime_module: Keyword.get(opts, :runtime_module),
          observer_pid: Keyword.get(opts, :observer_pid)
        ]
-       |> Enum.reject(fn {key, value} -> is_nil(value) and key != :duckdb_config end)}
+       |> Enum.reject(fn {key, value} -> is_nil(value) and key != :duckdb end)}
     ]
 
     Supervisor.init(children, strategy: :one_for_one)

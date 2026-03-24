@@ -8,17 +8,25 @@ defmodule DuckFeeder.Bootstrap do
 
   @spec seed_meta(pid(), map() | keyword(), keyword()) :: {:ok, map()} | {:error, term()}
   def seed_meta(meta_conn, config, opts \\ []) do
+    with {:ok, validated} <- Config.validate(config) do
+      seed_meta_validated(meta_conn, validated, opts)
+    end
+  end
+
+  @doc false
+  @spec seed_meta_validated(pid(), Config.t(), keyword()) :: {:ok, map()} | {:error, term()}
+  def seed_meta_validated(meta_conn, validated_config, opts \\ [])
+      when is_map(validated_config) do
     meta_module = Keyword.get(opts, :meta_module, Meta)
 
-    with {:ok, validated} <- Config.validate(config),
-         :ok <- maybe_bootstrap(meta_module, meta_conn, opts),
-         source_name <- source_name(validated.source, opts),
+    with :ok <- maybe_bootstrap(meta_module, meta_conn, opts),
+         source_name <- source_name(validated_config.source, opts),
          {:ok, designated_tables} <-
-           resolve_designated_tables(validated.source.designated_tables, opts) do
+           resolve_designated_tables(validated_config.source.designated_tables, opts) do
       {:ok,
        %{
          source_name: source_name,
-         source: Runtime.build_runtime_source(source_name, validated.source),
+         source: Runtime.build_runtime_source(source_name, validated_config.source),
          designated_tables: Runtime.put_runtime_checkpoint_keys(source_name, designated_tables)
        }}
     end
@@ -32,7 +40,7 @@ defmodule DuckFeeder.Bootstrap do
     runtime_module = Keyword.get(opts, :runtime_module, Runtime)
 
     with {:ok, validated} <- Config.validate(config),
-         {:ok, seed_result} <- seed_meta(meta_conn, config, seed_opts),
+         {:ok, seed_result} <- seed_meta_validated(meta_conn, validated, seed_opts),
          {:ok, runtime_start_opts} <-
            runtime_start_opts(
              seed_result.source,
@@ -40,12 +48,12 @@ defmodule DuckFeeder.Bootstrap do
              seed_opts,
              start_opts
            ),
-         duckdb_config <- Config.duckdb_config(validated),
+         duckdb <- Config.duckdb(validated),
          {:ok, runtime_result} <-
            runtime_module.start_stream(
              meta_conn,
              seed_result.source_name,
-             duckdb_config,
+             duckdb,
              runtime_start_opts
            ) do
       {:ok,
@@ -76,14 +84,6 @@ defmodule DuckFeeder.Bootstrap do
 
       other ->
         {:error, {:invalid_tables_selection, other}}
-    end
-  end
-
-  defp resolve_designated_tables(%{} = config_tables, opts) do
-    if map_size(config_tables) == 0 do
-      resolve_designated_tables([], opts)
-    else
-      {:error, {:invalid_designated_tables, config_tables}}
     end
   end
 

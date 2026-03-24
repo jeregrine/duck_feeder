@@ -23,7 +23,7 @@ defmodule DuckFeeder.Runtime.ManagerTest do
     {:ok, manager} =
       Manager.start_link(
         meta_conn: :meta,
-        duckdb_config: %{path: "/tmp/shared.duckdb"},
+        duckdb: %{path: "/tmp/shared.duckdb"},
         runtime_supervisor_module: FakeRuntimeSupervisor,
         base_opts: [observer_pid: self()]
       )
@@ -32,7 +32,7 @@ defmodule DuckFeeder.Runtime.ManagerTest do
     assert_receive {:fake_runtime_supervisor_start, start_opts_a}
     assert start_opts_a[:source_name] == "source_a"
     assert start_opts_a[:meta_conn] == :meta
-    assert start_opts_a[:duckdb_config][:path] == "/tmp/shared.duckdb"
+    assert start_opts_a[:duckdb][:path] == "/tmp/shared.duckdb"
 
     assert {:error, :already_started} = Manager.start_source(manager, "source_a")
 
@@ -52,11 +52,25 @@ defmodule DuckFeeder.Runtime.ManagerTest do
     assert sources["source_b"] == source_b_pid
   end
 
-  test "drops source from list when runtime process exits" do
+  test "accepts legacy duckdb_config option" do
     {:ok, manager} =
       Manager.start_link(
         meta_conn: :meta,
         duckdb_config: %{path: "/tmp/shared.duckdb"},
+        runtime_supervisor_module: FakeRuntimeSupervisor,
+        base_opts: [observer_pid: self()]
+      )
+
+    assert {:ok, _source_pid} = Manager.start_source(manager, "source_a")
+    assert_receive {:fake_runtime_supervisor_start, start_opts}
+    assert start_opts[:duckdb][:path] == "/tmp/shared.duckdb"
+  end
+
+  test "drops source from list when runtime process exits" do
+    {:ok, manager} =
+      Manager.start_link(
+        meta_conn: :meta,
+        duckdb: %{path: "/tmp/shared.duckdb"},
         runtime_supervisor_module: FakeRuntimeSupervisor,
         base_opts: [observer_pid: self()]
       )
@@ -74,7 +88,7 @@ defmodule DuckFeeder.Runtime.ManagerTest do
     {:ok, manager} =
       Manager.start_link(
         meta_conn: :meta,
-        duckdb_config: %{path: "/tmp/shared.duckdb"},
+        duckdb: %{path: "/tmp/shared.duckdb"},
         runtime_supervisor_module: FakeRuntimeSupervisor,
         base_opts: [observer_pid: self()]
       )
@@ -96,7 +110,7 @@ defmodule DuckFeeder.Runtime.ManagerTest do
     {:ok, manager} =
       Manager.start_link(
         meta_conn: :meta,
-        duckdb_config: %{path: "/tmp/shared.duckdb"},
+        duckdb: %{path: "/tmp/shared.duckdb"},
         runtime_supervisor_module: FailRuntimeSupervisor
       )
 

@@ -6,19 +6,19 @@ defmodule DuckFeeder.Integration do
   alias DuckFeeder.Runtime
 
   @spec runtime_child_spec(term(), String.t(), map() | nil, keyword()) :: Supervisor.child_spec()
-  def runtime_child_spec(meta_conn, source_name, duckdb_config, opts \\ [])
+  def runtime_child_spec(meta_conn, source_name, duckdb, opts \\ [])
       when is_binary(source_name) do
     child_opts = [
       name: Keyword.get(opts, :name),
       meta_conn: meta_conn,
       source_name: source_name,
-      duckdb_config: duckdb_config,
+      duckdb: duckdb,
       runtime_opts: Keyword.get(opts, :runtime_opts, []),
       observer_pid: Keyword.get(opts, :observer_pid)
     ]
 
     Runtime.Supervisor.child_spec(
-      Enum.reject(child_opts, fn {key, value} -> is_nil(value) and key != :duckdb_config end)
+      Enum.reject(child_opts, fn {key, value} -> is_nil(value) and key != :duckdb end)
     )
   end
 
@@ -38,7 +38,7 @@ defmodule DuckFeeder.Integration do
        runtime_child_spec(
          meta_conn,
          resolved.source_name,
-         resolved.duckdb_config,
+         resolved.duckdb,
          Keyword.put(opts, :runtime_opts, runtime_opts)
        )}
     end

@@ -6,7 +6,7 @@ defmodule DuckFeeder.Runtime.StreamWorkerTest do
   alias DuckFeeder.Runtime.StreamWorker
 
   defmodule FakeRuntime do
-    def start_stream(_meta_conn, _source_name, _duckdb_config, opts) do
+    def start_stream(_meta_conn, _source_name, _duckdb, opts) do
       if opts[:fail] do
         {:error, :failed_to_start_stream}
       else
@@ -39,7 +39,7 @@ defmodule DuckFeeder.Runtime.StreamWorkerTest do
       StreamWorker.start_link(
         meta_conn: :meta,
         source_name: "source-a",
-        duckdb_config: %{path: "/tmp/source-a.duckdb"},
+        duckdb: %{path: "/tmp/source-a.duckdb"},
         runtime_module: FakeRuntime,
         runtime_opts: [test_pid: self()]
       )
@@ -56,12 +56,29 @@ defmodule DuckFeeder.Runtime.StreamWorkerTest do
     refute Process.alive?(cdc_pid)
   end
 
-  test "stops when child stream process dies" do
+  test "accepts legacy duckdb_config option" do
     {:ok, worker} =
       StreamWorker.start_link(
         meta_conn: :meta,
         source_name: "source-a",
         duckdb_config: %{path: "/tmp/source-a.duckdb"},
+        runtime_module: FakeRuntime,
+        runtime_opts: [test_pid: self()]
+      )
+
+    assert_receive {:fake_runtime_started, service_pid, cdc_pid}
+
+    GenServer.stop(worker)
+    refute Process.alive?(service_pid)
+    refute Process.alive?(cdc_pid)
+  end
+
+  test "stops when child stream process dies" do
+    {:ok, worker} =
+      StreamWorker.start_link(
+        meta_conn: :meta,
+        source_name: "source-a",
+        duckdb: %{path: "/tmp/source-a.duckdb"},
         runtime_module: FakeRuntime,
         runtime_opts: [test_pid: self()]
       )
@@ -84,7 +101,7 @@ defmodule DuckFeeder.Runtime.StreamWorkerTest do
              StreamWorker.start_link(
                meta_conn: :meta,
                source_name: "source-a",
-               duckdb_config: %{path: "/tmp/source-a.duckdb"},
+               duckdb: %{path: "/tmp/source-a.duckdb"},
                runtime_module: FakeRuntime,
                runtime_opts: [fail: true]
              )

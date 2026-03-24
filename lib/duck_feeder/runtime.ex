@@ -37,6 +37,7 @@ defmodule DuckFeeder.Runtime do
 
   alias DuckFeeder.{Config, DesignatedTable, Meta, Service, Sink}
   alias DuckFeeder.CDC.{Bootstrap, Connection, ConnectionOptions, Lsn}
+  alias DuckFeeder.Runtime.Shared
 
   @default_reconnect_backoff 1_000
 
@@ -79,15 +80,24 @@ defmodule DuckFeeder.Runtime do
   Supports two styles:
   - explicit engine config via `config: %{source: ..., duckdb: ..., metadata: ...}`
   - simplified repo/schemas config via `repo`, `schemas`, and `duckdb`
+
+  The resolved map uses `:duckdb` as the preferred key and keeps
+  `:duckdb_config` as a backward-compatible alias.
   """
   @spec resolve_app_config(map() | keyword()) :: {:ok, map()} | {:error, term()}
   def resolve_app_config(config) when is_map(config) or is_list(config) do
-    cfg = mapify(config)
+    cfg = Shared.mapify(config)
 
     enabled? = truthy?(Map.get(cfg, :enabled, true))
 
     if enabled? do
-      runtime_opts = map_get(cfg, :runtime_opts, []) |> List.wrap()
+      runtime_opts =
+        cfg
+        |> map_get(:runtime_opts, [])
+        |> List.wrap()
+        |> put_default_runtime_opt(:snapshot_before_stream?, true)
+        |> put_default_runtime_opt(:resume_incomplete_snapshot?, true)
+
       source_name = normalize_source_name(map_get(cfg, :source_name, "default"))
 
       with {:ok, runtime_config} <- runtime_config(cfg, source_name),
@@ -96,6 +106,7 @@ defmodule DuckFeeder.Runtime do
           put_runtime_checkpoint_keys(source_name, validated.source.designated_tables)
 
         source = build_runtime_source(source_name, validated.source)
+        duckdb = Config.duckdb(validated)
 
         {:ok,
          %{
@@ -104,7 +115,8 @@ defmodule DuckFeeder.Runtime do
            source: source,
            designated_tables: designated_tables,
            validated_config: validated,
-           duckdb_config: Config.duckdb_config(validated),
+           duckdb: duckdb,
+           duckdb_config: duckdb,
            runtime_opts: runtime_opts
          }}
       end
@@ -142,7 +154,7 @@ defmodule DuckFeeder.Runtime do
     if function_exported?(repo, :config, 0) do
       repo
       |> apply(:config, [])
-      |> mapify()
+      |> Shared.mapify()
       |> repo_config_to_url()
     else
       {:error, {:invalid_repo, repo}}
@@ -152,7 +164,7 @@ defmodule DuckFeeder.Runtime do
   defp runtime_config(cfg, source_name) do
     case map_get(cfg, :config) do
       explicit when is_map(explicit) or is_list(explicit) ->
-        {:ok, mapify(explicit)}
+        {:ok, Shared.mapify(explicit)}
 
       nil ->
         simplified_runtime_config(cfg, source_name)
@@ -182,9 +194,9 @@ defmodule DuckFeeder.Runtime do
            publication_name: publication_name,
            designated_tables: designated_tables
          },
-         duckdb: mapify(duckdb),
+         duckdb: Shared.mapify(duckdb),
          metadata: %{postgres_url: metadata_postgres_url},
-         ingest: map_get(cfg, :ingest, %{}) |> mapify()
+         ingest: map_get(cfg, :ingest, %{}) |> Shared.mapify()
        }}
     end
   end
@@ -238,7 +250,7 @@ defmodule DuckFeeder.Runtime do
   defp normalize_schema_entry({schema_module, opts}, default_target_schema)
        when is_atom(schema_module) and is_list(opts) do
     if truthy?(Keyword.get(opts, :enabled?, true)) do
-      build_designated_table(schema_module, mapify(opts), default_target_schema)
+      build_designated_table(schema_module, Shared.mapify(opts), default_target_schema)
     else
       {:ok, nil}
     end
@@ -350,19 +362,19 @@ defmodule DuckFeeder.Runtime do
   defp normalize_source_name(name) when is_binary(name) and name != "", do: name
   defp normalize_source_name(_name), do: "default"
 
-  defp mapify(value) when is_map(value), do: value
-
-  defp mapify(value) when is_list(value) do
-    if Keyword.keyword?(value), do: Map.new(value), else: %{}
-  end
-
-  defp mapify(_value), do: %{}
-
   defp map_get(map, key, default \\ nil) when is_map(map) do
     Map.get(map, key, Map.get(map, Atom.to_string(key), default))
   end
 
   defp truthy?(value), do: value in [true, 1, "1", "true"]
+
+  defp put_default_runtime_opt(opts, key, value) when is_list(opts) and is_atom(key) do
+    if Keyword.keyword?(opts) and not Keyword.has_key?(opts, key) do
+      Keyword.put(opts, key, value)
+    else
+      opts
+    end
+  end
 
   defp resolve_sink_module_option(opts) when is_list(opts) do
     sink_module =
@@ -372,19 +384,19 @@ defmodule DuckFeeder.Runtime do
     Sink.normalize_module(sink_module)
   end
 
-  defp normalize_duckdb_config(duckdb_config) do
+  defp normalize_duckdb(duckdb) do
     cond do
-      is_map(duckdb_config) ->
-        {:ok, duckdb_config}
+      is_map(duckdb) ->
+        {:ok, duckdb}
 
-      is_list(duckdb_config) and Keyword.keyword?(duckdb_config) ->
-        {:ok, Map.new(duckdb_config)}
+      is_list(duckdb) and Keyword.keyword?(duckdb) ->
+        {:ok, Map.new(duckdb)}
 
-      is_nil(duckdb_config) ->
+      is_nil(duckdb) ->
         {:ok, nil}
 
       true ->
-        {:error, {:invalid_option, :duckdb, duckdb_config}}
+        {:error, {:invalid_option, :duckdb, duckdb}}
     end
   end
 
@@ -477,12 +489,12 @@ defmodule DuckFeeder.Runtime do
 
   @spec service_options(pid(), String.t(), map() | keyword() | nil, keyword()) ::
           {:ok, keyword()} | {:error, term()}
-  def service_options(meta_conn, source_name, duckdb_config, opts \\ [])
+  def service_options(meta_conn, source_name, duckdb, opts \\ [])
       when is_binary(source_name) do
     meta_module = Keyword.get(opts, :meta_module, Meta)
 
     with {:ok, sink_module} <- resolve_sink_module_option(opts),
-         {:ok, duckdb} <- normalize_duckdb_config(duckdb_config || Keyword.get(opts, :duckdb)),
+         {:ok, duckdb} <- normalize_duckdb(duckdb || Keyword.get(opts, :duckdb)),
          {:ok, source} <- resolve_runtime_source(meta_module, meta_conn, source_name, opts),
          {:ok, designated_tables} <-
            resolve_runtime_designated_tables(meta_module, meta_conn, source_name, source, opts) do
@@ -507,8 +519,8 @@ defmodule DuckFeeder.Runtime do
 
   @spec start_service(pid(), String.t(), map() | keyword() | nil, keyword()) ::
           GenServer.on_start() | {:error, term()}
-  def start_service(meta_conn, source_name, duckdb_config, opts \\ []) do
-    with {:ok, service_opts} <- service_options(meta_conn, source_name, duckdb_config, opts) do
+  def start_service(meta_conn, source_name, duckdb, opts \\ []) do
+    with {:ok, service_opts} <- service_options(meta_conn, source_name, duckdb, opts) do
       Service.start_link(service_opts)
     end
   end
@@ -516,14 +528,14 @@ defmodule DuckFeeder.Runtime do
   @spec start_stream(pid(), String.t(), map() | keyword() | nil, keyword()) ::
           {:ok, %{service_pid: pid(), cdc_pid: pid(), start_lsn: String.t(), source: map()}}
           | {:error, term()}
-  def start_stream(meta_conn, source_name, duckdb_config, opts \\ []) do
+  def start_stream(meta_conn, source_name, duckdb, opts \\ []) do
     meta_module = Keyword.get(opts, :meta_module, Meta)
     service_module = Keyword.get(opts, :service_module, Service)
     cdc_module = Keyword.get(opts, :cdc_module, Connection)
     connection_options_module = Keyword.get(opts, :connection_options_module, ConnectionOptions)
 
     with {:ok, sink_module} <- resolve_sink_module_option(opts),
-         {:ok, duckdb} <- normalize_duckdb_config(duckdb_config || Keyword.get(opts, :duckdb)),
+         {:ok, duckdb} <- normalize_duckdb(duckdb || Keyword.get(opts, :duckdb)),
          {:ok, source} <- resolve_runtime_source(meta_module, meta_conn, source_name, opts),
          {:ok, designated_tables} <-
            resolve_runtime_designated_tables(meta_module, meta_conn, source_name, source, opts),
@@ -636,7 +648,7 @@ defmodule DuckFeeder.Runtime do
          meta_conn,
          source,
          designated_tables,
-         duckdb_config,
+         duckdb,
          sink_module,
          meta_module,
          opts
@@ -645,7 +657,7 @@ defmodule DuckFeeder.Runtime do
       name: Keyword.get(opts, :service_name),
       designated_tables: designated_tables,
       meta_conn: meta_conn,
-      duckdb: duckdb_config,
+      duckdb: duckdb,
       sink_module: sink_module,
       object_prefix: Keyword.get(opts, :object_prefix, source.name),
       pipeline_opts: Keyword.get(opts, :pipeline_opts, %{}),

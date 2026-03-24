@@ -3,36 +3,55 @@
 [![Hex.pm](https://img.shields.io/hexpm/v/duck_feeder.svg)](https://hex.pm/packages/duck_feeder)
 [![Hex Docs](https://img.shields.io/badge/hex-docs-blue.svg)](https://hexdocs.pm/duck_feeder)
 
-DuckFeeder streams Postgres WAL/CDC into real DuckDB-managed tables from inside your Elixir app.
+DuckFeeder mirrors Postgres tables into real DuckDB-managed tables from inside your Elixir app.
 
-Current direction:
-- snapshot selected tables,
-- follow logical replication,
-- apply inserts/updates/deletes into target tables,
-- persist checkpoints in Postgres,
-- support append streams for app events.
+It also supports append-only streams for app events, telemetry, audit logs, and similar analytics data in the same DuckDB database.
 
-The old Parquet/object-storage/custom DuckLake pipeline has been removed from the runtime path.
+## Core idea
 
-## Status
+DuckFeeder owns replication correctness:
 
-Experimental, but the core shape is now:
+- initial snapshot + WAL handoff
+- CDC decoding and routing
+- batching
+- checkpoint durability
+- restart correctness
+
+DuckDB owns the actual target tables and query surface.
+
+Core flow:
 
 ```text
 Postgres WAL
   -> DuckFeeder CDC pipeline
   -> DuckDB sink
-  -> checkpoint in Postgres
+  -> checkpoint persisted in Postgres
   -> WAL ack
 ```
 
-Durability rule:
+Most important invariant:
 
-- WAL ACK only advances after downstream table changes are committed and the checkpoint is persisted.
+- **WAL ACK only advances after DuckDB table writes are committed and the checkpoint is durably persisted.**
+
+Mirrored tables are normal DuckDB tables. Append tables are normal DuckDB tables too.
+
+The old Parquet/object-storage/DuckLake runtime path has been removed.
 
 ## Quick start
 
-### 1. Add the metadata tables
+### 1. Add the dependency
+
+```elixir
+defp deps do
+  [
+    {:duck_feeder, "~> 0.1"}
+  ]
+end
+```
+
+### 2. Add the metadata migration
+
+DuckFeeder stores only minimal durable runtime state in Postgres.
 
 ```elixir
 defmodule MyApp.Repo.Migrations.AddDuckFeeder do
@@ -43,14 +62,20 @@ defmodule MyApp.Repo.Migrations.AddDuckFeeder do
 end
 ```
 
-### 2. Configure a runtime module
+### 3. Configure a runtime module
+
+Recommended app-facing setup:
 
 ```elixir
 # config/runtime.exs
 config :my_app, MyApp.DuckFeeder,
   enabled: System.get_env("DUCK_FEEDER_ENABLED") == "true",
   repo: MyApp.Repo,
-  schemas: [MyApp.Users, MyApp.Orders, MyApp.Products],
+  schemas: [
+    MyApp.Users,
+    MyApp.Orders,
+    {MyApp.Invoices, target_schema: "raw", target_table: "invoice_events"}
+  ],
   duckdb: %{
     path: System.get_env("DUCK_FEEDER_DUCKDB_PATH") || "/var/lib/my_app/analytics.duckdb"
   }
@@ -62,7 +87,7 @@ defmodule MyApp.DuckFeeder do
 end
 ```
 
-### 3. Supervise it
+### 4. Supervise it
 
 ```elixir
 children = [
@@ -72,13 +97,7 @@ children = [
 ]
 ```
 
-That starts the managed runtime wrapper:
-- resolves tables from your Ecto schemas,
-- seeds metadata,
-- starts snapshot/WAL streaming,
-- writes into DuckDB tables.
-
-## Query the data
+### 5. Start querying DuckDB
 
 If your DuckDB path is `/var/lib/my_app/analytics.duckdb`:
 
@@ -86,7 +105,7 @@ If your DuckDB path is `/var/lib/my_app/analytics.duckdb`:
 duckdb /var/lib/my_app/analytics.duckdb
 ```
 
-Then query your mirrored tables directly:
+Then query the mirrored tables directly:
 
 ```sql
 SELECT * FROM raw.users LIMIT 10;
@@ -98,18 +117,82 @@ ORDER BY order_count DESC
 LIMIT 20;
 ```
 
+## What the runtime wrapper does
+
+When you use `DuckFeeder.Runtime` with `repo`, `schemas`, and `duckdb` config, DuckFeeder will:
+
+- infer source schema/table names from your Ecto schemas
+- infer primary keys from your Ecto schemas
+- default target tables to `raw.<source_table>`
+- create the minimal Postgres metadata schema
+- run an initial snapshot before streaming on first start
+- resume from persisted checkpoints on restart
+- resume an incomplete snapshot handoff safely by default
+- start logical replication and keep applying changes into DuckDB
+
+The wrapper defaults are optimized for the intended golden path.
+
+If you use the lower-level APIs directly, snapshot behavior remains explicit through runtime options like `snapshot_before_stream?: true`.
+
+## Mirror semantics
+
+CDC batches are applied as direct table operations:
+
+- inserts and replica rows -> upsert
+- updates -> upsert
+- deletes -> delete by primary key
+- truncates -> clear the target table
+
+Primary keys are required for correct update/delete behavior.
+
+Additive schema changes are handled by adding missing columns on the DuckDB side.
+Ambiguous or destructive changes fail closed instead of being guessed.
+
+## What lives in app config vs Postgres metadata
+
+DuckFeeder is config-first.
+
+Keep in app config / code:
+
+- source selection
+- Ecto schemas
+- source-to-target table mapping
+- primary keys
+- slot/publication naming
+- DuckDB path and setup hooks
+
+Keep in Postgres metadata:
+
+- checkpoints
+- snapshot handoffs
+- migration version bookkeeping
+
+That metadata lives under `duckfeeder_meta`.
+
+Useful inspection queries:
+
+```sql
+SELECT *
+FROM duckfeeder_meta.checkpoints
+ORDER BY checkpoint_key;
+
+SELECT *
+FROM duckfeeder_meta.snapshot_handoffs;
+```
+
 ## Append streams
 
-DuckFeeder also supports append-only streams for telemetry, audit logs, or app events.
+DuckFeeder can also write append-only events into the same DuckDB database.
 
 ```elixir
 {:ok, stream} =
   DuckFeeder.start_append_stream(
     designated_tables: [
-      %{id: 1, target_schema: "raw", target_table: "app_events"}
+      %{target_schema: "raw", target_table: "app_events"}
     ],
     meta_conn: meta_conn,
-    duckdb: %{path: "/var/lib/my_app/analytics.duckdb"}
+    duckdb: %{path: "/var/lib/my_app/analytics.duckdb"},
+    object_prefix: "my_app_events"
   )
 
 :ok =
@@ -121,9 +204,18 @@ DuckFeeder also supports append-only streams for telemetry, audit logs, or app e
   })
 ```
 
-## Runtime config shape
+Append streams reuse the same batching and sink path.
 
-Validated config now looks like:
+Overflow behavior is configurable:
+
+- `overflow_strategy: :fail` - fail closed
+- `overflow_strategy: :drop_oldest` - lossy mode for availability-first streams
+
+See [docs/append-streams.md](docs/append-streams.md) for restart/checkpoint guidance and telemetry forwarding.
+
+## Explicit runtime config
+
+If you do not want the repo/schema wrapper, DuckFeeder also supports the explicit engine-shaped config:
 
 ```elixir
 %{
@@ -153,44 +245,35 @@ Validated config now looks like:
   ingest: %{
     max_rows: 10_000,
     max_bytes: 134_217_728,
-    flush_interval_ms: 5_000
+    flush_interval_ms: 5_000,
+    table_worker_concurrency: 4
   }
 }
 ```
 
 Useful DuckDB options:
-- `path` — database file path; omit for in-memory
-- `catalog` — optional catalog prefix for fully-qualified relations
-- `setup_sql` — SQL statements to run before writes
-- `setup_fun` — custom one-arg setup callback receiving the ADBC connection
 
-## Mirror semantics
-
-DuckFeeder currently applies CDC batches as direct table operations:
-- inserts and replica rows -> upsert
-- updates -> upsert, plus delete old PK row when the primary key changed
-- deletes -> delete by primary key
-- truncates -> clear the target table
-
-Primary keys are required for correct update/delete semantics.
-
-Additive schema evolution is handled by adding missing columns on the target table.
-Ambiguous destructive changes should fail closed rather than be guessed.
+- `path` - database file path; omit for in-memory
+- `catalog` - optional catalog prefix
+- `setup_sql` - SQL statements to run before writes
+- `setup_fun` - one-arg callback receiving the ADBC connection
 
 ## Public API highlights
 
 Main entrypoints:
+
+- `DuckFeeder.validate_config/1`
+- `DuckFeeder.seed_meta/3`
+- `DuckFeeder.seed_and_start_stream/3`
 - `DuckFeeder.start_stream/4`
 - `DuckFeeder.start_service/4`
 - `DuckFeeder.start_append_stream/1`
 - `DuckFeeder.append_event/4`
-- `DuckFeeder.seed_meta/3`
-- `DuckFeeder.seed_and_start_stream/3`
+- `DuckFeeder.start_telemetry_forwarder/1`
 
-## Development notes
+## More docs
 
-This branch is intentionally optimized for the new end state, not backward compatibility.
-
-If you are looking for the old Parquet/object-storage/DuckLake implementation, it has been removed from the active runtime path and much of it has been deleted outright.
-
-See `docs/plan.md` for the branch direction.
+- [docs/runtime.md](docs/runtime.md) - config-first runtime setup and metadata model
+- [docs/append-streams.md](docs/append-streams.md) - append semantics, restart guidance, telemetry
+- [docs/troubleshooting.md](docs/troubleshooting.md) - common failures and what to check
+- [docs/plan.md](docs/plan.md) - branch direction and product plan

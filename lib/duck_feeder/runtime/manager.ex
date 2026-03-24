@@ -7,13 +7,14 @@ defmodule DuckFeeder.Runtime.Manager do
 
   use GenServer
 
+  alias DuckFeeder.Runtime.Shared
   alias DuckFeeder.Runtime.Supervisor, as: RuntimeSupervisor
 
   defmodule State do
-    @enforce_keys [:meta_conn, :duckdb_config, :runtime_supervisor_module, :base_opts]
+    @enforce_keys [:meta_conn, :duckdb, :runtime_supervisor_module, :base_opts]
     defstruct [
       :meta_conn,
-      :duckdb_config,
+      :duckdb,
       :runtime_supervisor_module,
       :base_opts,
       sources: %{},
@@ -24,6 +25,7 @@ defmodule DuckFeeder.Runtime.Manager do
   @type option ::
           {:name, GenServer.name()}
           | {:meta_conn, term()}
+          | {:duckdb, map() | nil}
           | {:duckdb_config, map() | nil}
           | {:runtime_supervisor_module, module()}
           | {:base_opts, keyword()}
@@ -53,7 +55,7 @@ defmodule DuckFeeder.Runtime.Manager do
     {:ok,
      %State{
        meta_conn: Keyword.fetch!(opts, :meta_conn),
-       duckdb_config: Keyword.fetch!(opts, :duckdb_config),
+       duckdb: Shared.fetch_duckdb!(opts),
        runtime_supervisor_module:
          Keyword.get(opts, :runtime_supervisor_module, RuntimeSupervisor),
        base_opts: Keyword.get(opts, :base_opts, [])
@@ -113,7 +115,7 @@ defmodule DuckFeeder.Runtime.Manager do
       |> Keyword.merge(
         meta_conn: state.meta_conn,
         source_name: source_name,
-        duckdb_config: state.duckdb_config
+        duckdb: state.duckdb
       )
 
     case state.runtime_supervisor_module.start_link(opts) do

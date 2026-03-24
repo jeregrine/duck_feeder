@@ -27,7 +27,7 @@ defmodule DuckFeeder.Runtime.SupervisorTest do
   end
 
   defmodule FakeRuntime do
-    def start_stream(_meta_conn, _source_name, _duckdb_config, opts) do
+    def start_stream(_meta_conn, _source_name, _duckdb, opts) do
       test_pid = opts[:test_pid]
       service_pid = spawn(fn -> Process.sleep(:infinity) end)
       cdc_pid = spawn(fn -> Process.sleep(:infinity) end)
@@ -51,7 +51,7 @@ defmodule DuckFeeder.Runtime.SupervisorTest do
              Supervisor.start_link(
                meta_conn: :meta,
                source_name: "source-a",
-               duckdb_config: %{path: "/tmp/source-a.duckdb"},
+               duckdb: %{path: "/tmp/source-a.duckdb"},
                stream_worker_module: FakeStreamWorker,
                observer_pid: self(),
                runtime_opts: [observer_pid: self()]
@@ -60,10 +60,26 @@ defmodule DuckFeeder.Runtime.SupervisorTest do
     assert_receive {:fake_stream_worker_start, stream_opts}
     assert stream_opts[:meta_conn] == :meta
     assert stream_opts[:source_name] == "source-a"
-    assert stream_opts[:duckdb_config][:path] == "/tmp/source-a.duckdb"
+    assert stream_opts[:duckdb][:path] == "/tmp/source-a.duckdb"
 
     children = :supervisor.which_children(sup)
     assert length(children) == 1
+
+    GenServer.stop(sup)
+  end
+
+  test "accepts legacy duckdb_config option" do
+    assert {:ok, sup} =
+             Supervisor.start_link(
+               meta_conn: :meta,
+               source_name: "source-a",
+               duckdb_config: %{path: "/tmp/source-a.duckdb"},
+               stream_worker_module: FakeStreamWorker,
+               observer_pid: self()
+             )
+
+    assert_receive {:fake_stream_worker_start, stream_opts}
+    assert stream_opts[:duckdb][:path] == "/tmp/source-a.duckdb"
 
     GenServer.stop(sup)
   end
@@ -73,7 +89,7 @@ defmodule DuckFeeder.Runtime.SupervisorTest do
              Supervisor.start_link(
                meta_conn: :meta,
                source_name: "source-a",
-               duckdb_config: %{path: "/tmp/source-a.duckdb"},
+               duckdb: %{path: "/tmp/source-a.duckdb"},
                runtime_module: FakeRuntime,
                runtime_opts: [test_pid: self()],
                observer_pid: self()
@@ -102,7 +118,7 @@ defmodule DuckFeeder.Runtime.SupervisorTest do
              Supervisor.start_link(
                meta_conn: :meta,
                source_name: "source-a",
-               duckdb_config: %{path: "/tmp/source-a.duckdb"},
+               duckdb: %{path: "/tmp/source-a.duckdb"},
                stream_worker_module: FailStreamWorker
              )
   end

@@ -71,6 +71,9 @@ defmodule DuckFeeder.Runtime.EmbeddedConfigTest do
     assert resolved.validated_config.metadata.postgres_url ==
              "postgres://app_user:app_pass@localhost:5432/app_db"
 
+    assert resolved.duckdb.path == "/tmp/primary.duckdb"
+    assert resolved.duckdb_config == resolved.duckdb
+
     assert Enum.any?(resolved.validated_config.source.designated_tables, fn table ->
              table.source_table == "tenants" and table.target_schema == "raw"
            end)
@@ -78,6 +81,33 @@ defmodule DuckFeeder.Runtime.EmbeddedConfigTest do
     assert Enum.any?(resolved.validated_config.source.designated_tables, fn table ->
              table.source_table == "invoices" and table.target_table == "invoice_events"
            end)
+  end
+
+  test "defaults embedded runtime opts to initial snapshot and resume" do
+    config = %{
+      enabled: true,
+      repo: FakeRepo,
+      schemas: [Tenant],
+      duckdb: %{path: "/tmp/defaults.duckdb"}
+    }
+
+    assert {:ok, resolved} = Runtime.resolve_app_config(config)
+    assert resolved.runtime_opts[:snapshot_before_stream?] == true
+    assert resolved.runtime_opts[:resume_incomplete_snapshot?] == true
+  end
+
+  test "preserves explicit embedded runtime opt overrides" do
+    config = %{
+      enabled: true,
+      repo: FakeRepo,
+      schemas: [Tenant],
+      duckdb: %{path: "/tmp/defaults.duckdb"},
+      runtime_opts: [snapshot_before_stream?: false, resume_incomplete_snapshot?: false]
+    }
+
+    assert {:ok, resolved} = Runtime.resolve_app_config(config)
+    assert resolved.runtime_opts[:snapshot_before_stream?] == false
+    assert resolved.runtime_opts[:resume_incomplete_snapshot?] == false
   end
 
   test "supports metadata_repo override" do

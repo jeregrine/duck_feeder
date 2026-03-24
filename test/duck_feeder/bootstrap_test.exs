@@ -15,9 +15,9 @@ defmodule DuckFeeder.BootstrapTest do
   end
 
   defmodule FakeRuntime do
-    def start_stream(_meta_conn, source_name, duckdb_config, start_opts) do
+    def start_stream(_meta_conn, source_name, duckdb, start_opts) do
       if pid = Process.get(:test_pid),
-        do: send(pid, {:runtime_start_stream, source_name, duckdb_config, start_opts})
+        do: send(pid, {:runtime_start_stream, source_name, duckdb, start_opts})
 
       {:ok,
        %{service_pid: self(), cdc_pid: self(), start_lsn: "0/0", source: %{name: source_name}}}
@@ -107,9 +107,9 @@ defmodule DuckFeeder.BootstrapTest do
     assert result.source_name == "source-a"
     assert result.runtime.start_lsn == "0/0"
 
-    assert_received {:runtime_start_stream, "source-a", duckdb_config, start_opts}
-    assert duckdb_config.path == "/tmp/source-a.duckdb"
-    assert duckdb_config.catalog == "lake"
+    assert_received {:runtime_start_stream, "source-a", duckdb, start_opts}
+    assert duckdb.path == "/tmp/source-a.duckdb"
+    assert duckdb.catalog == "lake"
     assert start_opts[:meta_module] == FakeMeta
     assert start_opts[:source].name == "source-a"
     assert start_opts[:designated_tables] == result.designated_tables

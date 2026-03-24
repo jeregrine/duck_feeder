@@ -37,11 +37,13 @@ defmodule DuckFeeder.ConfigTest do
     assert validated.duckdb.catalog == "lake"
     assert validated.ingest.max_rows == 5_000
 
-    duckdb_config = Config.duckdb_config(validated)
-    assert duckdb_config.path == "/tmp/duck_feeder.duckdb"
-    assert duckdb_config.catalog == "lake"
-    assert duckdb_config.setup_sql == ["INSTALL ducklake", "LOAD ducklake"]
-    assert duckdb_config.setup_fun == setup_fun
+    duckdb = Config.duckdb(validated)
+    assert duckdb.path == "/tmp/duck_feeder.duckdb"
+    assert duckdb.catalog == "lake"
+    assert duckdb.setup_sql == ["INSTALL ducklake", "LOAD ducklake"]
+    assert duckdb.setup_fun == setup_fun
+
+    assert Config.duckdb_config(validated) == duckdb
   end
 
   test "preserves duckdb.setup_sql lists" do

@@ -253,7 +253,7 @@ Update README/docs to clearly explain:
 
 Make the public surface feel intentional:
 
-- keep `duckdb` / `duckdb_config` naming consistent,
+- standardize on `duckdb` naming while keeping legacy `duckdb_config` compatibility where needed,
 - reduce surprising runtime option combinations,
 - improve option validation and startup errors,
 - make the config-first path the obvious primary path.

@@ -30,19 +30,20 @@ defmodule DuckFeeder.BatchQueue do
     event_callback = Keyword.get(opts, :on_event, &passthrough_event/3)
     dropped_callback = Keyword.get(opts, :on_dropped, &passthrough_dropped/4)
 
-    if map_size(state.inflight_batch_tasks) < state.max_inflight_batches do
-      {:ok, start_batch_task(state, table, batch, :incoming, event_callback)}
-    else
-      if state.pending_batch_count >= state.max_pending_batches do
+    cond do
+      map_size(state.inflight_batch_tasks) < state.max_inflight_batches ->
+        {:ok, start_batch_task(state, table, batch, :incoming, event_callback)}
+
+      state.pending_batch_count >= state.max_pending_batches ->
         handle_queue_overflow(state, table, batch, event_callback, dropped_callback)
-      else
+
+      true ->
         queued_state =
           state
           |> Map.put(:pending_batches, :queue.in({table, batch}, state.pending_batches))
           |> Map.put(:pending_batch_count, state.pending_batch_count + 1)
 
         {:ok, event_callback.(queued_state, :enqueued, %{table: table})}
-      end
     end
   end
 
@@ -59,26 +60,25 @@ defmodule DuckFeeder.BatchQueue do
   def normal_down_reason?(_reason), do: false
 
   defp do_maybe_start_queued_batches(state, event_callback) do
-    if map_size(state.inflight_batch_tasks) >= state.max_inflight_batches do
-      state
-    else
-      cond do
-        state.pending_batch_count == 0 ->
-          state
+    cond do
+      map_size(state.inflight_batch_tasks) >= state.max_inflight_batches ->
+        state
 
-        true ->
-          case :queue.out(state.pending_batches) do
-            {{:value, {table, batch}}, next_queue} ->
-              state
-              |> Map.put(:pending_batches, next_queue)
-              |> Map.put(:pending_batch_count, state.pending_batch_count - 1)
-              |> start_batch_task(table, batch, :queued, event_callback)
-              |> do_maybe_start_queued_batches(event_callback)
+      state.pending_batch_count == 0 ->
+        state
 
-            {:empty, _queue} ->
-              Map.put(state, :pending_batch_count, 0)
-          end
-      end
+      true ->
+        case :queue.out(state.pending_batches) do
+          {{:value, {table, batch}}, next_queue} ->
+            state
+            |> Map.put(:pending_batches, next_queue)
+            |> Map.put(:pending_batch_count, state.pending_batch_count - 1)
+            |> start_batch_task(table, batch, :queued, event_callback)
+            |> do_maybe_start_queued_batches(event_callback)
+
+          {:empty, _queue} ->
+            Map.put(state, :pending_batch_count, 0)
+        end
     end
   end
 

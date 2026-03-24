@@ -18,7 +18,7 @@ defmodule DuckFeeder.Sink.DuckDB do
         setup_fun: &my_setup/1
       }
 
-  If `:conn` is omitted, `DuckFeeder.DuckDB.Connection.get_conn/1` is used.
+  If `:conn` is omitted, DuckFeeder uses its managed DuckDB connection.
   """
 
   @behaviour DuckFeeder.Sink

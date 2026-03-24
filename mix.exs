@@ -45,6 +45,9 @@ defmodule DuckFeeder.MixProject do
       source_url: @source_url,
       extras: [
         "README.md",
+        "docs/runtime.md",
+        "docs/append-streams.md",
+        "docs/troubleshooting.md",
         "docs/plan.md"
       ]
     ]

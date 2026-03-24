@@ -12,10 +12,35 @@ defmodule DuckFeeder.Migrations do
       end
   """
 
-  defdelegate up(opts \\ []), to: DuckFeeder.Migration
-  defdelegate down(opts \\ []), to: DuckFeeder.Migration
-  defdelegate migrated_version(opts \\ []), to: DuckFeeder.Migration
-  defdelegate current_version(), to: DuckFeeder.Migration
+  @doc """
+  Creates or upgrades the DuckFeeder metadata schema in the given repo.
+
+  Pass `repo: MyApp.Repo` from inside an Ecto migration.
+  """
+  @spec up(keyword()) :: :ok
+  def up(opts \\ []), do: DuckFeeder.Migration.up(opts)
+
+  @doc """
+  Drops the DuckFeeder metadata schema from the given repo.
+
+  Pass `repo: MyApp.Repo` from inside an Ecto migration.
+  """
+  @spec down(keyword()) :: :ok
+  def down(opts \\ []), do: DuckFeeder.Migration.down(opts)
+
+  @doc """
+  Returns the recorded DuckFeeder metadata migration version for the given repo.
+
+  Returns `0` when the metadata version table has not been initialized yet.
+  """
+  @spec migrated_version(keyword()) :: non_neg_integer()
+  def migrated_version(opts \\ []), do: DuckFeeder.Migration.migrated_version(opts)
+
+  @doc """
+  Returns the current DuckFeeder metadata schema version expected by this package.
+  """
+  @spec current_version() :: pos_integer()
+  def current_version, do: DuckFeeder.Migration.current_version()
 end
 
 defmodule DuckFeeder.Migration do

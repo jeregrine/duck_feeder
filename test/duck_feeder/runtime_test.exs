@@ -444,10 +444,10 @@ defmodule DuckFeeder.RuntimeTest do
   end
 
   test "starts service from metadata" do
-    duckdb_config = %{}
+    duckdb = %{}
 
     assert {:ok, pid} =
-             Runtime.start_service(:meta_conn, "source-a", duckdb_config,
+             Runtime.start_service(:meta_conn, "source-a", duckdb,
                meta_module: FakeMeta,
                name: nil,
                observer_pid: self()
@@ -460,10 +460,10 @@ defmodule DuckFeeder.RuntimeTest do
   end
 
   test "starts streaming runtime stack" do
-    duckdb_config = %{}
+    duckdb = %{}
 
     assert {:ok, %{service_pid: service_pid, cdc_pid: cdc_pid, start_lsn: "0/20"}} =
-             Runtime.start_stream(:meta_conn, "source-a", duckdb_config,
+             Runtime.start_stream(:meta_conn, "source-a", duckdb,
                meta_module: FakeMeta,
                service_module: FakeService,
                cdc_module: FakeCDC,
@@ -535,10 +535,10 @@ defmodule DuckFeeder.RuntimeTest do
   end
 
   test "start_stream supports call-mode event sink" do
-    duckdb_config = %{}
+    duckdb = %{}
 
     assert {:ok, %{service_pid: service_pid, cdc_pid: cdc_pid, start_lsn: "0/20"}} =
-             Runtime.start_stream(:meta_conn, "source-a", duckdb_config,
+             Runtime.start_stream(:meta_conn, "source-a", duckdb,
                meta_module: FakeMeta,
                service_module: FakeService,
                cdc_module: FakeCDC,
@@ -558,10 +558,10 @@ defmodule DuckFeeder.RuntimeTest do
   end
 
   test "start_stream applies default reconnect backoff" do
-    duckdb_config = %{}
+    duckdb = %{}
 
     assert {:ok, %{service_pid: service_pid, cdc_pid: cdc_pid, start_lsn: "0/20"}} =
-             Runtime.start_stream(:meta_conn, "source-a", duckdb_config,
+             Runtime.start_stream(:meta_conn, "source-a", duckdb,
                meta_module: FakeMeta,
                service_module: FakeService,
                cdc_module: FakeCDC,
@@ -580,7 +580,7 @@ defmodule DuckFeeder.RuntimeTest do
   end
 
   test "start_stream supports reconnect backoff bounds and jitter" do
-    duckdb_config = %{}
+    duckdb = %{}
 
     jitter_fun = fn base_ms, jitter_ms ->
       send(self(), {:fake_reconnect_jitter, base_ms, jitter_ms})
@@ -588,7 +588,7 @@ defmodule DuckFeeder.RuntimeTest do
     end
 
     assert {:ok, %{service_pid: service_pid, cdc_pid: cdc_pid, start_lsn: "0/20"}} =
-             Runtime.start_stream(:meta_conn, "source-a", duckdb_config,
+             Runtime.start_stream(:meta_conn, "source-a", duckdb,
                meta_module: FakeMeta,
                service_module: FakeService,
                cdc_module: FakeCDC,
@@ -615,7 +615,7 @@ defmodule DuckFeeder.RuntimeTest do
   end
 
   test "start_stream keeps checkpoint start_lsn when bootstrap reports existing slot" do
-    duckdb_config = %{}
+    duckdb = %{}
 
     query_connect_fun = fn connection_opts ->
       send(self(), {:fake_query_connect, connection_opts})
@@ -628,7 +628,7 @@ defmodule DuckFeeder.RuntimeTest do
     end
 
     assert {:ok, %{service_pid: service_pid, cdc_pid: cdc_pid, start_lsn: "0/20"}} =
-             Runtime.start_stream(:meta_conn, "source-a", duckdb_config,
+             Runtime.start_stream(:meta_conn, "source-a", duckdb,
                meta_module: FakeMeta,
                service_module: FakeService,
                cdc_module: FakeCDC,
@@ -656,7 +656,7 @@ defmodule DuckFeeder.RuntimeTest do
   end
 
   test "start_stream uses bootstrap start_lsn when slot is created" do
-    duckdb_config = %{}
+    duckdb = %{}
 
     query_connect_fun = fn connection_opts ->
       send(self(), {:fake_query_connect_created_slot, connection_opts})
@@ -669,7 +669,7 @@ defmodule DuckFeeder.RuntimeTest do
     end
 
     assert {:ok, %{service_pid: service_pid, cdc_pid: cdc_pid, start_lsn: "0/30"}} =
-             Runtime.start_stream(:meta_conn, "source-a", duckdb_config,
+             Runtime.start_stream(:meta_conn, "source-a", duckdb,
                meta_module: FakeMeta,
                service_module: FakeService,
                cdc_module: FakeCDC,
@@ -699,7 +699,7 @@ defmodule DuckFeeder.RuntimeTest do
   end
 
   test "start_stream returns bootstrap exception and still disconnects query conn" do
-    duckdb_config = %{}
+    duckdb = %{}
 
     query_connect_fun = fn _connection_opts ->
       {:ok, :query_conn}
@@ -711,7 +711,7 @@ defmodule DuckFeeder.RuntimeTest do
     end
 
     assert {:error, {:bootstrap_exception, %RuntimeError{message: "bootstrap boom"}}} =
-             Runtime.start_stream(:meta_conn, "source-a", duckdb_config,
+             Runtime.start_stream(:meta_conn, "source-a", duckdb,
                meta_module: FakeMeta,
                service_module: FakeService,
                cdc_module: FakeCDC,
@@ -729,7 +729,7 @@ defmodule DuckFeeder.RuntimeTest do
   end
 
   test "start_stream can run initial snapshot before replication stream" do
-    duckdb_config = %{}
+    duckdb = %{}
 
     query_connect_fun = fn connection_opts ->
       send(self(), {:fake_query_connect_snapshot, connection_opts})
@@ -747,7 +747,7 @@ defmodule DuckFeeder.RuntimeTest do
     end
 
     assert {:ok, %{service_pid: service_pid, cdc_pid: cdc_pid, start_lsn: "0/35"}} =
-             Runtime.start_stream(:meta_conn, "source-a", duckdb_config,
+             Runtime.start_stream(:meta_conn, "source-a", duckdb,
                meta_module: FakeMeta,
                service_module: FakeService,
                cdc_module: FakeCDC,
@@ -777,10 +777,10 @@ defmodule DuckFeeder.RuntimeTest do
   end
 
   test "snapshot mode defaults to replaying rows into service when row handler is not provided" do
-    duckdb_config = %{}
+    duckdb = %{}
 
     assert {:ok, %{service_pid: service_pid, cdc_pid: cdc_pid, start_lsn: "0/35"}} =
-             Runtime.start_stream(:meta_conn, "source-a", duckdb_config,
+             Runtime.start_stream(:meta_conn, "source-a", duckdb,
                meta_module: FakeMeta,
                service_module: FakeService,
                cdc_module: FakeCDC,
@@ -805,10 +805,10 @@ defmodule DuckFeeder.RuntimeTest do
   end
 
   test "partial snapshot replay resumes from checkpoint progress within synthetic lsn window" do
-    duckdb_config = %{}
+    duckdb = %{}
 
     assert {:ok, %{service_pid: service_pid, cdc_pid: cdc_pid, start_lsn: "0/35"}} =
-             Runtime.start_stream(:meta_conn, "source-partial", duckdb_config,
+             Runtime.start_stream(:meta_conn, "source-partial", duckdb,
                meta_module: FakeMeta,
                service_module: FakeService,
                cdc_module: FakeCDC,
@@ -836,7 +836,7 @@ defmodule DuckFeeder.RuntimeTest do
   end
 
   test "returns snapshot runner exception and still disconnects query conn" do
-    duckdb_config = %{}
+    duckdb = %{}
 
     query_connect_fun = fn _ -> {:ok, :query_conn} end
 
@@ -846,7 +846,7 @@ defmodule DuckFeeder.RuntimeTest do
     end
 
     assert {:error, {:initial_snapshot_failed, {:snapshot_runner_exception, %RuntimeError{}}}} =
-             Runtime.start_stream(:meta_conn, "source-a", duckdb_config,
+             Runtime.start_stream(:meta_conn, "source-a", duckdb,
                meta_module: FakeMeta,
                service_module: FakeService,
                cdc_module: FakeCDC,
@@ -866,10 +866,10 @@ defmodule DuckFeeder.RuntimeTest do
   end
 
   test "returns snapshot replay failure when snapshot ingest crashes" do
-    duckdb_config = %{}
+    duckdb = %{}
 
     assert {:error, {:snapshot_replay_failed, {:snapshot_ingest_exit, _reason}}} =
-             Runtime.start_stream(:meta_conn, "source-a", duckdb_config,
+             Runtime.start_stream(:meta_conn, "source-a", duckdb,
                meta_module: FakeMeta,
                service_module: FakeSnapshotIngestCrashService,
                cdc_module: FakeCDC,
@@ -887,10 +887,10 @@ defmodule DuckFeeder.RuntimeTest do
   end
 
   test "marks snapshot handoff pending when cdc start fails after snapshot replay" do
-    duckdb_config = %{}
+    duckdb = %{}
 
     assert {:error, :failed_to_start_cdc} =
-             Runtime.start_stream(:meta_conn, "source-a", duckdb_config,
+             Runtime.start_stream(:meta_conn, "source-a", duckdb,
                meta_module: FakeMeta,
                service_module: FakeService,
                cdc_module: FakeCDCFailStart,
@@ -910,7 +910,7 @@ defmodule DuckFeeder.RuntimeTest do
              FakeMeta.fetch_snapshot_handoff(:meta_conn, 10)
 
     assert {:error, {:snapshot_handoff_incomplete, %{source_id: 10, state: :pending}}} =
-             Runtime.start_stream(:meta_conn, "source-a", duckdb_config,
+             Runtime.start_stream(:meta_conn, "source-a", duckdb,
                meta_module: FakeMeta,
                service_module: FakeService,
                cdc_module: FakeCDC,
@@ -923,7 +923,7 @@ defmodule DuckFeeder.RuntimeTest do
              )
 
     assert {:ok, %{service_pid: service_pid, cdc_pid: cdc_pid}} =
-             Runtime.start_stream(:meta_conn, "source-a", duckdb_config,
+             Runtime.start_stream(:meta_conn, "source-a", duckdb,
                meta_module: FakeMeta,
                service_module: FakeService,
                cdc_module: FakeCDC,
@@ -947,10 +947,10 @@ defmodule DuckFeeder.RuntimeTest do
   end
 
   test "marks snapshot handoff pending when snapshot replay fails" do
-    duckdb_config = %{}
+    duckdb = %{}
 
     assert {:error, {:snapshot_replay_failed, {:snapshot_ingest_exit, _reason}}} =
-             Runtime.start_stream(:meta_conn, "source-a", duckdb_config,
+             Runtime.start_stream(:meta_conn, "source-a", duckdb,
                meta_module: FakeMeta,
                service_module: FakeSnapshotIngestCrashService,
                cdc_module: FakeCDC,
@@ -971,13 +971,13 @@ defmodule DuckFeeder.RuntimeTest do
   end
 
   test "pending handoff resume requires snapshot_before_stream when checkpoint is behind boundary" do
-    duckdb_config = %{}
+    duckdb = %{}
 
     assert {:ok, "0/35"} = FakeMeta.mark_snapshot_handoff_pending(:meta_conn, 10, "0/35")
 
     assert {:error,
             {:snapshot_resume_requires_snapshot_before_stream, %{source_id: 10, state: :pending}}} =
-             Runtime.start_stream(:meta_conn, "source-a", duckdb_config,
+             Runtime.start_stream(:meta_conn, "source-a", duckdb,
                meta_module: FakeMeta,
                service_module: FakeService,
                cdc_module: FakeCDC,
@@ -991,11 +991,11 @@ defmodule DuckFeeder.RuntimeTest do
   end
 
   test "retries mark_snapshot_handoff_pending before failing startup" do
-    duckdb_config = %{}
+    duckdb = %{}
     :ok = FakeMeta.fail_mark_snapshot_handoff_pending(10, 1)
 
     assert {:error, :failed_to_start_cdc} =
-             Runtime.start_stream(:meta_conn, "source-a", duckdb_config,
+             Runtime.start_stream(:meta_conn, "source-a", duckdb,
                meta_module: FakeMeta,
                service_module: FakeService,
                cdc_module: FakeCDCFailStart,
@@ -1016,11 +1016,11 @@ defmodule DuckFeeder.RuntimeTest do
   end
 
   test "returns error when mark_snapshot_handoff_pending retries are exhausted" do
-    duckdb_config = %{}
+    duckdb = %{}
     :ok = FakeMeta.fail_mark_snapshot_handoff_pending(10, 3)
 
     assert {:error, :forced_mark_pending_failure} =
-             Runtime.start_stream(:meta_conn, "source-a", duckdb_config,
+             Runtime.start_stream(:meta_conn, "source-a", duckdb,
                meta_module: FakeMeta,
                service_module: FakeService,
                cdc_module: FakeCDC,
@@ -1039,11 +1039,11 @@ defmodule DuckFeeder.RuntimeTest do
   end
 
   test "retries mark_snapshot_handoff_complete before succeeding startup" do
-    duckdb_config = %{}
+    duckdb = %{}
     :ok = FakeMeta.fail_mark_snapshot_handoff_complete(10, 1)
 
     assert {:ok, %{service_pid: service_pid, cdc_pid: cdc_pid}} =
-             Runtime.start_stream(:meta_conn, "source-a", duckdb_config,
+             Runtime.start_stream(:meta_conn, "source-a", duckdb,
                meta_module: FakeMeta,
                service_module: FakeService,
                cdc_module: FakeCDC,
@@ -1067,11 +1067,11 @@ defmodule DuckFeeder.RuntimeTest do
   end
 
   test "returns error when mark_snapshot_handoff_complete retries are exhausted" do
-    duckdb_config = %{}
+    duckdb = %{}
     :ok = FakeMeta.fail_mark_snapshot_handoff_complete(10, 3)
 
     assert {:error, {:snapshot_handoff_mark_complete_failed, :forced_mark_complete_failure}} =
-             Runtime.start_stream(:meta_conn, "source-a", duckdb_config,
+             Runtime.start_stream(:meta_conn, "source-a", duckdb,
                meta_module: FakeMeta,
                service_module: FakeService,
                cdc_module: FakeCDC,
@@ -1090,12 +1090,12 @@ defmodule DuckFeeder.RuntimeTest do
   end
 
   test "returns error when snapshot handoff is pending and resume is disabled" do
-    duckdb_config = %{}
+    duckdb = %{}
 
     assert {:ok, "0/35"} = FakeMeta.mark_snapshot_handoff_pending(:meta_conn, 12, "0/35")
 
     assert {:error, {:snapshot_handoff_incomplete, %{source_id: 12, state: :pending}}} =
-             Runtime.start_stream(:meta_conn, "source-resume", duckdb_config,
+             Runtime.start_stream(:meta_conn, "source-resume", duckdb,
                meta_module: FakeMeta,
                service_module: FakeService,
                cdc_module: FakeCDC,
@@ -1109,12 +1109,12 @@ defmodule DuckFeeder.RuntimeTest do
   end
 
   test "pending handoff can complete without rerunning snapshot when checkpoint is at/after boundary" do
-    duckdb_config = %{}
+    duckdb = %{}
 
     assert {:ok, "0/35"} = FakeMeta.mark_snapshot_handoff_pending(:meta_conn, 12, "0/35")
 
     assert {:ok, %{service_pid: service_pid, cdc_pid: cdc_pid, start_lsn: "0/40"}} =
-             Runtime.start_stream(:meta_conn, "source-resume", duckdb_config,
+             Runtime.start_stream(:meta_conn, "source-resume", duckdb,
                meta_module: FakeMeta,
                service_module: FakeService,
                cdc_module: FakeCDC,
@@ -1138,10 +1138,10 @@ defmodule DuckFeeder.RuntimeTest do
   end
 
   test "snapshot replay is skipped when checkpoint lsn is already at or past boundary" do
-    duckdb_config = %{}
+    duckdb = %{}
 
     assert {:ok, %{service_pid: service_pid, cdc_pid: cdc_pid, start_lsn: "0/40"}} =
-             Runtime.start_stream(:meta_conn, "source-resume", duckdb_config,
+             Runtime.start_stream(:meta_conn, "source-resume", duckdb,
                meta_module: FakeMeta,
                service_module: FakeService,
                cdc_module: FakeCDC,
@@ -1165,10 +1165,10 @@ defmodule DuckFeeder.RuntimeTest do
   end
 
   test "returns error when snapshot ingest is disabled and row handler missing" do
-    duckdb_config = %{}
+    duckdb = %{}
 
     assert {:error, :missing_snapshot_row_handler} =
-             Runtime.start_stream(:meta_conn, "source-a", duckdb_config,
+             Runtime.start_stream(:meta_conn, "source-a", duckdb,
                meta_module: FakeMeta,
                service_module: FakeService,
                cdc_module: FakeCDC,
@@ -1184,17 +1184,17 @@ defmodule DuckFeeder.RuntimeTest do
   end
 
   test "returns error when source is missing" do
-    duckdb_config = %{}
+    duckdb = %{}
 
     assert {:error, {:source_not_found, "missing"}} =
-             Runtime.service_options(:meta_conn, "missing", duckdb_config, meta_module: FakeMeta)
+             Runtime.service_options(:meta_conn, "missing", duckdb, meta_module: FakeMeta)
   end
 
   test "returns error when source fields are missing for stream startup" do
-    duckdb_config = %{}
+    duckdb = %{}
 
     assert {:error, {:missing_source_field, :slot_name}} =
-             Runtime.start_stream(:meta_conn, "source-missing-slot", duckdb_config,
+             Runtime.start_stream(:meta_conn, "source-missing-slot", duckdb,
                meta_module: FakeMeta,
                service_module: FakeService,
                cdc_module: FakeCDC,

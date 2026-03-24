@@ -1,6 +1,8 @@
 defmodule DuckFeeder.AppendStreamTest do
   use ExUnit.Case, async: true
 
+  import ExUnit.CaptureLog
+
   alias DuckFeeder.AppendStream
 
   defmodule FakeMeta do
@@ -203,23 +205,25 @@ defmodule DuckFeeder.AppendStreamTest do
       lsn_end: "0/1"
     }
 
-    send(stream, {:duck_feeder_batch, {"raw", "events"}, batch})
+    capture_log(fn ->
+      send(stream, {:duck_feeder_batch, {"raw", "events"}, batch})
 
-    send(
-      stream,
-      {:duck_feeder_batch, {"raw", "events"}, %{batch | lsn_start: "0/2", lsn_end: "0/2"}}
-    )
+      send(
+        stream,
+        {:duck_feeder_batch, {"raw", "events"}, %{batch | lsn_start: "0/2", lsn_end: "0/2"}}
+      )
 
-    send(
-      stream,
-      {:duck_feeder_batch, {"raw", "events"}, %{batch | lsn_start: "0/3", lsn_end: "0/3"}}
-    )
+      send(
+        stream,
+        {:duck_feeder_batch, {"raw", "events"}, %{batch | lsn_start: "0/3", lsn_end: "0/3"}}
+      )
 
-    assert_receive {:duck_feeder_append_batch_queue_overflow, {"raw", "events"}, _batch,
-                    {:batch_queue_overflow, 1}},
-                   1_000
+      assert_receive {:duck_feeder_append_batch_queue_overflow, {"raw", "events"}, _batch,
+                      {:batch_queue_overflow, 1}},
+                     1_000
 
-    assert_receive {:EXIT, ^stream, {:batch_queue_overflow, 1}}, 1_000
+      assert_receive {:EXIT, ^stream, {:batch_queue_overflow, 1}}, 1_000
+    end)
   end
 
   test "can drop oldest pending batch when configured" do

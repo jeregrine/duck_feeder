@@ -1,6 +1,8 @@
 defmodule DuckFeeder.ServiceTest do
   use ExUnit.Case, async: true
 
+  import ExUnit.CaptureLog
+
   alias DuckFeeder.CDC.Event
   alias DuckFeeder.Service
 
@@ -258,6 +260,60 @@ defmodule DuckFeeder.ServiceTest do
     assert row._record["id"] == 1
     refute Map.has_key?(row._record, "_op")
     refute Map.has_key?(row._record, "_commit_lsn")
+  end
+
+  test "ingests snapshot rows when designated table uses string keys" do
+    start_table = %{
+      source_schema: "public",
+      source_table: "users",
+      target_schema: "raw",
+      target_table: "users"
+    }
+
+    snapshot_table = %{
+      "source_schema" => "public",
+      "source_table" => "users",
+      "target_schema" => "raw",
+      "target_table" => "users"
+    }
+
+    {:ok, service} =
+      Service.start_link(
+        designated_tables: [start_table],
+        meta_conn: self(),
+        sink_module: FakeSink,
+        pipeline_opts: %{max_rows: 1, max_bytes: 10_000, flush_interval_ms: 60_000},
+        observer_pid: self()
+      )
+
+    assert :ok = Service.ingest_snapshot_row(service, snapshot_table, %{"id" => 1})
+
+    assert_receive {:duck_feeder_batch_processed, {"raw", "users"}, {:ok, _result}, batch},
+                   1_000
+
+    assert batch.row_count == 1
+  end
+
+  test "rejects invalid duckdb option shapes" do
+    designated_tables = [
+      %{
+        id: 1,
+        source_schema: "public",
+        source_table: "users",
+        target_schema: "raw",
+        target_table: "users"
+      }
+    ]
+
+    capture_log(fn ->
+      assert {:error, {:invalid_option, :duckdb, [:not, :a, :keyword]}} =
+               GenServer.start(
+                 Service,
+                 designated_tables: designated_tables,
+                 meta_conn: self(),
+                 duckdb: [:not, :a, :keyword]
+               )
+    end)
   end
 
   test "returns CDC validation errors" do

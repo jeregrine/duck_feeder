@@ -105,14 +105,20 @@ defmodule DuckFeeder.Config do
   end
 
   @doc """
-  Returns DuckDB config shape expected by runtime/service startup.
+  Returns the DuckDB options shape expected by runtime/service startup.
   """
-  @spec duckdb_config(t()) :: map()
-  def duckdb_config(validated_config) do
+  @spec duckdb(t()) :: map()
+  def duckdb(validated_config) do
     validated_config
     |> Map.fetch!(:duckdb)
     |> Map.take([:path, :catalog, :setup_sql, :setup_fun])
   end
+
+  @doc """
+  Backward-compatible alias for `duckdb/1`.
+  """
+  @spec duckdb_config(t()) :: map()
+  def duckdb_config(validated_config), do: duckdb(validated_config)
 
   @doc false
   def schema, do: @schema
