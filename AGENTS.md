@@ -4,7 +4,7 @@
 DuckFeeder is an Elixir runtime for mirroring Postgres data into DuckDB-managed tables:
 
 - **Postgres logical replication (WAL/CDC)** — decode pgoutput, route changes, apply as table operations
-- **Direct DuckDB writes** via ADBC — inserts, merges, deletes, and truncate-clears into real target tables
+- **Direct DuckDB writes** via Dux/DuckDB — inserts, merges, deletes, and truncate-clears into real target tables
 - **Append-only event streams** — non-CDC producers (telemetry, logs, domain events) into the same DuckDB database
 - **Checkpoint durability** — Postgres-backed metadata store for restart correctness
 
@@ -16,7 +16,7 @@ Core durability rule: **WAL ACK advances only after DuckDB table writes are comm
 ## Current Runtime/Product Decisions
 - Elixir-first architecture, OTP-supervised runtime.
 - Source/table registry is **config-first**: source settings and designated tables come from app config / Ecto schemas, not persisted metadata tables.
-- DuckDB access is through **ADBC** (`{:adbc, "~> 0.8"}`). No Parquet NIF, no object storage.
+- DuckDB access is through **Dux** (`{:dux, "~> 0.2"}`), which uses ADBC under the hood. No Parquet NIF, no object storage.
 - CDC path is fail-closed under sustained overload.
 - Append stream defaults to fail-closed but can optionally use lossy overflow policy (`overflow_strategy: :drop_oldest`).
 - Telemetry helper shipped: `DuckFeeder.TelemetryForwarder`.
@@ -25,7 +25,7 @@ Core durability rule: **WAL ACK advances only after DuckDB table writes are comm
 ## Dependencies
 Runtime deps (from `mix.exs`):
 - `postgrex ~> 0.20` — Postgres connections + replication protocol
-- `adbc ~> 0.8` — DuckDB access
+- `dux ~> 0.2` — DuckDB access layer over DuckDB/ADBC
 - `nimble_options ~> 1.1` — config validation
 - `jason ~> 1.4` — optional dependency
 
@@ -42,7 +42,7 @@ Postgres WAL
   → CDC.Connection (Postgrex.ReplicationConnection)
   → CDC.Pipeline (TransactionBuffer → Ingest)
   → TablePipeline (micro-batch buffer)
-  → Sink.DuckDB (MERGE/DELETE/INSERT via ADBC)
+  → Sink.DuckDB (MERGE/DELETE/INSERT via Dux/DuckDB)
   → Meta.Store.upsert_checkpoint (Postgres)
   → CDC.Connection ack_lsn
 ```
@@ -51,7 +51,7 @@ Postgres WAL
 ```
 AppendStream.append/4
   → TablePipeline (micro-batch buffer)
-  → Sink.DuckDB (INSERT via ADBC)
+  → Sink.DuckDB (INSERT via Dux/DuckDB)
   → Meta.Store.upsert_checkpoint (Postgres)
 ```
 

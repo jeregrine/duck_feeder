@@ -25,6 +25,7 @@ defmodule DuckFeeder.Sink.DuckDB do
 
   alias DuckFeeder.DesignatedTable
   alias DuckFeeder.Meta
+  alias DuckFeeder.DuckDB.Client, as: DuckDBClient
   alias DuckFeeder.DuckDB.Connection, as: DuckDBConnection
 
   @setup_registry __MODULE__.SetupRegistry
@@ -571,21 +572,11 @@ defmodule DuckFeeder.Sink.DuckDB do
   end
 
   defp execute(conn, sql) when is_binary(sql) do
-    case Adbc.Connection.query(conn, sql) do
-      {:ok, _result} -> :ok
-      {:error, reason} -> {:error, {:duckdb_query_failed, sql, reason}}
-    end
-  rescue
-    exception -> {:error, {:duckdb_query_exception, sql, exception}}
+    DuckDBClient.execute(conn, sql)
   end
 
   defp query_map(conn, sql) when is_binary(sql) do
-    case Adbc.Connection.query(conn, sql) do
-      {:ok, result} -> {:ok, Adbc.Result.to_map(result)}
-      {:error, reason} -> {:error, {:duckdb_query_failed, sql, reason}}
-    end
-  rescue
-    exception -> {:error, {:duckdb_query_exception, sql, exception}}
+    DuckDBClient.query_map(conn, sql)
   end
 
   defp cdc_batch?(rows) do

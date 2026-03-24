@@ -1,6 +1,8 @@
 defmodule DuckFeeder.Sink.DuckDBTest do
   use ExUnit.Case, async: false
 
+  alias DuckFeeder.DuckDB.Client, as: DuckDBClient
+  alias DuckFeeder.DuckDB.Connection, as: DuckDBConnection
   alias DuckFeeder.Sink.DuckDB
 
   defmodule FakeMeta do
@@ -14,13 +16,11 @@ defmodule DuckFeeder.Sink.DuckDBTest do
   end
 
   setup do
-    :ok = Adbc.download_driver!(:duckdb)
-    {:ok, db} = Adbc.Database.start_link(driver: :duckdb)
-    {:ok, conn} = Adbc.Connection.start_link(database: db)
+    {:ok, server} = DuckDBConnection.start_link(name: nil)
+    conn = DuckDBConnection.get_conn(server)
 
     on_exit(fn ->
-      safe_stop(conn)
-      safe_stop(db)
+      safe_stop(server)
     end)
 
     {:ok, conn: conn}
@@ -198,14 +198,9 @@ defmodule DuckFeeder.Sink.DuckDBTest do
   end
 
   defp query_map(conn, sql) do
-    conn
-    |> Adbc.Connection.query!(sql)
-    |> Adbc.Result.to_map()
-    |> Map.new(fn {key, values} -> {key, Enum.map(values, &normalize_value/1)} end)
+    {:ok, result} = DuckDBClient.query_map(conn, sql)
+    result
   end
-
-  defp normalize_value(%Decimal{} = value), do: Decimal.to_integer(value)
-  defp normalize_value(value), do: value
 
   defp safe_stop(pid) when is_pid(pid) do
     _ = GenServer.stop(pid)

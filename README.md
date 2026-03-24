@@ -256,7 +256,7 @@ Useful DuckDB options:
 - `path` - database file path; omit for in-memory
 - `catalog` - optional catalog prefix
 - `setup_sql` - SQL statements to run before writes
-- `setup_fun` - one-arg callback receiving the ADBC connection
+- `setup_fun` - one-arg callback receiving the DuckDB connection
 
 ## Public API highlights
 

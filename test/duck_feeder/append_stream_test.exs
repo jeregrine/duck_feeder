@@ -4,6 +4,8 @@ defmodule DuckFeeder.AppendStreamTest do
   import ExUnit.CaptureLog
 
   alias DuckFeeder.AppendStream
+  alias DuckFeeder.DuckDB.Client, as: DuckDBClient
+  alias DuckFeeder.DuckDB.Connection, as: DuckDBConnection
 
   defmodule FakeMeta do
     def upsert_checkpoint(_conn, _checkpoint_key, lsn), do: {:ok, lsn}
@@ -311,16 +313,14 @@ defmodule DuckFeeder.AppendStreamTest do
   end
 
   defp query_duckdb_file(path, sql) do
-    {:ok, db} = Adbc.Database.start_link(driver: :duckdb, path: path)
-    {:ok, conn} = Adbc.Connection.start_link(database: db)
+    {:ok, server} = DuckDBConnection.start_link(name: nil, path: path)
+    conn = DuckDBConnection.get_conn(server)
 
     try do
-      conn
-      |> Adbc.Connection.query!(sql)
-      |> Adbc.Result.to_map()
+      {:ok, result} = DuckDBClient.query_map(conn, sql)
+      result
     after
-      safe_stop(conn)
-      safe_stop(db)
+      safe_stop(server)
     end
   end
 
