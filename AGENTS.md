@@ -1,73 +1,90 @@
 # AGENTS.md
 
 ## Project Overview
-DuckFeeder is an Elixir runtime for:
+DuckFeeder is an Elixir runtime for mirroring Postgres data into DuckDB-managed tables:
 
-- **Postgres logical replication (WAL/CDC)**
-- **Parquet file writing** (Rust NIF, precompiled binaries)
-- **Object storage upload** (S3/GCS via Req)
-- **DuckLake metadata commits** (Postgres-backed)
-- Query target is DuckDB via DuckLake metadata + Parquet files.
+- **Postgres logical replication (WAL/CDC)** — decode pgoutput, route changes, apply as table operations
+- **Direct DuckDB writes** via ADBC — inserts, merges, deletes, and truncate-clears into real target tables
+- **Append-only event streams** — non-CDC producers (telemetry, logs, domain events) into the same DuckDB database
+- **Checkpoint durability** — Postgres-backed metadata store for restart correctness
 
-Core durability rule: **WAL ACK advances only after durable checkpoint/metadata commit**.
+DuckFeeder owns replication correctness, batching, snapshot/WAL handoff, and checkpoint discipline.
+DuckDB owns table storage and query surface.
+
+Core durability rule: **WAL ACK advances only after DuckDB table writes are committed and the checkpoint is durably persisted.**
 
 ## Current Runtime/Product Decisions
 - Elixir-first architecture, OTP-supervised runtime.
-- HTTP/storage stack is **Req-only**.
-- CDC path is fail-closed under sustained overload; append stream can optionally use lossy overflow policy.
+- Source/table registry is **config-first**: source settings and designated tables come from app config / Ecto schemas, not persisted metadata tables.
+- DuckDB access is through **ADBC** (`{:adbc, "~> 0.8"}`). No Parquet NIF, no object storage.
+- CDC path is fail-closed under sustained overload.
+- Append stream defaults to fail-closed but can optionally use lossy overflow policy (`overflow_strategy: :drop_oldest`).
 - Telemetry helper shipped: `DuckFeeder.TelemetryForwarder`.
-- Pure BEAM parquet writer spike exists on branch `parquet-elixir-spike` and is **not merged**.
+- Single-writer model for DuckDB (coordinated via Elixir supervision, similar to how `fly_postgres` works with Ecto).
+
+## Dependencies
+Runtime deps (from `mix.exs`):
+- `postgrex ~> 0.20` — Postgres connections + replication protocol
+- `adbc ~> 0.8` — DuckDB access
+- `nimble_options ~> 1.1` — config validation
+- `jason ~> 1.4` — optional dependency
+
+Dev/test only:
+- `ecto_sql ~> 3.12` (test) — migration integration tests
+- `benchee ~> 1.3` (dev)
+- `ex_doc ~> 0.38` (dev)
+
+## Data Flow
+
+### CDC path
+```
+Postgres WAL
+  → CDC.Connection (Postgrex.ReplicationConnection)
+  → CDC.Pipeline (TransactionBuffer → Ingest)
+  → TablePipeline (micro-batch buffer)
+  → Sink.DuckDB (MERGE/DELETE/INSERT via ADBC)
+  → Meta.Store.upsert_checkpoint (Postgres)
+  → CDC.Connection ack_lsn
+```
+
+### Append path
+```
+AppendStream.append/4
+  → TablePipeline (micro-batch buffer)
+  → Sink.DuckDB (INSERT via ADBC)
+  → Meta.Store.upsert_checkpoint (Postgres)
+```
 
 ## VCS / Workflow Conventions
 - Use **jj** for local commit/bookmark flow.
-- Main branch is authoritative for release workflow config.
+- Main branch is authoritative for release config.
 - Prefer version bumps for releases; avoid retagging old versions unless explicitly needed.
 
-## Rustler / Precompiled NIF Critical Notes
-The most common failure mode is mismatch between:
-1) RustlerPrecompiled `targets`/`nif_versions` in Elixir,
-2) workflow build matrix,
-3) release assets,
-4) checksum file.
+## Metadata Store
+Durable control-plane state lives in `duckfeeder_meta` schema in Postgres:
+- `checkpoints` — per-target-table last committed LSN, keyed by stable `checkpoint_key` values such as `source-a:raw.users`
+- `snapshot_handoffs` — initial snapshot state machine, keyed by `source_name`
+- `migration_versions` — migration bookkeeping created by `DuckFeeder.Migration`
 
-### Current expected NIF setup
-- NIF version: **2.17**
-- Rust crate: `native/duck_feeder_parquet`
-- Module: `DuckFeeder.Writer.ParquetNif`
-- Uses `RustlerPrecompiled` with explicit `targets` (including FreeBSD, excluding musl).
+Bootstrap via `DuckFeeder.Meta.Store.bootstrap/1` or `DuckFeeder.Migration.up/1`.
 
-### Important
-`RustlerPrecompiled` defaults include musl targets. If `targets:` is not explicit, it will try to download musl artifacts and fail.
+## Current Cleanup / Design Direction
+- Keep metadata minimal and durable.
+- Keep source name / slot / publication / designated tables in app config or Ecto-derived runtime config.
+- Prefer real DuckDB tables over warehouse-specific envelopes.
+- Preserve loud failure semantics over silent fallback behavior.
 
-## CI / Release Workflow
-Workflow: `.github/workflows/build_precompiled_nifs.yml`
-
-- Builds mainstream targets with `philss/rustler-precompiled-action`.
-- Builds FreeBSD via `vmactions/freebsd-vm` (native build in VM).
-- Publishes assets on `v*` tag pushes.
-- Tag/version consistency check is enabled (`vX.Y.Z` must match `mix.exs` version).
-
-## Asset Naming Expectations
-Release files must match RustlerPrecompiled naming, e.g.:
-- `libduck_feeder_parquet-v<version>-nif-2.17-<target>.so.tar.gz`
-- `duck_feeder_parquet-v<version>-nif-2.17-<windows-target>.dll.tar.gz`
-
-## Checksum File
-Required for precompiled downloads:
-- `checksum-Elixir.DuckFeeder.Writer.ParquetNif.exs`
-
-Regenerate/update after assets change:
-
-```bash
-RUSTLER_PRECOMPILED_FORCE_BUILD_ALL=true mix rustler_precompiled.download DuckFeeder.Writer.ParquetNif --all --print
-```
-
-This both validates downloadable artifacts and updates checksum entries.
+## Known Technical Debt
+Current notable items:
+- `Sink.DuckDB` still builds SQL via string interpolation; continue auditing validation/escaping paths.
+- `rows_source/1` still generates large `VALUES` clauses and may not scale to very large batches.
+- `infer_columns/1` is still more expensive than it should be for wide batches.
+- There is still private helper duplication between `Service` and `AppendStream`.
+- Append-stream restart semantics still rely on caller-provided synthetic LSN continuity.
 
 ## Hex Publish Notes
 Before publish:
 - Ensure `mix.exs` package `files` all exist (license file included).
-- Ensure checksum file matches release assets.
 - Ensure README badges/links/docs metadata are sane.
 
 Publish commands:
@@ -83,4 +100,5 @@ Non-interactive (CI/headless) requires `HEX_API_KEY`.
 
 ## Operational Notes
 - Queue/lag telemetry exists and is important for alerting/backpressure tuning.
-- Remaining workstreams: provider failure/reconcile matrix expansion + alert policy tuning.
+- Backpressure: `max_lag_bytes` disconnects CDC on sustained overload; `backpressure_lag_bytes` emits telemetry events.
+- Remaining workstreams: schema evolution matrix, failure recovery playbook, integration test coverage.
