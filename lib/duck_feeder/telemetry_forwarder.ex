@@ -25,8 +25,7 @@ defmodule DuckFeeder.TelemetryForwarder do
     [:duck_feeder, :service, :batch_queue],
     [:duck_feeder, :append_stream, :batch_queue],
     [:duck_feeder, :append_stream, :batch_dropped],
-    [:duck_feeder, :service, :ack_checkpoint_lag],
-    [:duck_feeder, :reconciler, :run]
+    [:duck_feeder, :service, :ack_checkpoint_lag]
   ]
 
   defmodule State do

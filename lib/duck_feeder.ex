@@ -48,7 +48,7 @@ defmodule DuckFeeder do
   defdelegate migrate_down(opts \\ []), to: DuckFeeder.Migrations, as: :down
   defdelegate migrated_version(opts \\ []), to: DuckFeeder.Migrations
 
-  defdelegate runtime_child_spec(meta_conn, source_name, storage_config, opts \\ []),
+  defdelegate runtime_child_spec(meta_conn, source_name, duckdb_config, opts \\ []),
     to: DuckFeeder.Integration
 
   defdelegate runtime_child_spec_from_config(meta_conn, config, opts \\ []),
@@ -56,13 +56,13 @@ defmodule DuckFeeder do
 
   defdelegate process_batch(context, table, batch), to: DuckFeeder.Sink
 
-  defdelegate service_options(meta_conn, source_name, storage_config, opts \\ []),
+  defdelegate service_options(meta_conn, source_name, duckdb_config, opts \\ []),
     to: DuckFeeder.Runtime
 
-  defdelegate start_service(meta_conn, source_name, storage_config, opts \\ []),
+  defdelegate start_service(meta_conn, source_name, duckdb_config, opts \\ []),
     to: DuckFeeder.Runtime
 
-  defdelegate start_stream(meta_conn, source_name, storage_config, opts \\ []),
+  defdelegate start_stream(meta_conn, source_name, duckdb_config, opts \\ []),
     to: DuckFeeder.Runtime
 
   defdelegate start_append_stream(opts), to: DuckFeeder.AppendStream, as: :start_link

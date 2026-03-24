@@ -2,7 +2,7 @@ defmodule DuckFeeder.Config do
   @moduledoc """
   Runtime configuration validation and normalization.
 
-  Validates source, storage, metadata DB, and ingest knobs with NimbleOptions.
+  Validates source, DuckDB, metadata DB, and ingest knobs with NimbleOptions.
   """
 
   @source_schema [
@@ -21,20 +21,11 @@ defmodule DuckFeeder.Config do
     primary_keys: [type: {:list, :string}, default: []]
   ]
 
-  @storage_schema [
-    provider: [type: {:in, [:s3, :gcs]}, required: true],
-    bucket: [type: :string, required: true],
-    prefix: [type: :string, default: ""],
-    adapter_opts: [type: :map, default: %{}],
-    region: [type: :string, default: "us-east-1"],
-    endpoint: [type: {:or, [:string, nil]}, default: nil],
-    force_path_style: [type: :boolean, default: false],
-    access_key_id: [type: {:or, [:string, nil]}, default: nil],
-    secret_access_key: [type: {:or, [:string, nil]}, default: nil],
-    session_token: [type: {:or, [:string, nil]}, default: nil],
-    token: [type: {:or, [:string, nil]}, default: nil],
-    token_fun: [type: :any, default: nil],
-    base_url: [type: :string, default: "https://storage.googleapis.com"]
+  @duckdb_schema [
+    path: [type: {:or, [:string, nil]}, default: nil],
+    catalog: [type: {:or, [:string, nil]}, default: nil],
+    setup_sql: [type: {:list, :string}, default: []],
+    setup_fun: [type: :any, default: nil]
   ]
 
   @metadata_schema [
@@ -50,14 +41,14 @@ defmodule DuckFeeder.Config do
 
   @schema NimbleOptions.new!(
             source: [type: :keyword_list, required: true, keys: @source_schema],
-            storage: [type: :keyword_list, required: true, keys: @storage_schema],
+            duckdb: [type: :keyword_list, required: true, keys: @duckdb_schema],
             metadata: [type: :keyword_list, required: true, keys: @metadata_schema],
             ingest: [type: :keyword_list, default: [], keys: @ingest_schema]
           )
 
   @known_keys %{
     "source" => :source,
-    "storage" => :storage,
+    "duckdb" => :duckdb,
     "metadata" => :metadata,
     "ingest" => :ingest,
     "postgres_url" => :postgres_url,
@@ -70,19 +61,10 @@ defmodule DuckFeeder.Config do
     "target_table" => :target_table,
     "mode" => :mode,
     "primary_keys" => :primary_keys,
-    "provider" => :provider,
-    "bucket" => :bucket,
-    "prefix" => :prefix,
-    "adapter_opts" => :adapter_opts,
-    "region" => :region,
-    "endpoint" => :endpoint,
-    "force_path_style" => :force_path_style,
-    "access_key_id" => :access_key_id,
-    "secret_access_key" => :secret_access_key,
-    "session_token" => :session_token,
-    "token" => :token,
-    "token_fun" => :token_fun,
-    "base_url" => :base_url,
+    "path" => :path,
+    "catalog" => :catalog,
+    "setup_sql" => :setup_sql,
+    "setup_fun" => :setup_fun,
     "max_rows" => :max_rows,
     "max_bytes" => :max_bytes,
     "flush_interval_ms" => :flush_interval_ms,
@@ -91,7 +73,7 @@ defmodule DuckFeeder.Config do
 
   @type t :: %{
           source: map(),
-          storage: map(),
+          duckdb: map(),
           metadata: map(),
           ingest: map()
         }
@@ -101,14 +83,13 @@ defmodule DuckFeeder.Config do
     with {:ok, keyword_config} <- to_keyword(config),
          {:ok, validated} <- NimbleOptions.validate(keyword_config, @schema),
          {:ok, validated_tables} <-
-           validate_designated_tables(validated[:source][:designated_tables]),
-         {:ok, _} <- validate_storage_provider_opts(validated[:storage]) do
+           validate_designated_tables(validated[:source][:designated_tables]) do
       source = Keyword.put(validated[:source], :designated_tables, validated_tables)
 
       {:ok,
        %{
          source: deep_to_map(source),
-         storage: deep_to_map(validated[:storage]),
+         duckdb: deep_to_map(validated[:duckdb]),
          metadata: deep_to_map(validated[:metadata]),
          ingest: deep_to_map(validated[:ingest])
        }}
@@ -124,35 +105,13 @@ defmodule DuckFeeder.Config do
   end
 
   @doc """
-  Returns storage config shape expected by `DuckFeeder.Storage`.
+  Returns DuckDB config shape expected by runtime/service startup.
   """
-  @spec storage_config(t()) :: map()
-  def storage_config(validated_config) do
-    storage = Map.fetch!(validated_config, :storage)
-
-    base = %{
-      provider: storage.provider,
-      bucket: storage.bucket,
-      prefix: storage.prefix,
-      adapter_opts: storage.adapter_opts
-    }
-
-    case storage.provider do
-      :s3 ->
-        base
-        |> Map.put(:region, storage.region)
-        |> put_if_present(:endpoint, storage.endpoint)
-        |> Map.put(:force_path_style, storage.force_path_style)
-        |> put_if_present(:access_key_id, storage.access_key_id)
-        |> put_if_present(:secret_access_key, storage.secret_access_key)
-        |> put_if_present(:session_token, storage.session_token)
-
-      :gcs ->
-        base
-        |> put_if_present(:token, storage.token)
-        |> put_if_present(:token_fun, storage.token_fun)
-        |> Map.put(:base_url, storage.base_url)
-    end
+  @spec duckdb_config(t()) :: map()
+  def duckdb_config(validated_config) do
+    validated_config
+    |> Map.fetch!(:duckdb)
+    |> Map.take([:path, :catalog, :setup_sql, :setup_fun])
   end
 
   @doc false
@@ -173,47 +132,6 @@ defmodule DuckFeeder.Config do
     |> case do
       {:ok, tables} -> {:ok, Enum.reverse(tables)}
       {:error, _} = error -> error
-    end
-  end
-
-  defp validate_storage_provider_opts(storage) do
-    provider = storage[:provider]
-
-    case provider do
-      :s3 ->
-        cond do
-          blank?(storage[:access_key_id]) ->
-            {:error,
-             ArgumentError.exception("storage.access_key_id is required for provider :s3")}
-
-          blank?(storage[:secret_access_key]) ->
-            {:error,
-             ArgumentError.exception("storage.secret_access_key is required for provider :s3")}
-
-          true ->
-            {:ok, :valid}
-        end
-
-      :gcs ->
-        token = storage[:token]
-        token_fun = storage[:token_fun]
-
-        cond do
-          is_binary(token) and token != "" ->
-            {:ok, :valid}
-
-          is_function(token_fun, 0) ->
-            {:ok, :valid}
-
-          true ->
-            {:error,
-             ArgumentError.exception(
-               "storage.token or storage.token_fun/0 is required for provider :gcs"
-             )}
-        end
-
-      other ->
-        {:error, ArgumentError.exception("unsupported storage provider: #{inspect(other)}")}
     end
   end
 
@@ -266,7 +184,7 @@ defmodule DuckFeeder.Config do
     do: {:error, ArgumentError.exception("invalid config key: #{inspect(key)}")}
 
   defp normalize_value_for_key(key, value)
-       when key in [:source, :storage, :metadata, :ingest] and (is_map(value) or is_list(value)) do
+       when key in [:source, :duckdb, :metadata, :ingest] and (is_map(value) or is_list(value)) do
     to_keyword(value)
   end
 
@@ -297,10 +215,4 @@ defmodule DuckFeeder.Config do
   end
 
   defp deep_to_map(other), do: other
-
-  defp put_if_present(map, _key, value) when is_nil(value), do: map
-  defp put_if_present(map, _key, ""), do: map
-  defp put_if_present(map, key, value), do: Map.put(map, key, value)
-
-  defp blank?(value), do: is_nil(value) or value == ""
 end

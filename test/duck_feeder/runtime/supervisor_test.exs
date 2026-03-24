@@ -17,18 +17,6 @@ defmodule DuckFeeder.Runtime.SupervisorTest do
     end
   end
 
-  defmodule FakeReconcilerWorker do
-    use GenServer
-
-    def start_link(opts), do: GenServer.start_link(__MODULE__, opts)
-
-    @impl true
-    def init(opts) do
-      if pid = opts[:observer_pid], do: send(pid, {:fake_reconciler_worker_start, opts})
-      {:ok, %{opts: opts}}
-    end
-  end
-
   defmodule FailStreamWorker do
     use GenServer
 
@@ -39,7 +27,7 @@ defmodule DuckFeeder.Runtime.SupervisorTest do
   end
 
   defmodule FakeRuntime do
-    def start_stream(_meta_conn, _source_name, _storage_config, opts) do
+    def start_stream(_meta_conn, _source_name, _duckdb_config, opts) do
       test_pid = opts[:test_pid]
       service_pid = spawn(fn -> Process.sleep(:infinity) end)
       cdc_pid = spawn(fn -> Process.sleep(:infinity) end)
@@ -63,7 +51,7 @@ defmodule DuckFeeder.Runtime.SupervisorTest do
              Supervisor.start_link(
                meta_conn: :meta,
                source_name: "source-a",
-               storage_config: %{provider: :s3, bucket: "bucket"},
+               duckdb_config: %{path: "/tmp/source-a.duckdb"},
                stream_worker_module: FakeStreamWorker,
                observer_pid: self(),
                runtime_opts: [observer_pid: self()]
@@ -72,35 +60,10 @@ defmodule DuckFeeder.Runtime.SupervisorTest do
     assert_receive {:fake_stream_worker_start, stream_opts}
     assert stream_opts[:meta_conn] == :meta
     assert stream_opts[:source_name] == "source-a"
+    assert stream_opts[:duckdb_config][:path] == "/tmp/source-a.duckdb"
 
     children = :supervisor.which_children(sup)
     assert length(children) == 1
-
-    GenServer.stop(sup)
-  end
-
-  test "starts runtime supervisor with reconciler worker" do
-    assert {:ok, sup} =
-             Supervisor.start_link(
-               meta_conn: :meta,
-               source_name: "source-a",
-               storage_config: %{provider: :s3, bucket: "bucket"},
-               stream_worker_module: FakeStreamWorker,
-               reconciler_worker_module: FakeReconcilerWorker,
-               start_reconciler?: true,
-               observer_pid: self(),
-               reconcile_opts: [cleanup_failed_uploads?: true],
-               runtime_opts: [observer_pid: self()]
-             )
-
-    assert_receive {:fake_stream_worker_start, _}
-    assert_receive {:fake_reconciler_worker_start, rec_opts}
-    assert rec_opts[:context][:meta_conn] == :meta
-    assert rec_opts[:context][:storage][:bucket] == "bucket"
-    assert rec_opts[:reconcile_opts] == [cleanup_failed_uploads?: true]
-
-    children = :supervisor.which_children(sup)
-    assert length(children) == 2
 
     GenServer.stop(sup)
   end
@@ -110,7 +73,7 @@ defmodule DuckFeeder.Runtime.SupervisorTest do
              Supervisor.start_link(
                meta_conn: :meta,
                source_name: "source-a",
-               storage_config: %{provider: :s3, bucket: "bucket"},
+               duckdb_config: %{path: "/tmp/source-a.duckdb"},
                runtime_module: FakeRuntime,
                runtime_opts: [test_pid: self()],
                observer_pid: self()
@@ -139,7 +102,7 @@ defmodule DuckFeeder.Runtime.SupervisorTest do
              Supervisor.start_link(
                meta_conn: :meta,
                source_name: "source-a",
-               storage_config: %{provider: :s3, bucket: "bucket"},
+               duckdb_config: %{path: "/tmp/source-a.duckdb"},
                stream_worker_module: FailStreamWorker
              )
   end

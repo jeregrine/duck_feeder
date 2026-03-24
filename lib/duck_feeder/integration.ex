@@ -6,24 +6,19 @@ defmodule DuckFeeder.Integration do
   alias DuckFeeder.{Config, Runtime}
 
   @spec runtime_child_spec(term(), String.t(), map() | nil, keyword()) :: Supervisor.child_spec()
-  def runtime_child_spec(meta_conn, source_name, storage_config, opts \\ [])
+  def runtime_child_spec(meta_conn, source_name, duckdb_config, opts \\ [])
       when is_binary(source_name) do
     child_opts = [
       name: Keyword.get(opts, :name),
       meta_conn: meta_conn,
       source_name: source_name,
-      storage_config: storage_config,
+      duckdb_config: duckdb_config,
       runtime_opts: Keyword.get(opts, :runtime_opts, []),
-      start_reconciler?: Keyword.get(opts, :start_reconciler?, false),
-      reconcile_opts: Keyword.get(opts, :reconcile_opts, []),
-      reconciler_interval_ms: Keyword.get(opts, :reconciler_interval_ms),
-      observer_pid: Keyword.get(opts, :observer_pid),
-      meta_module: Keyword.get(opts, :meta_module),
-      storage_module: Keyword.get(opts, :storage_module)
+      observer_pid: Keyword.get(opts, :observer_pid)
     ]
 
     Runtime.Supervisor.child_spec(
-      Enum.reject(child_opts, fn {key, value} -> is_nil(value) and key != :storage_config end)
+      Enum.reject(child_opts, fn {key, value} -> is_nil(value) and key != :duckdb_config end)
     )
   end
 
@@ -32,13 +27,13 @@ defmodule DuckFeeder.Integration do
   def runtime_child_spec_from_config(meta_conn, config, opts \\ []) do
     with {:ok, validated} <- Config.validate(config) do
       source_name = Keyword.get(opts, :source_name, Map.get(validated.source, :name, "default"))
-      storage_config = Config.storage_config(validated)
+      duckdb_config = Config.duckdb_config(validated)
 
       {:ok,
        runtime_child_spec(
          meta_conn,
          source_name,
-         storage_config,
+         duckdb_config,
          opts
        )}
     end

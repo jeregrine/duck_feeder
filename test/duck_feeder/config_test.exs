@@ -3,7 +3,9 @@ defmodule DuckFeeder.ConfigTest do
 
   alias DuckFeeder.Config
 
-  test "validates and normalizes s3 config" do
+  test "validates and normalizes DuckDB config" do
+    setup_fun = fn _conn -> :ok end
+
     config = %{
       source: %{
         postgres_url: "postgres://source",
@@ -18,14 +20,11 @@ defmodule DuckFeeder.ConfigTest do
           }
         ]
       },
-      storage: %{
-        provider: :s3,
-        bucket: "ducklake-data",
-        prefix: "prod",
-        access_key_id: "key",
-        secret_access_key: "secret",
-        endpoint: "https://s3.example.test",
-        force_path_style: true
+      duckdb: %{
+        path: "/tmp/duck_feeder.duckdb",
+        catalog: "lake",
+        setup_sql: ["INSTALL ducklake", "LOAD ducklake"],
+        setup_fun: setup_fun
       },
       metadata: %{postgres_url: "postgres://meta"},
       ingest: %{max_rows: 5_000}
@@ -34,19 +33,18 @@ defmodule DuckFeeder.ConfigTest do
     assert {:ok, validated} = Config.validate(config)
 
     assert validated.source.publication_name == "duck_feeder_pub"
-    assert validated.storage.provider == :s3
+    assert validated.duckdb.path == "/tmp/duck_feeder.duckdb"
+    assert validated.duckdb.catalog == "lake"
     assert validated.ingest.max_rows == 5_000
 
-    storage_config = Config.storage_config(validated)
-
-    assert storage_config.provider == :s3
-    assert storage_config.bucket == "ducklake-data"
-    assert storage_config.access_key_id == "key"
-    assert storage_config.secret_access_key == "secret"
-    assert storage_config.force_path_style == true
+    duckdb_config = Config.duckdb_config(validated)
+    assert duckdb_config.path == "/tmp/duck_feeder.duckdb"
+    assert duckdb_config.catalog == "lake"
+    assert duckdb_config.setup_sql == ["INSTALL ducklake", "LOAD ducklake"]
+    assert duckdb_config.setup_fun == setup_fun
   end
 
-  test "preserves storage.adapter_opts maps" do
+  test "preserves duckdb.setup_sql lists" do
     config = %{
       source: %{
         postgres_url: "postgres://source",
@@ -54,65 +52,14 @@ defmodule DuckFeeder.ConfigTest do
         publication_name: "pub",
         designated_tables: []
       },
-      storage: %{
-        provider: :s3,
-        bucket: "ducklake-data",
-        access_key_id: "key",
-        secret_access_key: "secret",
-        adapter_opts: %{retry_max_attempts: 5}
+      duckdb: %{
+        setup_sql: ["INSTALL ducklake", "LOAD ducklake"]
       },
       metadata: %{postgres_url: "postgres://meta"}
     }
 
     assert {:ok, validated} = Config.validate(config)
-    assert validated.storage.adapter_opts == %{retry_max_attempts: 5}
-  end
-
-  test "accepts gcs token function" do
-    token_fun = fn -> "token" end
-
-    config = %{
-      source: %{
-        postgres_url: "postgres://source",
-        slot_name: "slot",
-        publication_name: "pub",
-        designated_tables: []
-      },
-      storage: %{
-        provider: :gcs,
-        bucket: "ducklake-data",
-        token_fun: token_fun
-      },
-      metadata: %{postgres_url: "postgres://meta"}
-    }
-
-    assert {:ok, validated} = Config.validate(config)
-
-    storage_config = Config.storage_config(validated)
-
-    assert storage_config.provider == :gcs
-    assert storage_config.token_fun == token_fun
-    assert storage_config.base_url == "https://storage.googleapis.com"
-  end
-
-  test "rejects s3 config without access key id" do
-    config = %{
-      source: %{
-        postgres_url: "postgres://source",
-        slot_name: "slot",
-        publication_name: "pub",
-        designated_tables: []
-      },
-      storage: %{
-        provider: :s3,
-        bucket: "ducklake-data",
-        secret_access_key: "secret"
-      },
-      metadata: %{postgres_url: "postgres://meta"}
-    }
-
-    assert {:error, %ArgumentError{message: message}} = Config.validate(config)
-    assert message =~ "storage.access_key_id"
+    assert validated.duckdb.setup_sql == ["INSTALL ducklake", "LOAD ducklake"]
   end
 
   test "rejects unknown string keys without atomizing" do
@@ -124,16 +71,30 @@ defmodule DuckFeeder.ConfigTest do
         publication_name: "pub",
         designated_tables: []
       },
-      storage: %{
-        provider: :gcs,
-        bucket: "ducklake-data",
-        token: "token"
+      duckdb: %{
+        path: "/tmp/duck_feeder.duckdb"
       },
       metadata: %{postgres_url: "postgres://meta"}
     }
 
     assert {:error, %ArgumentError{message: message}} = Config.validate(config)
     assert message =~ "unknown config key"
+  end
+
+  test "requires duckdb config" do
+    config = %{
+      source: %{
+        postgres_url: "postgres://source",
+        slot_name: "slot",
+        publication_name: "pub",
+        designated_tables: []
+      },
+      metadata: %{postgres_url: "postgres://meta"}
+    }
+
+    assert {:error, error} = Config.validate(config)
+    assert Exception.message(error) =~ "required"
+    assert Exception.message(error) =~ "duckdb"
   end
 
   test "rejects unsupported designated table mode" do
@@ -152,10 +113,8 @@ defmodule DuckFeeder.ConfigTest do
           }
         ]
       },
-      storage: %{
-        provider: :gcs,
-        bucket: "ducklake-data",
-        token: "token"
+      duckdb: %{
+        path: "/tmp/duck_feeder.duckdb"
       },
       metadata: %{postgres_url: "postgres://meta"}
     }

@@ -4,7 +4,7 @@ defmodule DuckFeeder.AppendStream do
 
   Reuses DuckFeeder batching and downstream sink flow for non-CDC producers
   (e.g. telemetry, logs, error streams) by appending rows directly to target
-  DuckLake tables.
+  DuckDB-managed tables.
 
   Flow:
 
@@ -90,16 +90,12 @@ defmodule DuckFeeder.AppendStream do
           {:name, GenServer.name()}
           | {:designated_tables, [map()]}
           | {:meta_conn, term()}
-          | {:storage, map()}
-          | {:writer, map()}
           | {:duckdb, map()}
           | {:sink_module, module()}
           | {:meta_module, module()}
           | {:object_prefix, String.t()}
           | {:pipeline_opts, map()}
           | {:observer_pid, pid()}
-          | {:committer_module, module()}
-          | {:committer_opts, keyword()}
           | {:default_target_schema, String.t()}
           | {:start_lsn, String.t()}
           | {:max_inflight_batches, pos_integer()}
@@ -132,7 +128,6 @@ defmodule DuckFeeder.AppendStream do
     start_lsn = Keyword.get(opts, :start_lsn, "0/0")
 
     with {:ok, sink_module} <- resolve_sink_module_option(opts),
-         {:ok, storage} <- resolve_storage(opts, sink_module),
          {:ok, duckdb} <- resolve_duckdb(opts, sink_module),
          {:ok, lsn_counter} <- Lsn.parse(start_lsn),
          {:ok, max_inflight_batches} <-
@@ -154,15 +149,11 @@ defmodule DuckFeeder.AppendStream do
           meta_conn: Keyword.fetch!(opts, :meta_conn),
           designated_table_by_target: designated_table_mapping(designated_tables),
           designated_table_config_by_target: designated_table_config_mapping(designated_tables),
-          writer: Keyword.get(opts, :writer, %{}),
           object_prefix: Keyword.get(opts, :object_prefix, "duck_feeder_append"),
           sink_module: sink_module
         }
-        |> maybe_put_optional(:storage, storage)
         |> maybe_put_optional(:duckdb, duckdb)
         |> maybe_put_optional(:meta_module, Keyword.get(opts, :meta_module))
-        |> maybe_put_optional(:committer_module, Keyword.get(opts, :committer_module))
-        |> maybe_put_optional(:committer_opts, Keyword.get(opts, :committer_opts))
         |> maybe_put_optional(:poison_row_mode, Keyword.get(opts, :poison_row_mode))
         |> maybe_put_optional(:poison_row_sink, Keyword.get(opts, :poison_row_sink))
 
@@ -476,19 +467,6 @@ defmodule DuckFeeder.AppendStream do
         implied_sink_module_from_duckdb(Keyword.get(opts, :duckdb))
 
     Sink.normalize_module(sink_module)
-  end
-
-  defp resolve_storage(opts, sink_module) when is_list(opts) and is_atom(sink_module) do
-    case Keyword.fetch(opts, :storage) do
-      {:ok, storage} when is_map(storage) ->
-        {:ok, storage}
-
-      {:ok, other} ->
-        {:error, {:invalid_option, :storage, other}}
-
-      :error ->
-        {:ok, nil}
-    end
   end
 
   defp resolve_duckdb(opts, sink_module) when is_list(opts) and is_atom(sink_module) do

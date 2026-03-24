@@ -20,7 +20,7 @@ defmodule DuckFeeder.Runtime.StreamWorker do
           {:name, GenServer.name()}
           | {:meta_conn, term()}
           | {:source_name, String.t()}
-          | {:storage_config, map() | nil}
+          | {:duckdb_config, map() | nil}
           | {:runtime_opts, keyword()}
           | {:runtime_module, module()}
 
@@ -38,10 +38,10 @@ defmodule DuckFeeder.Runtime.StreamWorker do
     runtime_module = Keyword.get(opts, :runtime_module, Runtime)
     meta_conn = Keyword.fetch!(opts, :meta_conn)
     source_name = Keyword.fetch!(opts, :source_name)
-    storage_config = Keyword.fetch!(opts, :storage_config)
+    duckdb_config = Keyword.fetch!(opts, :duckdb_config)
     runtime_opts = Keyword.get(opts, :runtime_opts, [])
 
-    case runtime_module.start_stream(meta_conn, source_name, storage_config, runtime_opts) do
+    case runtime_module.start_stream(meta_conn, source_name, duckdb_config, runtime_opts) do
       {:ok, %{service_pid: service_pid, cdc_pid: cdc_pid, start_lsn: start_lsn, source: source}} ->
         monitors = %{
           Process.monitor(service_pid) => service_pid,

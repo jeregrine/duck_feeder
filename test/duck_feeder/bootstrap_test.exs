@@ -27,9 +27,9 @@ defmodule DuckFeeder.BootstrapTest do
   end
 
   defmodule FakeRuntime do
-    def start_stream(_meta_conn, source_name, storage_config, start_opts) do
+    def start_stream(_meta_conn, source_name, duckdb_config, start_opts) do
       if pid = Process.get(:test_pid),
-        do: send(pid, {:runtime_start_stream, source_name, storage_config, start_opts})
+        do: send(pid, {:runtime_start_stream, source_name, duckdb_config, start_opts})
 
       {:ok,
        %{service_pid: self(), cdc_pid: self(), start_lsn: "0/0", source: %{name: source_name}}}
@@ -59,11 +59,8 @@ defmodule DuckFeeder.BootstrapTest do
           }
         ]
       },
-      storage: %{
-        provider: :s3,
-        bucket: "bucket",
-        access_key_id: "key",
-        secret_access_key: "secret"
+      duckdb: %{
+        path: "/tmp/source-a.duckdb"
       },
       metadata: %{postgres_url: "postgres://meta"}
     }
@@ -112,11 +109,9 @@ defmodule DuckFeeder.BootstrapTest do
           }
         ]
       },
-      storage: %{
-        provider: :s3,
-        bucket: "bucket",
-        access_key_id: "key",
-        secret_access_key: "secret"
+      duckdb: %{
+        path: "/tmp/source-a.duckdb",
+        catalog: "lake"
       },
       metadata: %{postgres_url: "postgres://meta"}
     }
@@ -132,9 +127,9 @@ defmodule DuckFeeder.BootstrapTest do
     assert result.source_name == "source-a"
     assert result.runtime.start_lsn == "0/0"
 
-    assert_received {:runtime_start_stream, "source-a", storage_config, start_opts}
-    assert storage_config.provider == :s3
-    assert storage_config.bucket == "bucket"
+    assert_received {:runtime_start_stream, "source-a", duckdb_config, start_opts}
+    assert duckdb_config.path == "/tmp/source-a.duckdb"
+    assert duckdb_config.catalog == "lake"
     assert start_opts[:meta_module] == FakeMeta
     assert start_opts[:connection_opts][:hostname] == "localhost"
     assert start_opts[:connection_opts][:database] == "source_db"
@@ -167,11 +162,8 @@ defmodule DuckFeeder.BootstrapTest do
           }
         ]
       },
-      storage: %{
-        provider: :s3,
-        bucket: "bucket",
-        access_key_id: "key",
-        secret_access_key: "secret"
+      duckdb: %{
+        path: "/tmp/source-a.duckdb"
       },
       metadata: %{postgres_url: "postgres://meta"}
     }
@@ -203,11 +195,8 @@ defmodule DuckFeeder.BootstrapTest do
         publication_name: "duck_pub",
         designated_tables: []
       },
-      storage: %{
-        provider: :s3,
-        bucket: "bucket",
-        access_key_id: "key",
-        secret_access_key: "secret"
+      duckdb: %{
+        path: "/tmp/source-a.duckdb"
       },
       metadata: %{postgres_url: "postgres://meta"}
     }
@@ -234,11 +223,8 @@ defmodule DuckFeeder.BootstrapTest do
           }
         ]
       },
-      storage: %{
-        provider: :s3,
-        bucket: "bucket",
-        access_key_id: "key",
-        secret_access_key: "secret"
+      duckdb: %{
+        path: "/tmp/source-a.duckdb"
       },
       metadata: %{postgres_url: "postgres://meta"}
     }

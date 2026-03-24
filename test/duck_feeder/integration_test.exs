@@ -4,12 +4,11 @@ defmodule DuckFeeder.IntegrationTest do
   alias DuckFeeder.Integration
 
   test "builds runtime supervisor child spec" do
-    storage = %{provider: :s3, bucket: "bucket", adapter: DuckFeeder.Storage.S3}
+    duckdb = %{path: "/tmp/source-a.duckdb"}
 
     child_spec =
-      Integration.runtime_child_spec(:meta_conn, "source-a", storage,
+      Integration.runtime_child_spec(:meta_conn, "source-a", duckdb,
         name: :duck_runtime,
-        start_reconciler?: true,
         runtime_opts: [bootstrap_replication?: false]
       )
 
@@ -18,7 +17,7 @@ defmodule DuckFeeder.IntegrationTest do
     assert opts[:name] == :duck_runtime
     assert opts[:meta_conn] == :meta_conn
     assert opts[:source_name] == "source-a"
-    assert opts[:start_reconciler?] == true
+    assert opts[:duckdb_config] == duckdb
   end
 
   test "builds child spec from runtime config" do
@@ -29,25 +28,21 @@ defmodule DuckFeeder.IntegrationTest do
         publication_name: "duck_pub",
         designated_tables: []
       },
-      storage: %{
-        provider: :s3,
-        bucket: "bucket",
-        access_key_id: "key",
-        secret_access_key: "secret"
+      duckdb: %{
+        path: "/tmp/source-a.duckdb",
+        catalog: "lake"
       },
       metadata: %{postgres_url: "postgres://meta"}
     }
 
     assert {:ok, child_spec} =
              Integration.runtime_child_spec_from_config(:meta_conn, config,
-               source_name: "source-a",
-               start_reconciler?: true
+               source_name: "source-a"
              )
 
     assert {DuckFeeder.Runtime.Supervisor, :start_link, [opts]} = child_spec.start
     assert opts[:source_name] == "source-a"
-    assert opts[:storage_config][:provider] == :s3
-    assert opts[:storage_config][:bucket] == "bucket"
-    assert opts[:start_reconciler?] == true
+    assert opts[:duckdb_config][:path] == "/tmp/source-a.duckdb"
+    assert opts[:duckdb_config][:catalog] == "lake"
   end
 end

@@ -23,16 +23,16 @@ defmodule DuckFeeder.Runtime.ManagerTest do
     {:ok, manager} =
       Manager.start_link(
         meta_conn: :meta,
-        storage_config: %{provider: :s3, bucket: "bucket"},
+        duckdb_config: %{path: "/tmp/shared.duckdb"},
         runtime_supervisor_module: FakeRuntimeSupervisor,
-        base_opts: [observer_pid: self(), start_reconciler?: true]
+        base_opts: [observer_pid: self()]
       )
 
     assert {:ok, source_a_pid} = Manager.start_source(manager, "source_a")
     assert_receive {:fake_runtime_supervisor_start, start_opts_a}
     assert start_opts_a[:source_name] == "source_a"
     assert start_opts_a[:meta_conn] == :meta
-    assert start_opts_a[:start_reconciler?] == true
+    assert start_opts_a[:duckdb_config][:path] == "/tmp/shared.duckdb"
 
     assert {:error, :already_started} = Manager.start_source(manager, "source_a")
 
@@ -56,7 +56,7 @@ defmodule DuckFeeder.Runtime.ManagerTest do
     {:ok, manager} =
       Manager.start_link(
         meta_conn: :meta,
-        storage_config: %{provider: :s3, bucket: "bucket"},
+        duckdb_config: %{path: "/tmp/shared.duckdb"},
         runtime_supervisor_module: FakeRuntimeSupervisor,
         base_opts: [observer_pid: self()]
       )
@@ -74,7 +74,7 @@ defmodule DuckFeeder.Runtime.ManagerTest do
     {:ok, manager} =
       Manager.start_link(
         meta_conn: :meta,
-        storage_config: %{provider: :s3, bucket: "bucket"},
+        duckdb_config: %{path: "/tmp/shared.duckdb"},
         runtime_supervisor_module: FakeRuntimeSupervisor,
         base_opts: [observer_pid: self()]
       )
@@ -96,7 +96,7 @@ defmodule DuckFeeder.Runtime.ManagerTest do
     {:ok, manager} =
       Manager.start_link(
         meta_conn: :meta,
-        storage_config: %{provider: :s3, bucket: "bucket"},
+        duckdb_config: %{path: "/tmp/shared.duckdb"},
         runtime_supervisor_module: FailRuntimeSupervisor
       )
 

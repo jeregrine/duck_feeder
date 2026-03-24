@@ -42,12 +42,12 @@ defmodule DuckFeeder.Bootstrap do
          {:ok, seed_result} <- seed_meta(meta_conn, config, seed_opts),
          {:ok, runtime_start_opts} <-
            runtime_start_opts(validated.source, seed_opts, start_opts),
-         storage_config <- Config.storage_config(validated),
+         duckdb_config <- Config.duckdb_config(validated),
          {:ok, runtime_result} <-
            runtime_module.start_stream(
              meta_conn,
              seed_result.source_name,
-             storage_config,
+             duckdb_config,
              runtime_start_opts
            ) do
       {:ok,

@@ -6,7 +6,7 @@ defmodule DuckFeeder.Runtime.StreamWorkerTest do
   alias DuckFeeder.Runtime.StreamWorker
 
   defmodule FakeRuntime do
-    def start_stream(_meta_conn, _source_name, _storage_config, opts) do
+    def start_stream(_meta_conn, _source_name, _duckdb_config, opts) do
       if opts[:fail] do
         {:error, :failed_to_start_stream}
       else
@@ -39,7 +39,7 @@ defmodule DuckFeeder.Runtime.StreamWorkerTest do
       StreamWorker.start_link(
         meta_conn: :meta,
         source_name: "source-a",
-        storage_config: %{provider: :s3, bucket: "bucket"},
+        duckdb_config: %{path: "/tmp/source-a.duckdb"},
         runtime_module: FakeRuntime,
         runtime_opts: [test_pid: self()]
       )
@@ -61,7 +61,7 @@ defmodule DuckFeeder.Runtime.StreamWorkerTest do
       StreamWorker.start_link(
         meta_conn: :meta,
         source_name: "source-a",
-        storage_config: %{provider: :s3, bucket: "bucket"},
+        duckdb_config: %{path: "/tmp/source-a.duckdb"},
         runtime_module: FakeRuntime,
         runtime_opts: [test_pid: self()]
       )
@@ -84,7 +84,7 @@ defmodule DuckFeeder.Runtime.StreamWorkerTest do
              StreamWorker.start_link(
                meta_conn: :meta,
                source_name: "source-a",
-               storage_config: %{provider: :s3, bucket: "bucket"},
+               duckdb_config: %{path: "/tmp/source-a.duckdb"},
                runtime_module: FakeRuntime,
                runtime_opts: [fail: true]
              )

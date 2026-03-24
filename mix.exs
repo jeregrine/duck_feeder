@@ -22,9 +22,6 @@ defmodule DuckFeeder.MixProject do
     [
       files: [
         "lib",
-        "native/duck_feeder_parquet/src",
-        "native/duck_feeder_parquet/Cargo*",
-        "checksum-*.exs",
         "mix.exs",
         "README*",
         "LICENSE"
@@ -38,7 +35,7 @@ defmodule DuckFeeder.MixProject do
   end
 
   defp description do
-    "Postgres CDC/WAL to Parquet on object storage with DuckLake metadata for DuckDB analytics."
+    "Postgres CDC/WAL mirrored directly into DuckDB-managed tables for analytics."
   end
 
   defp docs do
@@ -63,11 +60,8 @@ defmodule DuckFeeder.MixProject do
   # Run "mix help deps" to learn about dependencies.
   defp deps do
     [
-      {:req, "~> 0.5"},
       {:postgrex, "~> 0.20"},
       {:nimble_options, "~> 1.1"},
-      {:rustler_precompiled, "~> 0.8"},
-      {:rustler, ">= 0.0.0", optional: true},
       {:adbc, "~> 0.8"},
       {:jason, "~> 1.4"},
       {:ecto_sql, "~> 3.12", only: :test},

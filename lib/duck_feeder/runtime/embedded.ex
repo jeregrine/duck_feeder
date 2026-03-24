@@ -16,7 +16,7 @@ defmodule DuckFeeder.Runtime.Embedded do
       DuckFeeder.seed_meta/3
           |
           v
-      DuckFeeder.Runtime.Supervisor (stream worker + optional reconciler)
+      DuckFeeder.Runtime.Supervisor (stream worker)
   """
 
   use GenServer
@@ -110,11 +110,8 @@ defmodule DuckFeeder.Runtime.Embedded do
                DuckFeeder.Runtime.Supervisor.start_link(
                  meta_conn: meta_conn,
                  source_name: resolved.source_name,
-                 storage_config: resolved.storage_config,
-                 runtime_opts: resolved.runtime_opts,
-                 start_reconciler?: resolved.start_reconciler?,
-                 reconcile_opts: resolved.reconcile_opts,
-                 reconciler_interval_ms: resolved.reconciler_interval_ms
+                 duckdb_config: resolved.duckdb_config,
+                 runtime_opts: resolved.runtime_opts
                ) do
           monitors = %{
             Process.monitor(meta_conn) => meta_conn,

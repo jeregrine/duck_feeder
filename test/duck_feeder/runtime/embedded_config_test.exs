@@ -52,11 +52,8 @@ defmodule DuckFeeder.Runtime.EmbeddedConfigTest do
       enabled: true,
       repo: FakeRepo,
       schemas: [Tenant, User, {Invoice, target_schema: "raw", target_table: "invoice_events"}],
-      storage: %{
-        provider: :s3,
-        bucket: "bucket",
-        access_key_id: "key",
-        secret_access_key: "secret"
+      duckdb: %{
+        path: "/tmp/primary.duckdb"
       },
       source_name: "primary"
     }
@@ -89,11 +86,8 @@ defmodule DuckFeeder.Runtime.EmbeddedConfigTest do
       repo: FakeRepo,
       metadata_repo: FakeMetaRepo,
       schemas: [Tenant],
-      storage: %{
-        provider: :s3,
-        bucket: "bucket",
-        access_key_id: "key",
-        secret_access_key: "secret"
+      duckdb: %{
+        path: "/tmp/meta.duckdb"
       }
     }
 

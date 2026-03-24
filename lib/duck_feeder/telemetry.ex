@@ -125,28 +125,4 @@ defmodule DuckFeeder.Telemetry do
       metadata
     )
   end
-
-  @spec reconciler_run({:ok, map()} | {:error, term()}) :: :ok
-  def reconciler_run({:ok, summary}) when is_map(summary) do
-    execute(
-      [:reconciler, :run],
-      %{
-        count: 1,
-        checked: Map.get(summary, :checked, 0),
-        committed: summary |> Map.get(:committed, []) |> length(),
-        retried: summary |> Map.get(:retried, []) |> length(),
-        skipped: summary |> Map.get(:skipped, []) |> length(),
-        errors: summary |> Map.get(:errors, []) |> length()
-      },
-      %{status: :ok}
-    )
-  end
-
-  def reconciler_run({:error, reason}) do
-    execute(
-      [:reconciler, :run],
-      %{count: 1, error: 1},
-      %{status: :error, reason: reason}
-    )
-  end
 end

@@ -93,8 +93,6 @@ defmodule DuckFeeder.Service do
           {:name, GenServer.name()}
           | {:designated_tables, [map()]}
           | {:meta_conn, term()}
-          | {:storage, map()}
-          | {:writer, map()}
           | {:duckdb, map()}
           | {:sink_module, module()}
           | {:meta_module, module()}
@@ -102,8 +100,6 @@ defmodule DuckFeeder.Service do
           | {:pipeline_opts, map()}
           | {:max_tx_changes, pos_integer()}
           | {:observer_pid, pid()}
-          | {:committer_module, module()}
-          | {:committer_opts, keyword()}
           | {:snapshot_lsn_start, String.t()}
           | {:max_inflight_batches, pos_integer()}
           | {:max_pending_batches, pos_integer()}
@@ -156,7 +152,6 @@ defmodule DuckFeeder.Service do
     observer_pid = Keyword.get(opts, :observer_pid, self())
 
     with {:ok, sink_module} <- resolve_sink_module_option(opts),
-         {:ok, storage} <- resolve_storage(opts, sink_module),
          {:ok, duckdb} <- resolve_duckdb(opts, sink_module),
          {:ok, snapshot_lsn_counter} <- snapshot_lsn_counter(opts),
          {:ok, max_inflight_batches} <-
@@ -174,15 +169,11 @@ defmodule DuckFeeder.Service do
           meta_conn: Keyword.fetch!(opts, :meta_conn),
           designated_table_by_target: designated_table_mapping(designated_tables),
           designated_table_config_by_target: designated_table_config_mapping(designated_tables),
-          writer: Keyword.get(opts, :writer, %{}),
           object_prefix: Keyword.get(opts, :object_prefix, "duck_feeder"),
           sink_module: sink_module
         }
-        |> maybe_put_optional(:storage, storage)
         |> maybe_put_optional(:duckdb, duckdb)
         |> maybe_put_optional(:meta_module, Keyword.get(opts, :meta_module))
-        |> maybe_put_optional(:committer_module, Keyword.get(opts, :committer_module))
-        |> maybe_put_optional(:committer_opts, Keyword.get(opts, :committer_opts))
         |> maybe_put_optional(:poison_row_mode, Keyword.get(opts, :poison_row_mode))
         |> maybe_put_optional(:poison_row_sink, Keyword.get(opts, :poison_row_sink))
 
@@ -643,19 +634,6 @@ defmodule DuckFeeder.Service do
         implied_sink_module_from_duckdb(Keyword.get(opts, :duckdb))
 
     Sink.normalize_module(sink_module)
-  end
-
-  defp resolve_storage(opts, sink_module) when is_list(opts) and is_atom(sink_module) do
-    case Keyword.fetch(opts, :storage) do
-      {:ok, storage} when is_map(storage) ->
-        {:ok, storage}
-
-      {:ok, other} ->
-        {:error, {:invalid_option, :storage, other}}
-
-      :error ->
-        {:ok, nil}
-    end
   end
 
   defp resolve_duckdb(opts, sink_module) when is_list(opts) and is_atom(sink_module) do
