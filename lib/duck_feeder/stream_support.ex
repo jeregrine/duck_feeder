@@ -10,19 +10,18 @@ defmodule DuckFeeder.StreamSupport do
   def designated_table_mapping(designated_tables, checkpoint_prefix \\ nil)
       when is_list(designated_tables) do
     Enum.reduce(designated_tables, %{}, fn designated_table, acc ->
-      target = DesignatedTable.target_relation(designated_table)
-      Map.put(acc, target, DesignatedTable.checkpoint_key(designated_table, checkpoint_prefix))
+      normalized_table = DesignatedTable.normalize(designated_table)
+      target = DesignatedTable.target_relation(normalized_table)
+      Map.put(acc, target, DesignatedTable.checkpoint_key(normalized_table, checkpoint_prefix))
     end)
   end
 
   @spec designated_table_config_mapping([map()]) :: %{optional(table()) => map()}
   def designated_table_config_mapping(designated_tables) when is_list(designated_tables) do
     Enum.reduce(designated_tables, %{}, fn designated_table, acc ->
-      target =
-        {Map.fetch!(designated_table, :target_schema),
-         Map.fetch!(designated_table, :target_table)}
-
-      Map.put(acc, target, designated_table)
+      normalized_table = DesignatedTable.normalize(designated_table)
+      target = DesignatedTable.target_relation(normalized_table)
+      Map.put(acc, target, normalized_table)
     end)
   end
 
@@ -113,13 +112,46 @@ defmodule DuckFeeder.StreamSupport do
       |> Enum.reject(fn {key, value} -> is_nil(value) and key != :name end)
 
     with {:ok, server} <- DuckDBConnection.start_link(start_opts) do
-      {:ok, Map.put(duckdb, :conn, DuckDBConnection.get_conn(server))}
+      Process.unlink(server)
+      :ok = bind_duckdb_server_to_owner(server, self())
+
+      {:ok,
+       duckdb
+       |> Map.put(:server, server)
+       |> Map.put(:conn, DuckDBConnection.get_conn(server))}
     else
       {:error, reason} -> {:error, {:duckdb_connection_start_failed, reason}}
     end
   end
 
   defp maybe_start_duckdb_connection(duckdb, _sink_module), do: {:ok, duckdb}
+
+  defp bind_duckdb_server_to_owner(server, owner) when is_pid(server) and is_pid(owner) do
+    _watcher = spawn(fn -> monitor_duckdb_server_owner(server, owner) end)
+    :ok
+  end
+
+  defp monitor_duckdb_server_owner(server, owner) when is_pid(server) and is_pid(owner) do
+    owner_ref = Process.monitor(owner)
+    server_ref = Process.monitor(server)
+
+    receive do
+      {:DOWN, ^owner_ref, :process, ^owner, _reason} ->
+        safe_stop(server)
+
+      {:DOWN, ^server_ref, :process, ^server, _reason} ->
+        :ok
+    end
+  end
+
+  defp safe_stop(pid) when is_pid(pid) do
+    _ = GenServer.stop(pid, :shutdown)
+    :ok
+  catch
+    :exit, _reason -> :ok
+  end
+
+  defp safe_stop(_other), do: :ok
 
   defp implied_sink_module_from_duckdb(nil), do: nil
   defp implied_sink_module_from_duckdb(_duckdb), do: DuckFeeder.Sink.DuckDB

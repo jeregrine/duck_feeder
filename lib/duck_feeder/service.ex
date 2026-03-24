@@ -37,7 +37,7 @@ defmodule DuckFeeder.Service do
 
   use GenServer
 
-  alias DuckFeeder.{BatchQueue, DesignatedTable, Ingest, StreamSupport, TablePipeline}
+  alias DuckFeeder.{DesignatedTable, Ingest, StreamSupport, TablePipeline}
   alias DuckFeeder.CDC.{Lsn, Pipeline}
 
   defmodule State do
@@ -251,91 +251,77 @@ defmodule DuckFeeder.Service do
   end
 
   def handle_info({:duck_feeder_batch, table, batch}, %State{} = state) do
-    case BatchQueue.enqueue_or_start_batch(
-           state,
-           table,
-           batch,
-           on_event: &emit_batch_queue_telemetry/3
-         ) do
-      {:ok, next_state} ->
-        {:noreply, next_state}
-
-      {:error, reason, next_state} ->
-        overflow_state =
-          emit_batch_queue_telemetry(next_state, :overflow, %{
-            table: table,
-            reason: reason
-          })
-
-        if is_pid(overflow_state.observer_pid) do
-          send(
-            overflow_state.observer_pid,
-            {:duck_feeder_batch_queue_overflow, table, batch, reason}
-          )
-        end
-
-        {:stop, reason, overflow_state}
-    end
+    DuckFeeder.BatchDispatch.handle_incoming_batch(
+      state,
+      table,
+      batch,
+      on_event: &emit_batch_queue_telemetry/3,
+      on_overflow: &handle_batch_queue_overflow/4
+    )
   end
 
-  def handle_info({ref, result}, %State{inflight_batch_tasks: inflight} = state)
+  def handle_info({ref, result}, %State{} = state) when is_reference(ref) do
+    DuckFeeder.BatchDispatch.handle_batch_result(
+      state,
+      ref,
+      result,
+      on_event: &emit_batch_queue_telemetry/3,
+      on_result: &handle_batch_result/4,
+      on_completed: &handle_batch_completed/4
+    )
+  end
+
+  def handle_info({:DOWN, ref, :process, _pid, reason}, %State{} = state)
       when is_reference(ref) do
-    case Map.pop(inflight, ref) do
-      {nil, _inflight} ->
-        {:noreply, state}
-
-      {%{table: table, batch: batch}, next_inflight} ->
-        Process.demonitor(ref, [:flush])
-
-        next_state =
-          state
-          |> Map.put(:inflight_batch_tasks, next_inflight)
-          |> notify_batch_result(table, result, batch)
-          |> maybe_ack_checkpoint(result)
-          |> BatchQueue.maybe_start_queued_batches(on_event: &emit_batch_queue_telemetry/3)
-          |> emit_batch_queue_telemetry(:completed, %{
-            table: table,
-            result: StreamSupport.batch_result_status(result)
-          })
-
-        {:noreply, next_state}
-    end
+    DuckFeeder.BatchDispatch.handle_batch_down(
+      state,
+      ref,
+      reason,
+      on_task_crashed: &handle_batch_task_crashed/5
+    )
   end
 
-  def handle_info(
-        {:DOWN, ref, :process, _pid, reason},
-        %State{inflight_batch_tasks: inflight} = state
+  defp handle_batch_queue_overflow(%State{} = state, table, batch, reason) do
+    overflow_state =
+      emit_batch_queue_telemetry(state, :overflow, %{
+        table: table,
+        reason: reason
+      })
+
+    if is_pid(overflow_state.observer_pid) do
+      send(
+        overflow_state.observer_pid,
+        {:duck_feeder_batch_queue_overflow, table, batch, reason}
       )
-      when is_reference(ref) do
-    case Map.get(inflight, ref) do
-      nil ->
-        {:noreply, state}
-
-      %{table: table, batch: batch} ->
-        if BatchQueue.normal_down_reason?(reason) do
-          {:noreply, state}
-        else
-          {_task, next_inflight} = Map.pop(inflight, ref)
-          error = {:batch_task_crashed, reason}
-
-          next_state = %{state | inflight_batch_tasks: next_inflight}
-
-          if is_pid(next_state.observer_pid) do
-            send(
-              next_state.observer_pid,
-              {:duck_feeder_batch_processed, table, {:error, error}, batch}
-            )
-          end
-
-          next_state =
-            emit_batch_queue_telemetry(next_state, :task_crashed, %{
-              table: table,
-              reason: reason
-            })
-
-          {:stop, error, next_state}
-        end
     end
+
+    overflow_state
+  end
+
+  defp handle_batch_result(%State{} = state, table, result, batch) do
+    state
+    |> notify_batch_result(table, result, batch)
+    |> maybe_ack_checkpoint(result)
+  end
+
+  defp handle_batch_completed(%State{} = state, table, result, batch) do
+    _ = batch
+
+    emit_batch_queue_telemetry(state, :completed, %{
+      table: table,
+      result: StreamSupport.batch_result_status(result)
+    })
+  end
+
+  defp handle_batch_task_crashed(%State{} = state, table, batch, reason, error) do
+    if is_pid(state.observer_pid) do
+      send(state.observer_pid, {:duck_feeder_batch_processed, table, {:error, error}, batch})
+    end
+
+    emit_batch_queue_telemetry(state, :task_crashed, %{
+      table: table,
+      reason: reason
+    })
   end
 
   defp notify_batch_result(%State{observer_pid: observer_pid} = state, table, result, batch) do

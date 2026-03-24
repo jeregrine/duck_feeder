@@ -3,6 +3,33 @@ defmodule DuckFeeder.DesignatedTable do
 
   @type t :: map()
 
+  @known_string_keys %{
+    "source_schema" => :source_schema,
+    "source_table" => :source_table,
+    "target_schema" => :target_schema,
+    "target_table" => :target_table,
+    "mode" => :mode,
+    "primary_keys" => :primary_keys,
+    "checkpoint_key" => :checkpoint_key
+  }
+
+  @spec normalize(t()) :: t()
+  def normalize(designated_table) when is_map(designated_table) do
+    Enum.reduce(designated_table, %{}, fn
+      {key, value}, acc when is_atom(key) ->
+        Map.put(acc, key, normalize_value(key, value))
+
+      {key, value}, acc when is_binary(key) ->
+        case Map.get(@known_string_keys, key) do
+          nil -> Map.put(acc, key, value)
+          atom_key -> Map.put(acc, atom_key, normalize_value(atom_key, value))
+        end
+
+      {key, value}, acc ->
+        Map.put(acc, key, value)
+    end)
+  end
+
   @spec put_checkpoint_keys([t()], String.t() | nil) :: [t()]
   def put_checkpoint_keys(designated_tables, prefix \\ nil) when is_list(designated_tables) do
     Enum.map(designated_tables, &put_checkpoint_key(&1, prefix))
@@ -10,7 +37,9 @@ defmodule DuckFeeder.DesignatedTable do
 
   @spec put_checkpoint_key(t(), String.t() | nil) :: t()
   def put_checkpoint_key(designated_table, prefix \\ nil) when is_map(designated_table) do
-    Map.put_new(designated_table, :checkpoint_key, checkpoint_key(designated_table, prefix))
+    designated_table
+    |> normalize()
+    |> Map.put_new(:checkpoint_key, checkpoint_key(designated_table, prefix))
   end
 
   @spec checkpoint_keys([t()], String.t() | nil) :: [String.t()]
@@ -40,6 +69,27 @@ defmodule DuckFeeder.DesignatedTable do
     {fetch_string!(designated_table, :target_schema),
      fetch_string!(designated_table, :target_table)}
   end
+
+  defp normalize_value(:primary_keys, value) do
+    value
+    |> List.wrap()
+    |> Enum.map(&to_string/1)
+  end
+
+  defp normalize_value(key, value)
+       when key in [
+              :source_schema,
+              :source_table,
+              :target_schema,
+              :target_table,
+              :mode,
+              :checkpoint_key
+            ] and
+              not is_nil(value) do
+    to_string(value)
+  end
+
+  defp normalize_value(_key, value), do: value
 
   defp fetch_string!(map, key) do
     case fetch_value(map, key) do

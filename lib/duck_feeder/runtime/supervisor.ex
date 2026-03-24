@@ -34,20 +34,30 @@ defmodule DuckFeeder.Runtime.Supervisor do
     stream_worker_module =
       Keyword.get(opts, :stream_worker_module, DuckFeeder.Runtime.StreamWorker)
 
+    child_opts =
+      [
+        name: Keyword.get(opts, :stream_worker_name),
+        meta_conn: meta_conn,
+        source_name: source_name,
+        runtime_opts: Keyword.get(opts, :runtime_opts, []),
+        runtime_module: Keyword.get(opts, :runtime_module),
+        observer_pid: Keyword.get(opts, :observer_pid)
+      ]
+      |> Enum.reject(fn {_key, value} -> is_nil(value) end)
+      |> maybe_put_duckdb_opt(opts, duckdb)
+
     children = [
-      {stream_worker_module,
-       [
-         name: Keyword.get(opts, :stream_worker_name),
-         meta_conn: meta_conn,
-         source_name: source_name,
-         duckdb: duckdb,
-         runtime_opts: Keyword.get(opts, :runtime_opts, []),
-         runtime_module: Keyword.get(opts, :runtime_module),
-         observer_pid: Keyword.get(opts, :observer_pid)
-       ]
-       |> Enum.reject(fn {key, value} -> is_nil(value) and key != :duckdb end)}
+      {stream_worker_module, child_opts}
     ]
 
     Supervisor.init(children, strategy: :one_for_one)
+  end
+
+  defp maybe_put_duckdb_opt(child_opts, parent_opts, duckdb) do
+    if Keyword.has_key?(parent_opts, :duckdb) or Keyword.has_key?(parent_opts, :duckdb_config) do
+      Keyword.put(child_opts, :duckdb, duckdb)
+    else
+      child_opts
+    end
   end
 end

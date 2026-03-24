@@ -22,6 +22,7 @@ defmodule DuckFeeder.MixProject do
     [
       files: [
         "lib",
+        "priv",
         "mix.exs",
         "README*",
         "LICENSE"
@@ -66,7 +67,6 @@ defmodule DuckFeeder.MixProject do
       {:postgrex, "~> 0.20"},
       {:nimble_options, "~> 1.1"},
       {:dux, "~> 0.2"},
-      {:jason, "~> 1.4", optional: true},
       {:ecto_sql, "~> 3.12", only: :test},
       {:benchee, "~> 1.3", only: :dev, runtime: false},
       {:ex_doc, "~> 0.38", only: :dev, runtime: false}

@@ -45,6 +45,7 @@ defmodule DuckFeeder.Runtime.ManagerTest do
     assert sources["source_b"] == source_b_pid
 
     assert :ok = Manager.stop_source(manager, "source_a")
+    refute Process.alive?(source_a_pid)
     assert {:error, :not_found} = Manager.stop_source(manager, "missing")
 
     sources = Manager.list_sources(manager)

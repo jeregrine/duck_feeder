@@ -10,7 +10,9 @@ defmodule DuckFeeder.Meta.Store do
   alias DuckFeeder.Meta.SQL
 
   @fetch_start_lsn_sql """
-  SELECT COALESCE(MIN(last_committed_lsn)::text, $2::text)
+  SELECT
+    COUNT(*)::bigint AS matched_count,
+    MIN(last_committed_lsn)::text AS min_lsn
   FROM duckfeeder_meta.checkpoints
   WHERE checkpoint_key = ANY($1::text[])
   """
@@ -85,8 +87,8 @@ defmodule DuckFeeder.Meta.Store do
   def fetch_start_lsn(conn, checkpoint_keys, default_lsn \\ "0/0")
       when is_list(checkpoint_keys) and is_binary(default_lsn) do
     with {:ok, normalized_keys} <- normalize_checkpoint_keys(checkpoint_keys),
-         {:ok, result} <- query(conn, @fetch_start_lsn_sql, [normalized_keys, default_lsn]),
-         {:ok, lsn} <- single_value(result) do
+         {:ok, result} <- query(conn, @fetch_start_lsn_sql, [normalized_keys]),
+         {:ok, lsn} <- fetch_start_lsn_value(result, normalized_keys, default_lsn) do
       {:ok, lsn}
     end
   end
@@ -178,7 +180,35 @@ defmodule DuckFeeder.Meta.Store do
   defp single_value(%Postgrex.Result{rows: [[value]]}), do: {:ok, value}
   defp single_value(%Postgrex.Result{rows: rows}), do: {:error, {:unexpected_rows, rows}}
 
-  defp lsn_param(lsn) when is_binary(lsn), do: {:ok, Lsn.parse!(lsn)}
+  defp fetch_start_lsn_value(
+         %Postgrex.Result{rows: [[matched_count, min_lsn]]},
+         checkpoint_keys,
+         default_lsn
+       ) do
+    expected_count = length(checkpoint_keys)
+
+    cond do
+      matched_count < expected_count ->
+        {:ok, default_lsn}
+
+      is_binary(min_lsn) and min_lsn != "" ->
+        {:ok, min_lsn}
+
+      true ->
+        {:ok, default_lsn}
+    end
+  end
+
+  defp fetch_start_lsn_value(%Postgrex.Result{rows: rows}, _checkpoint_keys, _default_lsn),
+    do: {:error, {:unexpected_rows, rows}}
+
+  defp lsn_param(lsn) when is_binary(lsn) do
+    case Lsn.parse(lsn) do
+      {:ok, parsed} -> {:ok, parsed}
+      {:error, _reason} = error -> error
+    end
+  end
+
   defp lsn_param(lsn) when is_integer(lsn) and lsn >= 0, do: {:ok, lsn}
   defp lsn_param(other), do: {:error, {:invalid_lsn, other}}
 

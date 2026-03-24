@@ -130,17 +130,21 @@ defmodule DuckFeeder.Runtime do
   def build_runtime_source(source_name, source) when is_binary(source_name) and is_map(source) do
     postgres_url = Map.get(source, :postgres_url)
 
-    %{
-      name: source_name,
-      postgres_url: postgres_url,
-      connection_info:
-        if(is_binary(postgres_url) and postgres_url != "", do: %{postgres_url: postgres_url}),
-      slot_name: Map.get(source, :slot_name),
-      publication_name: Map.get(source, :publication_name)
-    }
+    source
+    |> Map.put(:name, source_name)
+    |> Map.put(:postgres_url, postgres_url)
+    |> Map.put(:snapshot_handoff_source_key, source_name)
+    |> maybe_put_runtime_connection_info(postgres_url)
     |> Enum.reject(fn {_key, value} -> is_nil(value) end)
     |> Map.new()
   end
+
+  defp maybe_put_runtime_connection_info(source, postgres_url)
+       when is_map(source) and is_binary(postgres_url) and postgres_url != "" do
+    Map.put_new(source, :connection_info, %{postgres_url: postgres_url})
+  end
+
+  defp maybe_put_runtime_connection_info(source, _postgres_url), do: source
 
   @doc false
   @spec put_runtime_checkpoint_keys(String.t(), [map()]) :: [map()]
@@ -445,9 +449,14 @@ defmodule DuckFeeder.Runtime do
 
   defp normalize_runtime_source(source_name, source)
        when is_binary(source_name) and is_map(source) do
+    source = Map.new(source)
+
     source
-    |> Map.new()
     |> Map.put_new(:name, source_name)
+    |> Map.put_new(
+      :snapshot_handoff_source_key,
+      Map.get(source, :id) || Map.get(source, "id") || source_name
+    )
     |> maybe_put_connection_info()
   end
 
@@ -920,7 +929,10 @@ defmodule DuckFeeder.Runtime do
   defp fetch_snapshot_handoff(meta_module, meta_conn, source_name, source)
        when is_atom(meta_module) and is_binary(source_name) and is_map(source) do
     if function_exported?(meta_module, :fetch_snapshot_handoff, 2) do
-      meta_module.fetch_snapshot_handoff(meta_conn, Map.get(source, :id, source_name))
+      meta_module.fetch_snapshot_handoff(
+        meta_conn,
+        snapshot_handoff_source_key(source_name, source)
+      )
     else
       {:ok, nil}
     end
@@ -995,7 +1007,7 @@ defmodule DuckFeeder.Runtime do
               is_binary(boundary_lsn) do
     case meta_module.mark_snapshot_handoff_pending(
            meta_conn,
-           Map.get(source, :id, source_name),
+           snapshot_handoff_source_key(source_name, source),
            boundary_lsn
          ) do
       {:ok, _} -> :ok
@@ -1008,7 +1020,7 @@ defmodule DuckFeeder.Runtime do
               is_binary(boundary_lsn) do
     case meta_module.mark_snapshot_handoff_complete(
            meta_conn,
-           Map.get(source, :id, source_name),
+           snapshot_handoff_source_key(source_name, source),
            boundary_lsn
          ) do
       {:ok, _} -> :ok
@@ -1507,6 +1519,14 @@ defmodule DuckFeeder.Runtime do
     case Map.get(source, key) do
       value when is_binary(value) and value != "" -> {:ok, value}
       _ -> {:error, {:missing_source_field, key}}
+    end
+  end
+
+  defp snapshot_handoff_source_key(_source_name, source) when is_map(source) do
+    case Map.get(source, :snapshot_handoff_source_key) do
+      value when is_binary(value) and value != "" -> value
+      value when is_integer(value) -> value
+      _ -> raise ArgumentError, "missing snapshot_handoff_source_key in runtime source"
     end
   end
 end

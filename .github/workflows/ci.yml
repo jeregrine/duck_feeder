@@ -49,9 +49,17 @@ jobs:
         run: mix format --check-formatted
 
   test:
-    name: Test
+    name: Test (Elixir ${{ matrix.elixir-version }} / OTP ${{ matrix.otp-version }})
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - elixir-version: "1.19.0"
+            otp-version: "27.3"
+          - elixir-version: "1.19.0"
+            otp-version: "28.0"
     env:
       MIX_ENV: test
 
@@ -62,8 +70,8 @@ jobs:
       - name: Set up Elixir and Erlang
         uses: erlef/setup-beam@v1
         with:
-          elixir-version: ${{ env.ELIXIR_VERSION }}
-          otp-version: ${{ env.OTP_VERSION }}
+          elixir-version: ${{ matrix.elixir-version }}
+          otp-version: ${{ matrix.otp-version }}
 
       - name: Cache dependencies and build
         uses: actions/cache@v4
@@ -71,9 +79,9 @@ jobs:
           path: |
             deps
             _build
-          key: ${{ runner.os }}-test-${{ env.ELIXIR_VERSION }}-${{ env.OTP_VERSION }}-${{ hashFiles('mix.lock') }}
+          key: ${{ runner.os }}-test-${{ matrix.elixir-version }}-${{ matrix.otp-version }}-${{ hashFiles('mix.lock') }}
           restore-keys: |
-            ${{ runner.os }}-test-${{ env.ELIXIR_VERSION }}-${{ env.OTP_VERSION }}-
+            ${{ runner.os }}-test-${{ matrix.elixir-version }}-${{ matrix.otp-version }}-
             ${{ runner.os }}-deps-
 
       - name: Install Hex and Rebar

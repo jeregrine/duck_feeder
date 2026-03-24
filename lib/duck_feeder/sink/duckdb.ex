@@ -18,16 +18,20 @@ defmodule DuckFeeder.Sink.DuckDB do
         setup_fun: &my_setup/1
       }
 
-  If `:conn` is omitted, DuckFeeder uses its managed DuckDB connection.
+  `:conn` is required in `context[:duckdb]`.
   """
 
   @behaviour DuckFeeder.Sink
 
   alias DuckFeeder.Meta
+  alias DuckFeeder.CDC.Lsn
   alias DuckFeeder.DuckDB.Client, as: DuckDBClient
-  alias DuckFeeder.DuckDB.Connection, as: DuckDBConnection
 
   @setup_registry __MODULE__.SetupRegistry
+  @setup_conn_registry __MODULE__.SetupConnRegistry
+  @rows_source_chunk_size 500
+  @applied_batch_schema "duck_feeder_internal"
+  @applied_batch_table "applied_batches"
 
   @impl true
   def process_batch(context, table, batch)
@@ -38,7 +42,9 @@ defmodule DuckFeeder.Sink.DuckDB do
          :ok <- ensure_setup(conn, context),
          {:ok, designated_table} <- designated_table(context, table),
          {:ok, checkpoint_key} <- checkpoint_key(context, table, designated_table),
-         {:ok, result} <- apply_batch(conn, context, designated_table, table, batch),
+         {:ok, batch_lsn} <- batch_lsn_end_int(batch),
+         {:ok, result} <-
+           apply_batch(conn, context, designated_table, table, batch, checkpoint_key, batch_lsn),
          {:ok, checkpoint_lsn} <-
            meta_module.upsert_checkpoint(
              Map.fetch!(context, :meta_conn),
@@ -53,36 +59,66 @@ defmodule DuckFeeder.Sink.DuckDB do
     end
   end
 
-  defp apply_batch(conn, context, designated_table, table, batch) do
+  defp apply_batch(conn, context, designated_table, table, batch, checkpoint_key, batch_lsn) do
     rows = Map.get(batch, :rows, [])
     catalog = context_catalog(context)
 
     with_transaction(conn, fn ->
-      cond do
-        rows == [] ->
-          {:ok, %{row_count: 0, table: table}}
-
-        cdc_batch?(rows) ->
-          apply_cdc_batch(conn, designated_table, table, batch, rows, catalog)
-
-        true ->
-          apply_append_batch(conn, table, batch, rows, catalog)
+      with :ok <- ensure_applied_batch_table(conn, catalog),
+           {:ok, already_applied?} <-
+             batch_already_applied?(conn, checkpoint_key, batch_lsn, catalog) do
+        if already_applied? do
+          {:ok,
+           %{
+             deduped?: true,
+             row_count: length(rows),
+             lsn_start: Map.get(batch, :lsn_start),
+             lsn_end: batch_lsn_end(batch),
+             table: table
+           }}
+        else
+          with {:ok, result} <-
+                 apply_batch_rows(conn, designated_table, table, batch, rows, catalog),
+               :ok <-
+                 record_applied_batch(
+                   conn,
+                   checkpoint_key,
+                   batch_lsn,
+                   batch_lsn_end(batch),
+                   catalog
+                 ) do
+            {:ok, Map.put(result, :deduped?, false)}
+          end
+        end
       end
     end)
+  end
+
+  defp apply_batch_rows(conn, designated_table, table, batch, rows, catalog) do
+    cond do
+      rows == [] ->
+        {:ok, %{row_count: 0, table: table}}
+
+      cdc_batch?(rows) ->
+        apply_cdc_batch(conn, designated_table, table, batch, rows, catalog)
+
+      true ->
+        apply_append_batch(conn, table, batch, rows, catalog)
+    end
   end
 
   defp apply_append_batch(conn, table, batch, rows, catalog) do
     normalized_rows = Enum.map(rows, &normalize_row_map/1)
 
-    with {:ok, source} <- rows_source(normalized_rows),
-         :ok <- ensure_target_schema(conn, table, catalog),
-         :ok <- ensure_table_from_source(conn, table, source, catalog),
-         :ok <- ensure_additive_columns(conn, table, source.columns, catalog),
-         :ok <-
-           execute(
-             conn,
-             "INSERT INTO #{qualified_relation(table, catalog)} #{source.sql}"
-           ) do
+    with :ok <- ensure_target_schema(conn, table, catalog),
+         {:ok, target_columns} <- fetch_target_columns(conn, table, catalog),
+         {:ok, sources} <-
+           rows_sources(normalized_rows, target_column_type_overrides(target_columns)),
+         {:ok, source_columns} <- source_columns(sources),
+         {:ok, target_columns} <-
+           ensure_table_from_source(conn, table, hd(sources), target_columns, catalog),
+         :ok <- ensure_additive_columns(conn, table, source_columns, target_columns, catalog),
+         :ok <- append_sources(conn, table, sources, catalog) do
       {:ok,
        %{
          row_count: length(normalized_rows),
@@ -101,13 +137,24 @@ defmodule DuckFeeder.Sink.DuckDB do
     if requires_primary_keys?(rows) and primary_keys == [] do
       {:error, {:missing_primary_keys, table}}
     else
-      with {:ok, delete_source} <- maybe_rows_source(delete_rows),
-           {:ok, upsert_source} <- maybe_rows_source(upsert_rows),
+      with {:ok, target_columns} <- fetch_target_columns(conn, table, catalog),
+           {:ok, delete_sources} <-
+             maybe_rows_sources(delete_rows, target_column_type_overrides(target_columns)),
+           {:ok, upsert_sources} <-
+             maybe_rows_sources(upsert_rows, target_column_type_overrides(target_columns)),
            :ok <- ensure_target_schema(conn, table, catalog),
-           :ok <- maybe_prepare_target_from_source(conn, table, upsert_source, catalog),
-           :ok <- maybe_truncate_target(conn, table, truncate?, catalog),
-           :ok <- maybe_delete_rows(conn, table, delete_source, primary_keys, catalog),
-           :ok <- maybe_merge_rows(conn, table, upsert_source, primary_keys, catalog) do
+           {:ok, target_columns} <-
+             maybe_prepare_target_from_sources(
+               conn,
+               table,
+               upsert_sources,
+               target_columns,
+               catalog
+             ),
+           :ok <- maybe_truncate_target(conn, table, truncate?, target_columns, catalog),
+           :ok <-
+             maybe_delete_rows(conn, table, delete_sources, primary_keys, target_columns, catalog),
+           :ok <- maybe_merge_rows(conn, table, upsert_sources, primary_keys, catalog) do
         {:ok,
          %{
            row_count: length(rows),
@@ -124,133 +171,166 @@ defmodule DuckFeeder.Sink.DuckDB do
     end
   end
 
-  defp maybe_prepare_target_from_source(_conn, _table, nil, _catalog), do: :ok
+  defp maybe_prepare_target_from_sources(_conn, _table, [], target_columns, _catalog),
+    do: {:ok, target_columns}
 
-  defp maybe_prepare_target_from_source(conn, table, source, catalog) do
-    with :ok <- ensure_table_from_source(conn, table, source, catalog),
-         :ok <- ensure_additive_columns(conn, table, source.columns, catalog) do
-      :ok
+  defp maybe_prepare_target_from_sources(conn, table, [source | _], target_columns, catalog) do
+    with {:ok, target_columns} <-
+           ensure_table_from_source(conn, table, source, target_columns, catalog),
+         :ok <- ensure_additive_columns(conn, table, source.columns, target_columns, catalog) do
+      {:ok, merge_target_columns(target_columns, source.columns)}
     end
   end
 
-  defp maybe_truncate_target(_conn, _table, false, _catalog), do: :ok
+  defp maybe_truncate_target(_conn, _table, false, _target_columns, _catalog), do: :ok
 
-  defp maybe_truncate_target(conn, table, true, catalog) do
-    if relation_exists?(conn, table, catalog) do
-      execute(conn, "DELETE FROM #{qualified_relation(table, catalog)}")
-    else
-      :ok
-    end
+  defp maybe_truncate_target(_conn, _table, true, nil, _catalog), do: :ok
+
+  defp maybe_truncate_target(conn, table, true, _target_columns, catalog) do
+    execute(conn, "DELETE FROM #{qualified_relation(table, catalog)}")
   end
 
-  defp maybe_delete_rows(_conn, _table, nil, _primary_keys, _catalog), do: :ok
+  defp maybe_delete_rows(_conn, _table, [], _primary_keys, _target_columns, _catalog), do: :ok
 
-  defp maybe_delete_rows(_conn, table, _source, _primary_keys, _catalog)
+  defp maybe_delete_rows(_conn, table, _sources, _primary_keys, _target_columns, _catalog)
        when not is_tuple(table),
        do: {:error, {:invalid_table, table}}
 
-  defp maybe_delete_rows(conn, table, source, primary_keys, catalog) do
-    if relation_exists?(conn, table, catalog) do
-      execute(
-        conn,
-        "DELETE FROM #{qualified_relation(table, catalog)} AS target " <>
-          "USING (#{source.sql}) AS source " <>
-          "WHERE #{join_predicate(primary_keys)}"
-      )
-    else
-      :ok
-    end
+  defp maybe_delete_rows(_conn, _table, _sources, _primary_keys, nil, _catalog), do: :ok
+
+  defp maybe_delete_rows(conn, table, sources, primary_keys, _target_columns, catalog) do
+    Enum.reduce_while(sources, :ok, fn source, :ok ->
+      case execute(
+             conn,
+             "DELETE FROM #{qualified_relation(table, catalog)} AS target " <>
+               "USING (#{source.sql}) AS source " <>
+               "WHERE #{join_predicate(primary_keys)}"
+           ) do
+        :ok -> {:cont, :ok}
+        {:error, reason} -> {:halt, {:error, reason}}
+      end
+    end)
   end
 
-  defp maybe_merge_rows(_conn, _table, nil, _primary_keys, _catalog), do: :ok
+  defp maybe_merge_rows(_conn, _table, [], _primary_keys, _catalog), do: :ok
 
-  defp maybe_merge_rows(conn, table, source, [], catalog) do
-    execute(
-      conn,
-      "INSERT INTO #{qualified_relation(table, catalog)} #{source.sql}"
-    )
+  defp maybe_merge_rows(conn, table, sources, [], catalog) do
+    append_sources(conn, table, sources, catalog)
   end
 
-  defp maybe_merge_rows(conn, table, source, primary_keys, catalog) do
-    column_names = Enum.map(source.columns, & &1.name)
+  defp maybe_merge_rows(conn, table, sources, primary_keys, catalog) do
+    Enum.reduce_while(sources, :ok, fn source, :ok ->
+      column_names = Enum.map(source.columns, & &1.name)
 
-    assignments =
-      Enum.map_join(column_names, ", ", fn column ->
-        "#{qi(column)} = source.#{qi(column)}"
-      end)
+      assignments =
+        Enum.map_join(column_names, ", ", fn column ->
+          "#{qi(column)} = source.#{qi(column)}"
+        end)
 
-    insert_columns = Enum.map_join(column_names, ", ", &qi/1)
+      insert_columns = Enum.map_join(column_names, ", ", &qi/1)
 
-    insert_values =
-      Enum.map_join(column_names, ", ", fn column ->
-        "source.#{qi(column)}"
-      end)
+      insert_values =
+        Enum.map_join(column_names, ", ", fn column ->
+          "source.#{qi(column)}"
+        end)
 
-    execute(
-      conn,
-      "MERGE INTO #{qualified_relation(table, catalog)} AS target " <>
-        "USING (#{source.sql}) AS source " <>
-        "ON #{join_predicate(primary_keys)} " <>
-        "WHEN MATCHED THEN UPDATE SET #{assignments} " <>
-        "WHEN NOT MATCHED THEN INSERT (#{insert_columns}) VALUES (#{insert_values})"
-    )
+      case execute(
+             conn,
+             "MERGE INTO #{qualified_relation(table, catalog)} AS target " <>
+               "USING (#{source.sql}) AS source " <>
+               "ON #{join_predicate(primary_keys)} " <>
+               "WHEN MATCHED THEN UPDATE SET #{assignments} " <>
+               "WHEN NOT MATCHED THEN INSERT (#{insert_columns}) VALUES (#{insert_values})"
+           ) do
+        :ok -> {:cont, :ok}
+        {:error, reason} -> {:halt, {:error, reason}}
+      end
+    end)
   end
 
   defp ensure_target_schema(conn, {schema, _table}, catalog) do
     execute(conn, "CREATE SCHEMA IF NOT EXISTS #{qualified_schema(schema, catalog)}")
   end
 
-  defp ensure_table_from_source(conn, table, source, catalog) do
-    if relation_exists?(conn, table, catalog) do
-      :ok
-    else
-      execute(
-        conn,
-        "CREATE TABLE #{qualified_relation(table, catalog)} AS #{source.sql} LIMIT 0"
-      )
+  defp ensure_table_from_source(conn, table, source, nil, catalog) do
+    with :ok <-
+           execute(
+             conn,
+             "CREATE TABLE #{qualified_relation(table, catalog)} AS #{source.sql} LIMIT 0"
+           ) do
+      {:ok, source.columns}
     end
   end
 
-  defp ensure_additive_columns(conn, table, source_columns, catalog) do
-    target_columns =
-      if relation_exists?(conn, table, catalog) do
-        describe_columns(conn, qualified_relation(table, catalog))
-      else
-        []
-      end
+  defp ensure_table_from_source(_conn, _table, _source, target_columns, _catalog),
+    do: {:ok, target_columns}
 
+  defp ensure_additive_columns(_conn, _table, _source_columns, nil, _catalog), do: :ok
+
+  defp ensure_additive_columns(conn, table, source_columns, target_columns, catalog) do
     target_by_name = Map.new(target_columns, &{&1.name, &1.type})
 
     Enum.reduce_while(source_columns, :ok, fn %{name: name, type: type}, :ok ->
-      case Map.get(target_by_name, name) do
-        nil ->
-          case execute(
-                 conn,
-                 "ALTER TABLE #{qualified_relation(table, catalog)} ADD COLUMN #{qi(name)} #{type}"
-               ) do
-            :ok -> {:cont, :ok}
-            {:error, reason} -> {:halt, {:error, reason}}
-          end
+      with {:ok, validated_type} <- validate_sql_type(type) do
+        case Map.get(target_by_name, name) do
+          nil ->
+            case execute(
+                   conn,
+                   "ALTER TABLE #{qualified_relation(table, catalog)} ADD COLUMN #{qi(name)} #{validated_type}"
+                 ) do
+              :ok -> {:cont, :ok}
+              {:error, reason} -> {:halt, {:error, reason}}
+            end
 
-        existing_type ->
-          if compatible_type?(existing_type, type) do
-            {:cont, :ok}
-          else
-            {:halt,
-             {:error,
-              {:incompatible_column_type, table, name, normalize_type(existing_type),
-               normalize_type(type)}}}
-          end
+          existing_type ->
+            if compatible_type?(existing_type, validated_type) do
+              {:cont, :ok}
+            else
+              {:halt,
+               {:error,
+                {:incompatible_column_type, table, name, normalize_type(existing_type),
+                 validated_type}}}
+            end
+        end
+      else
+        {:error, reason} -> {:halt, {:error, reason}}
       end
     end)
   end
 
-  defp maybe_rows_source([]), do: {:ok, nil}
-  defp maybe_rows_source(rows), do: rows_source(rows)
+  defp append_sources(conn, table, sources, catalog) do
+    Enum.reduce_while(sources, :ok, fn source, :ok ->
+      case execute(conn, "INSERT INTO #{qualified_relation(table, catalog)} #{source.sql}") do
+        :ok -> {:cont, :ok}
+        {:error, reason} -> {:halt, {:error, reason}}
+      end
+    end)
+  end
 
-  defp rows_source(rows) when is_list(rows) and rows != [] do
-    columns = infer_columns(rows)
+  defp source_columns([%{columns: columns} | _sources]), do: {:ok, columns}
+  defp source_columns([]), do: {:error, :missing_source_columns}
 
+  defp maybe_rows_sources([], _type_overrides), do: {:ok, []}
+  defp maybe_rows_sources(rows, type_overrides), do: rows_sources(rows, type_overrides)
+
+  defp rows_sources(rows, type_overrides) when is_list(rows) and rows != [] do
+    columns = infer_columns(rows, type_overrides)
+
+    rows
+    |> Enum.chunk_every(rows_source_chunk_size())
+    |> Enum.reduce_while({:ok, []}, fn chunk, {:ok, acc} ->
+      case rows_source(chunk, columns) do
+        {:ok, source} -> {:cont, {:ok, [source | acc]}}
+        {:error, _reason} = error -> {:halt, error}
+      end
+    end)
+    |> case do
+      {:ok, sources} -> {:ok, Enum.reverse(sources)}
+      {:error, _reason} = error -> error
+    end
+  end
+
+  defp rows_source(rows, columns) when is_list(rows) and rows != [] do
     values_sql =
       Enum.map_join(rows, ", ", fn row ->
         "(" <>
@@ -267,24 +347,43 @@ defmodule DuckFeeder.Sink.DuckDB do
        sql: "SELECT * FROM (VALUES #{values_sql}) AS __duck_feeder_source (#{column_sql})"
      }}
   rescue
-    exception ->
+    exception in [ArgumentError] ->
       {:error, {:duckdb_source_build_failed, exception}}
   end
 
-  defp infer_columns(rows) do
+  defp infer_columns(rows, type_overrides) do
     rows
-    |> Enum.flat_map(&Map.keys/1)
-    |> Enum.map(&to_string/1)
-    |> Enum.uniq()
-    |> Enum.sort()
-    |> Enum.map(fn name ->
-      kind =
-        rows
-        |> Enum.map(&fetch_row_value(&1, name))
-        |> Enum.reduce(nil, &merge_kind(&2, value_kind(&1)))
+    |> Enum.reduce(%{}, fn row, acc ->
+      Enum.reduce(row, acc, fn {key, value}, row_acc ->
+        name = to_string(key)
 
-      %{name: name, type: kind_to_sql_type(kind || :string)}
+        case Map.get(type_overrides, name) do
+          nil ->
+            Map.update(
+              row_acc,
+              name,
+              %{name: name, kind: value_kind(value)},
+              fn %{kind: kind} = column ->
+                %{column | kind: merge_kind(kind, value_kind(value))}
+              end
+            )
+
+          existing_type ->
+            Map.put(row_acc, name, %{name: name, type: normalize_type(existing_type)})
+        end
+      end)
     end)
+    |> Map.values()
+    |> Enum.map(fn %{name: name} = column ->
+      %{
+        name: name,
+        type:
+          normalize_type(
+            Map.get(column, :type, kind_to_sql_type(Map.get(column, :kind) || :string))
+          )
+      }
+    end)
+    |> Enum.sort_by(& &1.name)
   end
 
   defp cdc_stage_rows(rows, primary_keys) do
@@ -326,44 +425,73 @@ defmodule DuckFeeder.Sink.DuckDB do
     Enum.any?(rows, fn row -> op_code(row) in ["U", "D"] end)
   end
 
-  defp relation_exists?(conn, {schema, table}, catalog) do
+  defp fetch_target_columns(conn, {schema, table}, catalog) do
     catalog_sql =
       case catalog do
         value when is_binary(value) and value != "" ->
-          " AND table_catalog = '#{escape_sql_string(value)}'"
+          " AND table_catalog = #{quote_string(value)}"
 
         _ ->
           ""
       end
 
     sql =
-      "SELECT count(*) AS n FROM information_schema.tables " <>
-        "WHERE table_schema = '#{escape_sql_string(schema)}' " <>
-        "AND table_name = '#{escape_sql_string(table)}'" <> catalog_sql
+      "SELECT column_name, data_type FROM information_schema.columns " <>
+        "WHERE table_schema = #{quote_string(schema)} " <>
+        "AND table_name = #{quote_string(table)}" <>
+        catalog_sql <>
+        " ORDER BY ordinal_position"
 
-    case query_map(conn, sql) do
-      {:ok, %{"n" => [count]}} -> count > 0
-      _ -> false
+    with {:ok, map} <- query_map(conn, sql) do
+      column_names = Map.get(map, "column_name", [])
+      column_types = Map.get(map, "data_type", [])
+
+      columns =
+        Enum.zip(column_names, column_types)
+        |> Enum.map(fn {name, type} -> %{name: to_string(name), type: normalize_type(type)} end)
+
+      {:ok, if(columns == [], do: nil, else: columns)}
     end
   end
 
-  defp describe_columns(conn, relation_sql) do
-    case query_map(conn, "DESCRIBE #{relation_sql}") do
-      {:ok, map} ->
-        Enum.zip(map["column_name"] || [], map["column_type"] || [])
-        |> Enum.map(fn {name, type} -> %{name: to_string(name), type: to_string(type)} end)
+  defp merge_target_columns(nil, source_columns), do: source_columns
 
-      {:error, _reason} ->
-        []
-    end
+  defp merge_target_columns(target_columns, source_columns) do
+    (target_columns ++ source_columns)
+    |> Enum.reduce(%{}, fn %{name: name} = column, acc -> Map.put(acc, name, column) end)
+    |> Map.values()
+    |> Enum.sort_by(& &1.name)
   end
+
+  defp target_column_type_overrides(nil), do: %{}
+
+  defp target_column_type_overrides(target_columns),
+    do: Map.new(target_columns, &{&1.name, &1.type})
+
+  defp rows_source_chunk_size, do: @rows_source_chunk_size
+
+  @sql_type_pattern ~r/\A[A-Z][A-Z0-9_ ]*(\([0-9 ,]+\))?\z/
 
   defp compatible_type?(existing_type, incoming_type) do
     existing = normalize_type(existing_type)
     incoming = normalize_type(incoming_type)
 
-    existing == incoming or existing == "VARCHAR" or existing == "JSON" or
-      (existing == "DOUBLE" and incoming in ["BIGINT", "INTEGER", "DOUBLE"])
+    existing == incoming or existing in ["VARCHAR", "JSON"] or
+      (existing in ["DOUBLE", "REAL", "FLOAT"] and
+         incoming in ["TINYINT", "SMALLINT", "INTEGER", "BIGINT", "DOUBLE", "REAL", "FLOAT"]) or
+      (existing == "BIGINT" and incoming in ["TINYINT", "SMALLINT", "INTEGER", "BIGINT"]) or
+      (existing == "INTEGER" and incoming in ["TINYINT", "SMALLINT", "INTEGER"]) or
+      (existing == "SMALLINT" and incoming in ["TINYINT", "SMALLINT"])
+  end
+
+  defp validate_sql_type(type) do
+    normalized = normalize_type(type)
+
+    if Regex.match?(@sql_type_pattern, normalized) do
+      {:ok, normalized}
+    else
+      {:error, {:invalid_duckdb_type, type}}
+    end
   end
 
   defp normalize_type(type) when is_binary(type) do
@@ -408,8 +536,15 @@ defmodule DuckFeeder.Sink.DuckDB do
   defp kind_to_sql_type(:json), do: "JSON"
   defp kind_to_sql_type(_kind), do: "VARCHAR"
 
-  defp sql_literal(nil, type), do: "CAST(NULL AS #{type})"
-  defp sql_literal(value, type), do: "CAST(#{base_sql_literal(value)} AS #{type})"
+  defp sql_literal(nil, type) do
+    validated_type = validate_sql_type!(type)
+    "CAST(NULL AS #{validated_type})"
+  end
+
+  defp sql_literal(value, type) do
+    validated_type = validate_sql_type!(type)
+    "CAST(#{base_sql_literal(value)} AS #{validated_type})"
+  end
 
   defp base_sql_literal(%DateTime{} = value), do: quote_string(DateTime.to_iso8601(value))
 
@@ -429,22 +564,40 @@ defmodule DuckFeeder.Sink.DuckDB do
   defp base_sql_literal(value) when is_binary(value), do: quote_string(value)
 
   defp base_sql_literal(value) when is_map(value) or is_list(value),
-    do: value |> JSON.encode!() |> quote_string()
+    do: value |> encode_json!() |> quote_string()
 
   defp base_sql_literal(value), do: value |> inspect() |> quote_string()
 
   defp with_transaction(conn, fun) when is_function(fun, 0) do
     with :ok <- execute(conn, "BEGIN") do
-      case fun.() do
-        {:ok, _result} = ok ->
-          case execute(conn, "COMMIT") do
-            :ok -> ok
-            {:error, reason} -> {:error, reason}
-          end
+      try do
+        case fun.() do
+          {:ok, _result} = ok ->
+            case execute(conn, "COMMIT") do
+              :ok ->
+                ok
 
-        {:error, reason} ->
-          _ = execute(conn, "ROLLBACK")
-          {:error, reason}
+              {:error, reason} ->
+                _ = rollback(conn)
+                {:error, reason}
+            end
+
+          {:error, reason} ->
+            _ = rollback(conn)
+            {:error, reason}
+
+          other ->
+            _ = rollback(conn)
+            {:error, {:invalid_transaction_result, other}}
+        end
+      rescue
+        exception ->
+          _ = rollback(conn)
+          reraise exception, __STACKTRACE__
+      catch
+        kind, reason ->
+          _ = rollback(conn)
+          :erlang.raise(kind, reason, __STACKTRACE__)
       end
     end
   end
@@ -457,11 +610,7 @@ defmodule DuckFeeder.Sink.DuckDB do
         {:ok, conn}
 
       nil ->
-        try do
-          {:ok, DuckDBConnection.get_conn()}
-        catch
-          :exit, reason -> {:error, {:duckdb_connection_unavailable, reason}}
-        end
+        {:error, :missing_duckdb_conn}
 
       other ->
         {:error, {:invalid_duckdb_conn, other}}
@@ -471,6 +620,8 @@ defmodule DuckFeeder.Sink.DuckDB do
   defp ensure_setup(conn, context) do
     duckdb = Map.get(context, :duckdb, %{}) |> Map.new()
     key = setup_key(conn, duckdb)
+
+    :ok = ensure_setup_conn_monitor(conn)
 
     if setup_complete?(key) do
       :ok
@@ -522,6 +673,58 @@ defmodule DuckFeeder.Sink.DuckDB do
     :ok
   end
 
+  defp ensure_setup_conn_monitor(conn) when is_pid(conn) do
+    registry = ensure_setup_conn_registry()
+
+    case :ets.lookup(registry, conn) do
+      [{^conn, watcher}] when is_pid(watcher) ->
+        if Process.alive?(watcher) do
+          :ok
+        else
+          watcher = spawn(fn -> monitor_setup_conn(conn) end)
+          true = :ets.insert(registry, {conn, watcher})
+          :ok
+        end
+
+      _ ->
+        watcher = spawn(fn -> monitor_setup_conn(conn) end)
+        true = :ets.insert(registry, {conn, watcher})
+        :ok
+    end
+  end
+
+  defp monitor_setup_conn(conn) do
+    ref = Process.monitor(conn)
+
+    receive do
+      {:DOWN, ^ref, :process, ^conn, _reason} ->
+        clear_setup_entries(conn)
+        clear_setup_conn_monitor(conn)
+    end
+  end
+
+  defp clear_setup_entries(conn) when is_pid(conn) do
+    case :ets.whereis(@setup_registry) do
+      :undefined ->
+        :ok
+
+      registry ->
+        true = :ets.match_delete(registry, {{conn, :_, :_}, :_})
+        :ok
+    end
+  end
+
+  defp clear_setup_conn_monitor(conn) when is_pid(conn) do
+    case :ets.whereis(@setup_conn_registry) do
+      :undefined ->
+        :ok
+
+      registry ->
+        true = :ets.delete(registry, conn)
+        :ok
+    end
+  end
+
   defp ensure_setup_registry do
     case :ets.whereis(@setup_registry) do
       :undefined ->
@@ -535,6 +738,78 @@ defmodule DuckFeeder.Sink.DuckDB do
         registry
     end
   end
+
+  defp ensure_setup_conn_registry do
+    case :ets.whereis(@setup_conn_registry) do
+      :undefined ->
+        try do
+          :ets.new(@setup_conn_registry, [:named_table, :public, :set, read_concurrency: true])
+        catch
+          :error, :badarg -> @setup_conn_registry
+        end
+
+      registry ->
+        registry
+    end
+  end
+
+  defp ensure_applied_batch_table(conn, catalog) do
+    with :ok <-
+           execute(
+             conn,
+             "CREATE SCHEMA IF NOT EXISTS #{qualified_schema(@applied_batch_schema, catalog)}"
+           ),
+         :ok <-
+           execute(
+             conn,
+             "CREATE TABLE IF NOT EXISTS #{applied_batch_relation(catalog)} (" <>
+               "checkpoint_key VARCHAR NOT NULL, " <>
+               "last_applied_lsn HUGEINT NOT NULL, " <>
+               "last_applied_lsn_text VARCHAR NOT NULL)"
+           ) do
+      :ok
+    end
+  end
+
+  defp batch_already_applied?(conn, checkpoint_key, batch_lsn, catalog)
+       when is_binary(checkpoint_key) and is_integer(batch_lsn) do
+    sql =
+      "SELECT last_applied_lsn FROM #{applied_batch_relation(catalog)} " <>
+        "WHERE checkpoint_key = #{quote_string(checkpoint_key)}"
+
+    with {:ok, result} <- query_map(conn, sql) do
+      case Map.get(result, "last_applied_lsn", []) do
+        [last_applied_lsn | _] when is_integer(last_applied_lsn) ->
+          {:ok, last_applied_lsn >= batch_lsn}
+
+        [_other | _] ->
+          {:ok, false}
+
+        [] ->
+          {:ok, false}
+      end
+    end
+  end
+
+  defp record_applied_batch(conn, checkpoint_key, batch_lsn, batch_lsn_text, catalog)
+       when is_binary(checkpoint_key) and is_integer(batch_lsn) and is_binary(batch_lsn_text) do
+    with :ok <-
+           execute(
+             conn,
+             "DELETE FROM #{applied_batch_relation(catalog)} WHERE checkpoint_key = #{quote_string(checkpoint_key)}"
+           ) do
+      execute(
+        conn,
+        "INSERT INTO #{applied_batch_relation(catalog)} (checkpoint_key, last_applied_lsn, last_applied_lsn_text) VALUES (" <>
+          "#{quote_string(checkpoint_key)}, " <>
+          "#{batch_lsn}::HUGEINT, " <>
+          "#{quote_string(batch_lsn_text)})"
+      )
+    end
+  end
+
+  defp applied_batch_relation(catalog),
+    do: qualified_relation({@applied_batch_schema, @applied_batch_table}, catalog)
 
   defp designated_table(context, table) do
     case Map.get(context, :designated_table_config_by_target, %{}) |> Map.get(table) do
@@ -565,7 +840,10 @@ defmodule DuckFeeder.Sink.DuckDB do
   end
 
   defp execute(conn, sql) when is_binary(sql) do
-    DuckDBClient.execute(conn, sql)
+    case DuckDBClient.execute(conn, sql) do
+      {:ok, _result} -> :ok
+      {:error, _reason} = error -> error
+    end
   end
 
   defp query_map(conn, sql) when is_binary(sql) do
@@ -615,35 +893,11 @@ defmodule DuckFeeder.Sink.DuckDB do
 
   defp normalize_cdc_row_map(map) when is_map(map) do
     map
-    |> Enum.map(fn {key, value} -> {to_string(key), normalize_cdc_value(value)} end)
+    |> Enum.map(fn {key, value} -> {to_string(key), value} end)
     |> Map.new()
   end
 
   defp normalize_cdc_row_map(_other), do: %{}
-
-  defp normalize_cdc_value(value) when is_binary(value) do
-    cond do
-      value == "true" ->
-        true
-
-      value == "false" ->
-        false
-
-      true ->
-        case Integer.parse(value) do
-          {int, ""} ->
-            int
-
-          _ ->
-            case Float.parse(value) do
-              {float, ""} -> float
-              _ -> value
-            end
-        end
-    end
-  end
-
-  defp normalize_cdc_value(value), do: value
 
   defp fetch_row_value(map, key) when is_map(map) and is_binary(key) do
     cond do
@@ -669,6 +923,12 @@ defmodule DuckFeeder.Sink.DuckDB do
     Map.get(batch, :lsn_end) || Map.get(batch, "lsn_end") || "0/0"
   end
 
+  defp batch_lsn_end_int(batch) do
+    batch
+    |> batch_lsn_end()
+    |> Lsn.parse()
+  end
+
   defp qualified_relation({schema, table}, nil), do: Enum.map_join([schema, table], ".", &qi/1)
 
   defp qualified_relation({schema, table}, catalog),
@@ -686,5 +946,33 @@ defmodule DuckFeeder.Sink.DuckDB do
 
   defp quote_string(value) when is_binary(value), do: "'#{escape_sql_string(value)}'"
 
-  defp escape_sql_string(value) when is_binary(value), do: String.replace(value, "'", "''")
+  defp escape_sql_string(value) when is_binary(value) do
+    if String.contains?(value, <<0>>) do
+      raise ArgumentError, "SQL strings may not contain null bytes"
+    end
+
+    value
+    |> String.replace("\\", "\\\\")
+    |> String.replace("'", "''")
+  end
+
+  defp validate_sql_type!(type) do
+    case validate_sql_type(type) do
+      {:ok, validated_type} ->
+        validated_type
+
+      {:error, reason} ->
+        raise ArgumentError, "invalid DuckDB type #{inspect(type)}: #{inspect(reason)}"
+    end
+  end
+
+  defp rollback(conn), do: execute(conn, "ROLLBACK")
+
+  defp encode_json!(value) do
+    JSON.encode!(value)
+  rescue
+    exception in [UndefinedFunctionError] ->
+      raise ArgumentError,
+            "JSON encoding requires Elixir 1.19+'s JSON module, got: #{inspect(exception)}"
+  end
 end

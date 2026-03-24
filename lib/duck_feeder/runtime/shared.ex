@@ -3,9 +3,16 @@ defmodule DuckFeeder.Runtime.Shared do
 
   @spec fetch_duckdb!(keyword()) :: map() | nil
   def fetch_duckdb!(opts) when is_list(opts) do
-    case Keyword.fetch(opts, :duckdb) do
-      {:ok, duckdb} -> duckdb
-      :error -> Keyword.fetch!(opts, :duckdb_config)
+    case {Keyword.fetch(opts, :duckdb), Keyword.fetch(opts, :duckdb_config)} do
+      {{:ok, duckdb}, _} ->
+        duckdb
+
+      {:error, {:ok, duckdb}} ->
+        duckdb
+
+      {:error, :error} ->
+        raise ArgumentError,
+              "expected :duckdb or :duckdb_config in runtime opts, got keys: #{inspect(Keyword.keys(opts))}"
     end
   end
 

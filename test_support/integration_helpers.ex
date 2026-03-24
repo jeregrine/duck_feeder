@@ -127,7 +127,8 @@ defmodule DuckFeeder.TestSupport.IntegrationHelpers do
 
   def execute_duckdb!(duckdb, sql) when is_map(duckdb) and is_binary(sql) do
     with_duckdb_conn!(duckdb, fn conn ->
-      :ok = DuckDBClient.execute(conn, sql)
+      {:ok, _} = DuckDBClient.execute(conn, sql)
+      :ok
     end)
   end
 
@@ -159,7 +160,7 @@ defmodule DuckFeeder.TestSupport.IntegrationHelpers do
 
     try do
       Enum.each(Map.get(duckdb, :setup_sql, []), fn statement ->
-        :ok = DuckDBClient.execute(conn, statement)
+        {:ok, _} = DuckDBClient.execute(conn, statement)
       end)
 
       case Map.get(duckdb, :setup_fun) do
@@ -206,13 +207,22 @@ defmodule DuckFeeder.TestSupport.IntegrationHelpers do
         :ok
 
       {:ok, %{"database_name" => []}} ->
-        DuckDBClient.execute(conn, attach_sql)
+        case DuckDBClient.execute(conn, attach_sql) do
+          {:ok, _} -> :ok
+          {:error, _reason} = error -> error
+        end
 
       {:ok, _other} ->
-        DuckDBClient.execute(conn, attach_sql)
+        case DuckDBClient.execute(conn, attach_sql) do
+          {:ok, _} -> :ok
+          {:error, _reason} = error -> error
+        end
 
       {:error, _reason} ->
-        DuckDBClient.execute(conn, attach_sql)
+        case DuckDBClient.execute(conn, attach_sql) do
+          {:ok, _} -> :ok
+          {:error, _reason} = error -> error
+        end
     end
   end
 

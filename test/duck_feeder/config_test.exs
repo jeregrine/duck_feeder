@@ -64,6 +64,38 @@ defmodule DuckFeeder.ConfigTest do
     assert validated.duckdb.setup_sql == ["INSTALL ducklake", "LOAD ducklake"]
   end
 
+  test "accepts map-shaped designated tables with string keys" do
+    config = %{
+      source: %{
+        postgres_url: "postgres://source",
+        slot_name: "slot",
+        publication_name: "pub",
+        designated_tables: [
+          %{
+            "source_schema" => "public",
+            "source_table" => "users",
+            "target_schema" => "raw",
+            "target_table" => "users"
+          }
+        ]
+      },
+      duckdb: %{path: "/tmp/duck_feeder.duckdb"},
+      metadata: %{postgres_url: "postgres://meta"}
+    }
+
+    assert {:ok, validated} = Config.validate(config)
+
+    assert [
+             %{
+               source_schema: "public",
+               source_table: "users",
+               target_schema: "raw",
+               target_table: "users"
+             }
+           ] =
+             validated.source.designated_tables
+  end
+
   test "rejects unknown string keys without atomizing" do
     config = %{
       "evil_key" => "boom",

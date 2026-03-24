@@ -59,6 +59,18 @@ defmodule DuckFeeder.Meta.StoreIntegrationTest do
     assert {:ok, "0/20"} = Meta.fetch_start_lsn(conn, [key_a, key_b])
   end
 
+  test "fetch_start_lsn falls back when any checkpoint is missing", %{
+    conn: conn,
+    source_name: source_name
+  } do
+    key_a = "#{source_name}:raw.users"
+    key_b = "#{source_name}:raw.orders"
+
+    assert {:ok, "0/40"} = Meta.upsert_checkpoint(conn, key_a, "0/40")
+    assert {:ok, "0/0"} = Meta.fetch_start_lsn(conn, [key_a, key_b])
+    assert {:ok, "0/5"} = Meta.fetch_start_lsn(conn, [key_a, key_b], "0/5")
+  end
+
   test "checkpoint roundtrip", %{conn: conn, checkpoint_key: checkpoint_key} do
     assert {:ok, "0/0"} = Meta.fetch_checkpoint(conn, checkpoint_key)
 
@@ -90,5 +102,11 @@ defmodule DuckFeeder.Meta.StoreIntegrationTest do
 
     assert :ok = Meta.clear_snapshot_handoff(conn, source_name)
     assert {:ok, nil} = Meta.fetch_snapshot_handoff(conn, source_name)
+  end
+
+  test "invalid lsn values return error tuples", %{conn: conn, checkpoint_key: checkpoint_key} do
+    assert {:error, _reason} = Meta.upsert_checkpoint(conn, checkpoint_key, "not-an-lsn")
+    assert {:error, _reason} = Meta.mark_snapshot_handoff_pending(conn, "source-a", "not-an-lsn")
+    assert {:error, _reason} = Meta.mark_snapshot_handoff_complete(conn, "source-a", "not-an-lsn")
   end
 end

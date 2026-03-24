@@ -15,6 +15,23 @@ defmodule DuckFeeder.Sink.DuckDBTest do
     end
   end
 
+  defmodule FailOnceMeta do
+    def upsert_checkpoint(conn, checkpoint_key, lsn) do
+      if is_pid(conn) do
+        send(conn, {:checkpoint_attempted, checkpoint_key, lsn})
+      end
+
+      case Process.get({__MODULE__, checkpoint_key}) do
+        nil ->
+          Process.put({__MODULE__, checkpoint_key}, :failed_once)
+          {:error, :forced_checkpoint_failure}
+
+        :failed_once ->
+          {:ok, lsn}
+      end
+    end
+  end
+
   setup do
     {:ok, server} = DuckDBConnection.start_link(name: nil)
     conn = DuckDBConnection.get_conn(server)
@@ -85,6 +102,63 @@ defmodule DuckFeeder.Sink.DuckDBTest do
     assert {:ok, result} = DuckDB.process_batch(context, {"raw", "events"}, batch)
     assert result.checkpoint_key == "append-stream:raw.events"
     assert result.checkpoint_lsn == "0/51"
+  end
+
+  test "chunks large append batches into multiple source statements", %{conn: conn} do
+    context = %{
+      meta_conn: self(),
+      meta_module: FakeMeta,
+      designated_table_by_target: %{{"raw", "events"} => "source-a:raw.events"},
+      designated_table_config_by_target: %{
+        {"raw", "events"} => %{
+          checkpoint_key: "source-a:raw.events",
+          target_schema: "raw",
+          target_table: "events"
+        }
+      },
+      duckdb: %{conn: conn}
+    }
+
+    batch = %{
+      rows: Enum.map(1..501, fn id -> %{"id" => id, "kind" => "page_view"} end),
+      lsn_start: "0/11",
+      lsn_end: "0/12"
+    }
+
+    assert {:ok, result} = DuckDB.process_batch(context, {"raw", "events"}, batch)
+    assert result.row_count == 501
+    assert %{"n" => [501]} = query_map(conn, "SELECT count(*) AS n FROM raw.events")
+  end
+
+  test "does not duplicate duckdb rows when checkpoint persistence fails once", %{conn: conn} do
+    context = %{
+      meta_conn: self(),
+      meta_module: FailOnceMeta,
+      designated_table_by_target: %{{"raw", "events"} => "source-a:raw.events"},
+      designated_table_config_by_target: %{
+        {"raw", "events"} => %{
+          checkpoint_key: "source-a:raw.events",
+          target_schema: "raw",
+          target_table: "events"
+        }
+      },
+      duckdb: %{conn: conn}
+    }
+
+    batch = %{
+      rows: [%{"id" => 1, "kind" => "page_view"}],
+      lsn_start: "0/12",
+      lsn_end: "0/13"
+    }
+
+    assert {:error, :forced_checkpoint_failure} =
+             DuckDB.process_batch(context, {"raw", "events"}, batch)
+
+    assert %{"n" => [1]} = query_map(conn, "SELECT count(*) AS n FROM raw.events")
+
+    assert {:ok, result} = DuckDB.process_batch(context, {"raw", "events"}, batch)
+    assert result.deduped?
+    assert %{"n" => [1]} = query_map(conn, "SELECT count(*) AS n FROM raw.events")
   end
 
   test "applies CDC batches as table operations", %{conn: conn} do
@@ -199,6 +273,76 @@ defmodule DuckFeeder.Sink.DuckDBTest do
              query_map(conn, "SELECT id, name FROM raw.users ORDER BY id")
   end
 
+  test "preserves numeric-looking strings in existing varchar columns during CDC merges", %{
+    conn: conn
+  } do
+    context = %{
+      meta_conn: self(),
+      meta_module: FakeMeta,
+      designated_table_by_target: %{{"raw", "users"} => "source-a:raw.users"},
+      designated_table_config_by_target: %{
+        {"raw", "users"} => %{
+          checkpoint_key: "source-a:raw.users",
+          source_schema: "public",
+          source_table: "users",
+          target_schema: "raw",
+          target_table: "users",
+          primary_keys: ["id"]
+        }
+      },
+      duckdb: %{conn: conn}
+    }
+
+    snapshot_batch = %{
+      rows: [
+        %{"id" => 1, "code" => "seed"}
+      ],
+      lsn_start: "0/26",
+      lsn_end: "0/27"
+    }
+
+    assert {:ok, _} = DuckDB.process_batch(context, {"raw", "users"}, snapshot_batch)
+
+    cdc_batch = %{
+      rows: [
+        cdc_row("U", %{"id" => "1", "code" => "123"}, %{"id" => "1", "code" => "seed"}),
+        cdc_row("I", %{"id" => "2", "code" => "456"})
+      ],
+      lsn_start: "0/27",
+      lsn_end: "0/28"
+    }
+
+    assert {:ok, _} = DuckDB.process_batch(context, {"raw", "users"}, cdc_batch)
+
+    assert %{"id" => [1, 2], "code" => ["123", "456"]} =
+             query_map(conn, "SELECT id, code FROM raw.users ORDER BY id")
+  end
+
+  test "requires an explicit duckdb connection" do
+    context = %{
+      meta_conn: self(),
+      meta_module: FakeMeta,
+      designated_table_by_target: %{{"raw", "events"} => "source-a:raw.events"},
+      designated_table_config_by_target: %{
+        {"raw", "events"} => %{
+          checkpoint_key: "source-a:raw.events",
+          target_schema: "raw",
+          target_table: "events"
+        }
+      },
+      duckdb: %{}
+    }
+
+    batch = %{
+      rows: [%{"id" => 1, "kind" => "page_view"}],
+      lsn_start: "0/30",
+      lsn_end: "0/31"
+    }
+
+    assert {:error, :missing_duckdb_conn} =
+             DuckDB.process_batch(context, {"raw", "events"}, batch)
+  end
+
   test "fails closed on CDC updates without primary keys", %{conn: conn} do
     context = %{
       meta_conn: self(),
@@ -259,6 +403,66 @@ defmodule DuckFeeder.Sink.DuckDBTest do
 
     assert_receive :setup_fun_called
     refute_receive :setup_fun_called
+  end
+
+  test "reruns setup hooks after the duckdb connection dies" do
+    context_base = %{
+      meta_conn: self(),
+      meta_module: FakeMeta,
+      designated_table_by_target: %{{"raw", "events"} => "source-a:raw.events"},
+      designated_table_config_by_target: %{
+        {"raw", "events"} => %{
+          checkpoint_key: "source-a:raw.events",
+          target_schema: "raw",
+          target_table: "events"
+        }
+      }
+    }
+
+    batch = %{
+      rows: [%{"id" => 1, "kind" => "page_view"}],
+      lsn_start: "0/42",
+      lsn_end: "0/43"
+    }
+
+    {:ok, server_one} = DuckDBConnection.start_link(name: nil)
+    conn_one = DuckDBConnection.get_conn(server_one)
+
+    context_one =
+      Map.put(context_base, :duckdb, %{
+        conn: conn_one,
+        setup_sql: ["CREATE SCHEMA IF NOT EXISTS raw"],
+        setup_fun: fn _ ->
+          send(self(), {:setup_fun_called, :one})
+          :ok
+        end
+      })
+
+    assert {:ok, _} = DuckDB.process_batch(context_one, {"raw", "events"}, batch)
+    assert_receive {:setup_fun_called, :one}
+    safe_stop(server_one)
+
+    {:ok, server_two} = DuckDBConnection.start_link(name: nil)
+    conn_two = DuckDBConnection.get_conn(server_two)
+
+    context_two =
+      Map.put(context_base, :duckdb, %{
+        conn: conn_two,
+        setup_sql: ["CREATE SCHEMA IF NOT EXISTS raw"],
+        setup_fun: fn _ ->
+          send(self(), {:setup_fun_called, :two})
+          :ok
+        end
+      })
+
+    on_exit(fn ->
+      safe_stop(server_two)
+    end)
+
+    assert {:ok, _} =
+             DuckDB.process_batch(context_two, {"raw", "events"}, %{batch | lsn_end: "0/44"})
+
+    assert_receive {:setup_fun_called, :two}
   end
 
   defp cdc_row(op, record, old_record \\ %{}) do

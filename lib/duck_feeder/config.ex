@@ -9,7 +9,7 @@ defmodule DuckFeeder.Config do
     postgres_url: [type: :string, required: true],
     slot_name: [type: :string, required: true],
     publication_name: [type: :string, required: true],
-    designated_tables: [type: {:list, :keyword_list}, default: []]
+    designated_tables: [type: {:list, :any}, default: []]
   ]
 
   @designated_table_schema [
