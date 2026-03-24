@@ -278,7 +278,7 @@ Most apps should use the `DuckFeeder.Runtime` wrapper above. For custom orchestr
 
 End-to-end architecture is implemented: **Postgres CDC → Parquet → S3/GCS → DuckLake metadata → DuckDB queries**.
 
-See [`docs/current_status.md`](docs/current_status.md) for the detailed roadmap.
+See [`docs/plan.md`](docs/plan.md) for the current direction.
 
 ## License
 

@@ -374,23 +374,49 @@ defmodule DuckFeeder.RuntimeTest do
   end
 
   test "builds service options from metadata" do
-    storage = %{provider: :s3, bucket: "bucket", adapter: DuckFeeder.Storage.S3}
+    duckdb = %{
+      path:
+        Path.join(
+          System.tmp_dir!(),
+          "duck_feeder_runtime_#{System.unique_integer([:positive])}.duckdb"
+        )
+    }
 
     assert {:ok, opts} =
-             Runtime.service_options(:meta_conn, "source-a", storage,
+             Runtime.service_options(:meta_conn, "source-a", nil,
                meta_module: FakeMeta,
                observer_pid: self(),
                object_prefix: "prefix",
-               committer_module: DuckFeeder.DuckLake.Committer.Noop,
-               committer_opts: [ducklake_sql: ["SELECT 1"]]
+               duckdb: duckdb
              )
 
     assert opts[:designated_tables] != []
-    assert opts[:storage] == storage
+    refute Keyword.has_key?(opts, :storage)
     assert opts[:object_prefix] == "prefix"
+    assert opts[:sink_module] == DuckFeeder.Sink.DuckDB
+    assert opts[:duckdb] == duckdb
     assert opts[:meta_module] == FakeMeta
-    assert opts[:committer_module] == DuckFeeder.DuckLake.Committer.Noop
-    assert opts[:committer_opts] == [ducklake_sql: ["SELECT 1"]]
+  end
+
+  test "builds DuckDB service options from metadata without storage" do
+    duckdb = %{
+      path:
+        Path.join(
+          System.tmp_dir!(),
+          "duck_feeder_runtime_#{System.unique_integer([:positive])}.duckdb"
+        )
+    }
+
+    assert {:ok, opts} =
+             Runtime.service_options(:meta_conn, "source-a", nil,
+               meta_module: FakeMeta,
+               observer_pid: self(),
+               duckdb: duckdb
+             )
+
+    refute Keyword.has_key?(opts, :storage)
+    assert opts[:duckdb] == duckdb
+    assert opts[:sink_module] == DuckFeeder.Sink.DuckDB
   end
 
   test "starts service from metadata" do
@@ -442,6 +468,43 @@ defmodule DuckFeeder.RuntimeTest do
     assert is_pid(cdc_opts[:event_sink])
 
     assert_receive {:fake_service_event, %DuckFeeder.CDC.Event.Relation{id: 1}}
+
+    GenServer.stop(service_pid)
+    Process.exit(cdc_pid, :normal)
+  end
+
+  test "starts streaming runtime stack without storage when DuckDB is configured" do
+    duckdb = %{
+      path:
+        Path.join(
+          System.tmp_dir!(),
+          "duck_feeder_runtime_#{System.unique_integer([:positive])}.duckdb"
+        )
+    }
+
+    assert {:ok, %{service_pid: service_pid, cdc_pid: cdc_pid, start_lsn: "0/20"}} =
+             Runtime.start_stream(:meta_conn, "source-a", nil,
+               meta_module: FakeMeta,
+               service_module: FakeService,
+               cdc_module: FakeCDC,
+               connection_options_module: FakeConnectionOptions,
+               bootstrap_replication?: false,
+               duckdb: duckdb,
+               observer_pid: self(),
+               service_name: nil,
+               cdc_name: nil
+             )
+
+    assert is_pid(service_pid)
+    assert is_pid(cdc_pid)
+
+    assert_receive {:fake_service_start, service_opts}
+    refute Keyword.has_key?(service_opts, :storage)
+    assert service_opts[:duckdb] == duckdb
+    assert service_opts[:sink_module] == DuckFeeder.Sink.DuckDB
+
+    assert_receive {:fake_cdc_start, cdc_opts}
+    assert cdc_opts[:start_lsn] == "0/20"
 
     GenServer.stop(service_pid)
     Process.exit(cdc_pid, :normal)

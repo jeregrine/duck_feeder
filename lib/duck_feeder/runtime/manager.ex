@@ -24,7 +24,7 @@ defmodule DuckFeeder.Runtime.Manager do
   @type option ::
           {:name, GenServer.name()}
           | {:meta_conn, term()}
-          | {:storage_config, map()}
+          | {:storage_config, map() | nil}
           | {:runtime_supervisor_module, module()}
           | {:base_opts, keyword()}
 

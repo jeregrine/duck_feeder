@@ -20,7 +20,7 @@ defmodule DuckFeeder.Runtime.StreamWorker do
           {:name, GenServer.name()}
           | {:meta_conn, term()}
           | {:source_name, String.t()}
-          | {:storage_config, map()}
+          | {:storage_config, map() | nil}
           | {:runtime_opts, keyword()}
           | {:runtime_module, module()}
 

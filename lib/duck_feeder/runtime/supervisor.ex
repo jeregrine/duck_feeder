@@ -9,7 +9,7 @@ defmodule DuckFeeder.Runtime.Supervisor do
           {:name, Supervisor.name()}
           | {:meta_conn, term()}
           | {:source_name, String.t()}
-          | {:storage_config, map()}
+          | {:storage_config, map() | nil}
           | {:runtime_opts, keyword()}
           | {:runtime_module, module()}
           | {:stream_worker_module, module()}
@@ -52,7 +52,7 @@ defmodule DuckFeeder.Runtime.Supervisor do
          runtime_module: Keyword.get(opts, :runtime_module),
          observer_pid: Keyword.get(opts, :observer_pid)
        ]
-       |> Enum.reject(fn {_k, v} -> is_nil(v) end)}
+       |> Enum.reject(fn {key, value} -> is_nil(value) and key != :storage_config end)}
 
     children =
       if Keyword.get(opts, :start_reconciler?, false) do

@@ -48,7 +48,7 @@ defmodule DuckFeeder.MixProject do
       source_url: @source_url,
       extras: [
         "README.md",
-        "docs/current_status.md"
+        "docs/plan.md"
       ]
     ]
   end
@@ -68,8 +68,9 @@ defmodule DuckFeeder.MixProject do
       {:nimble_options, "~> 1.1"},
       {:rustler_precompiled, "~> 0.8"},
       {:rustler, ">= 0.0.0", optional: true},
+      {:adbc, "~> 0.8"},
+      {:jason, "~> 1.4"},
       {:ecto_sql, "~> 3.12", only: :test},
-      {:adbc, "~> 0.8", only: :test},
       {:benchee, "~> 1.3", only: :dev, runtime: false},
       {:ex_doc, "~> 0.38", only: :dev, runtime: false}
     ]

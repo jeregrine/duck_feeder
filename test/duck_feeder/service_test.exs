@@ -26,49 +26,27 @@ defmodule DuckFeeder.ServiceTest do
          checkpoint_lsn: "0/120"
        }}
     end
+
+    def upsert_checkpoint(_conn, _designated_table_id, lsn), do: {:ok, lsn}
   end
 
-  defmodule FakeWriter do
-    @behaviour DuckFeeder.Writer.Adapter
+  defmodule FakeSink do
+    @behaviour DuckFeeder.Sink
 
     @impl true
-    def write_batch(_config, %{rows: rows}, _opts) do
-      path =
-        Path.join(
-          System.tmp_dir!(),
-          "duck_feeder_service_#{System.unique_integer([:positive])}.jsonl"
-        )
-
-      File.write!(path, "{}\n")
+    def process_batch(context, table, batch) do
+      if is_pid(context.meta_conn) do
+        send(context.meta_conn, {:fake_sink_batch, context, table, batch})
+      end
 
       {:ok,
        %{
-         local_path: path,
-         row_count: length(rows),
-         file_size_bytes: File.stat!(path).size,
-         format: :jsonl
+         status: :committed,
+         batch_id: "sink-service",
+         designated_table_id: Map.fetch!(context.designated_table_by_target, table),
+         checkpoint_lsn: batch.lsn_end
        }}
     end
-
-    @impl true
-    def cleanup(_config, %{local_path: path}) do
-      _ = File.rm(path)
-      :ok
-    end
-  end
-
-  defmodule FakeStorage do
-    @behaviour DuckFeeder.Storage.Adapter
-
-    @impl true
-    def put_file(_config, _local_path, _object_ref, _opts),
-      do: {:ok, %{etag: "etag-service", version_id: nil, size: 11}}
-
-    @impl true
-    def head_object(_config, _object_ref), do: {:ok, %{}}
-
-    @impl true
-    def delete_object(_config, _object_ref), do: :ok
   end
 
   test "runs end-to-end from CDC event to processed batch" do
@@ -85,10 +63,8 @@ defmodule DuckFeeder.ServiceTest do
     {:ok, service} =
       Service.start_link(
         designated_tables: designated_tables,
-        meta_module: FakeMeta,
-        meta_conn: :fake_conn,
-        writer: %{adapter: FakeWriter},
-        storage: %{provider: :s3, bucket: "bucket", adapter: FakeStorage},
+        meta_conn: self(),
+        sink_module: FakeSink,
         pipeline_opts: %{max_rows: 1, max_bytes: 10_000, flush_interval_ms: 60_000},
         observer_pid: self()
       )
@@ -107,15 +83,124 @@ defmodule DuckFeeder.ServiceTest do
     assert {:committed, %{xid: 700}} =
              Service.push_event(service, %Event.Commit{xid: 700, end_lsn: "0/120"})
 
-    assert_receive {:duck_feeder_batch_processed, {"raw", "users"}, {:ok, result}, batch}, 1_000
+    assert_receive {:fake_sink_batch, _context, {"raw", "users"}, batch}, 1_000
+    assert_receive {:duck_feeder_batch_processed, {"raw", "users"}, {:ok, result}, ^batch}, 1_000
 
     assert_receive {:duck_feeder_ack_lsn, "0/120"}, 1_000
 
     assert result.status == :committed
-    assert result.batch_id == "batch-service"
+    assert result.batch_id == "sink-service"
     assert batch.row_count == 1
 
     refute Service.in_transaction?(service)
+  end
+
+  test "auto-selects DuckDB sink and starts internal DuckDB connection without legacy storage" do
+    path =
+      Path.join(
+        System.tmp_dir!(),
+        "duck_feeder_service_#{System.unique_integer([:positive])}.duckdb"
+      )
+
+    on_exit(fn ->
+      _ = File.rm(path)
+    end)
+
+    designated_tables = [
+      %{
+        id: 1,
+        source_schema: "public",
+        source_table: "users",
+        target_schema: "raw",
+        target_table: "users",
+        primary_keys: ["id"]
+      }
+    ]
+
+    {:ok, service} =
+      Service.start_link(
+        designated_tables: designated_tables,
+        meta_conn: self(),
+        meta_module: FakeMeta,
+        duckdb: %{path: path},
+        pipeline_opts: %{max_rows: 1, max_bytes: 10_000, flush_interval_ms: 60_000},
+        observer_pid: self()
+      )
+
+    assert :ok = Service.attach_cdc(service, self())
+
+    assert :buffering =
+             Service.push_event(service, %Event.Relation{id: 1, schema: "public", table: "users"})
+
+    assert :buffering =
+             Service.push_event(service, %Event.Begin{xid: 702, final_lsn: "0/100"})
+
+    assert :buffering =
+             Service.push_event(service, %Event.Insert{
+               relation_id: 1,
+               record: %{"id" => 3, "name" => "duck"}
+             })
+
+    assert {:committed, %{xid: 702}} =
+             Service.push_event(service, %Event.Commit{xid: 702, end_lsn: "0/120"})
+
+    assert_receive {:duck_feeder_batch_processed, {"raw", "users"}, {:ok, result}, _batch},
+                   1_000
+
+    assert_receive {:duck_feeder_ack_lsn, "0/120"}, 1_000
+    assert result.status == :committed
+    assert result.checkpoint_lsn == "0/120"
+
+    assert %{"id" => [3], "name" => ["duck"]} =
+             query_duckdb_file(path, "SELECT id, name FROM raw.users ORDER BY id")
+  end
+
+  test "supports custom sink module without legacy storage config" do
+    designated_tables = [
+      %{
+        id: 1,
+        source_schema: "public",
+        source_table: "users",
+        target_schema: "raw",
+        target_table: "users"
+      }
+    ]
+
+    {:ok, service} =
+      Service.start_link(
+        designated_tables: designated_tables,
+        meta_conn: self(),
+        sink_module: FakeSink,
+        pipeline_opts: %{max_rows: 1, max_bytes: 10_000, flush_interval_ms: 60_000},
+        observer_pid: self()
+      )
+
+    assert :ok = Service.attach_cdc(service, self())
+
+    assert :buffering =
+             Service.push_event(service, %Event.Relation{id: 1, schema: "public", table: "users"})
+
+    assert :buffering =
+             Service.push_event(service, %Event.Begin{xid: 702, final_lsn: "0/100"})
+
+    assert :buffering =
+             Service.push_event(service, %Event.Insert{relation_id: 1, record: %{"id" => "3"}})
+
+    assert {:committed, %{xid: 702}} =
+             Service.push_event(service, %Event.Commit{xid: 702, end_lsn: "0/120"})
+
+    assert_receive {:fake_sink_batch, context, {"raw", "users"}, batch}, 1_000
+    refute Map.has_key?(context, :storage)
+    assert context.sink_module == FakeSink
+    assert batch.row_count == 1
+
+    assert_receive {:duck_feeder_batch_processed, {"raw", "users"}, {:ok, result}, _batch},
+                   1_000
+
+    assert_receive {:duck_feeder_ack_lsn, "0/120"}, 1_000
+
+    assert result.status == :committed
+    assert result.batch_id == "sink-service"
   end
 
   test "attach_cdc emits latest checkpoint ack after prior commits" do
@@ -132,10 +217,8 @@ defmodule DuckFeeder.ServiceTest do
     {:ok, service} =
       Service.start_link(
         designated_tables: designated_tables,
-        meta_module: FakeMeta,
-        meta_conn: :fake_conn,
-        writer: %{adapter: FakeWriter},
-        storage: %{provider: :s3, bucket: "bucket", adapter: FakeStorage},
+        meta_conn: self(),
+        sink_module: FakeSink,
         pipeline_opts: %{max_rows: 1, max_bytes: 10_000, flush_interval_ms: 60_000},
         observer_pid: self()
       )
@@ -170,10 +253,8 @@ defmodule DuckFeeder.ServiceTest do
     {:ok, service} =
       Service.start_link(
         designated_tables: [designated_table],
-        meta_module: FakeMeta,
-        meta_conn: :fake_conn,
-        writer: %{adapter: FakeWriter},
-        storage: %{provider: :s3, bucket: "bucket", adapter: FakeStorage},
+        meta_conn: self(),
+        sink_module: FakeSink,
         pipeline_opts: %{max_rows: 1, max_bytes: 10_000, flush_interval_ms: 60_000},
         observer_pid: self()
       )
@@ -205,10 +286,8 @@ defmodule DuckFeeder.ServiceTest do
     {:ok, service} =
       Service.start_link(
         designated_tables: [],
-        meta_module: FakeMeta,
-        meta_conn: :fake_conn,
-        writer: %{adapter: FakeWriter},
-        storage: %{provider: :s3, bucket: "bucket", adapter: FakeStorage},
+        meta_conn: self(),
+        sink_module: FakeSink,
         observer_pid: self()
       )
 
@@ -217,5 +296,26 @@ defmodule DuckFeeder.ServiceTest do
 
     assert {:error, :change_outside_transaction} =
              Service.push_event(service, %Event.Insert{relation_id: 1, record: %{}})
+  end
+
+  defp query_duckdb_file(path, sql) do
+    {:ok, db} = Adbc.Database.start_link(driver: :duckdb, path: path)
+    {:ok, conn} = Adbc.Connection.start_link(database: db)
+
+    try do
+      conn
+      |> Adbc.Connection.query!(sql)
+      |> Adbc.Result.to_map()
+    after
+      safe_stop(conn)
+      safe_stop(db)
+    end
+  end
+
+  defp safe_stop(pid) when is_pid(pid) do
+    _ = GenServer.stop(pid)
+    :ok
+  catch
+    :exit, _reason -> :ok
   end
 end

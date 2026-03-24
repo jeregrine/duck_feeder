@@ -18,7 +18,7 @@ defmodule DuckFeeder do
           |<----------- {:duck_feeder_batch, ...} -----------|
           |
           v
-      BatchProcessor (write -> upload -> metadata commit)
+      Sink (durable downstream commit)
           |
           v
       checkpoint_lsn persisted in Postgres
@@ -34,7 +34,7 @@ defmodule DuckFeeder do
       AppendStream -> TablePipeline (flush)
           |
           v
-      BatchProcessor (shared write/upload/commit path)
+      Sink (shared downstream commit path)
 
   Use the delegates in this module when integrating DuckFeeder into your OTP app.
   """
@@ -54,13 +54,7 @@ defmodule DuckFeeder do
   defdelegate runtime_child_spec_from_config(meta_conn, config, opts \\ []),
     to: DuckFeeder.Integration
 
-  defdelegate write_batch(writer_config, batch, opts \\ []), to: DuckFeeder.Writer
-
-  defdelegate cleanup_written_batch(writer_config, write_result),
-    to: DuckFeeder.Writer,
-    as: :cleanup
-
-  defdelegate process_batch(context, table, batch), to: DuckFeeder.BatchProcessor
+  defdelegate process_batch(context, table, batch), to: DuckFeeder.Sink
 
   defdelegate service_options(meta_conn, source_name, storage_config, opts \\ []),
     to: DuckFeeder.Runtime
@@ -97,10 +91,6 @@ defmodule DuckFeeder do
 
   defdelegate start_cdc_connection(opts), to: DuckFeeder.CDC.Connection, as: :start_link
 
-  defdelegate reconcile(context, opts \\ []), to: DuckFeeder.Reconciler
-  defdelegate start_reconciler(opts), to: DuckFeeder.Reconciler.Worker, as: :start_link
-  defdelegate run_reconcile_once(server), to: DuckFeeder.Reconciler.Worker, as: :run_once
-
   defdelegate start_telemetry_forwarder(opts),
     to: DuckFeeder.TelemetryForwarder,
     as: :start_link
@@ -108,10 +98,4 @@ defmodule DuckFeeder do
   defdelegate flush_telemetry_forwarder(server),
     to: DuckFeeder.TelemetryForwarder,
     as: :flush_summaries
-
-  defdelegate put_file(storage_config, local_path, relative_key, opts \\ []),
-    to: DuckFeeder.Storage
-
-  defdelegate head_object(storage_config, relative_key), to: DuckFeeder.Storage
-  defdelegate delete_object(storage_config, relative_key), to: DuckFeeder.Storage
 end

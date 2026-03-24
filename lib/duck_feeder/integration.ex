@@ -5,9 +5,9 @@ defmodule DuckFeeder.Integration do
 
   alias DuckFeeder.{Config, Runtime}
 
-  @spec runtime_child_spec(term(), String.t(), map(), keyword()) :: Supervisor.child_spec()
+  @spec runtime_child_spec(term(), String.t(), map() | nil, keyword()) :: Supervisor.child_spec()
   def runtime_child_spec(meta_conn, source_name, storage_config, opts \\ [])
-      when is_binary(source_name) and is_map(storage_config) do
+      when is_binary(source_name) do
     child_opts = [
       name: Keyword.get(opts, :name),
       meta_conn: meta_conn,
@@ -22,7 +22,9 @@ defmodule DuckFeeder.Integration do
       storage_module: Keyword.get(opts, :storage_module)
     ]
 
-    Runtime.Supervisor.child_spec(Enum.reject(child_opts, fn {_k, v} -> is_nil(v) end))
+    Runtime.Supervisor.child_spec(
+      Enum.reject(child_opts, fn {key, value} -> is_nil(value) and key != :storage_config end)
+    )
   end
 
   @spec runtime_child_spec_from_config(term(), map() | keyword(), keyword()) ::

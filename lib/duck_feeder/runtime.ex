@@ -35,7 +35,7 @@ defmodule DuckFeeder.Runtime do
   and manage stream startup as a supervised child.
   """
 
-  alias DuckFeeder.{Config, Meta, Service}
+  alias DuckFeeder.{Config, Meta, Service, Sink}
   alias DuckFeeder.CDC.{Bootstrap, Connection, ConnectionOptions, Lsn}
 
   @default_reconnect_backoff 1_000
@@ -339,13 +339,41 @@ defmodule DuckFeeder.Runtime do
 
   defp truthy?(value), do: value in [true, 1, "1", "true", true]
 
-  @spec service_options(pid(), String.t(), map(), keyword()) ::
+  defp resolve_sink_module_option(opts) when is_list(opts) do
+    sink_module =
+      Keyword.get(opts, :sink_module) ||
+        implied_sink_module_from_duckdb(Keyword.get(opts, :duckdb))
+
+    Sink.normalize_module(sink_module)
+  end
+
+  defp normalize_storage_config(storage_config, sink_module) when is_atom(sink_module) do
+    _ = sink_module
+
+    case storage_config do
+      storage when is_map(storage) ->
+        {:ok, storage}
+
+      nil ->
+        {:ok, nil}
+
+      other ->
+        {:error, {:invalid_option, :storage, other}}
+    end
+  end
+
+  defp implied_sink_module_from_duckdb(nil), do: nil
+  defp implied_sink_module_from_duckdb(_duckdb), do: DuckFeeder.Sink.DuckDB
+
+  @spec service_options(pid(), String.t(), map() | nil, keyword()) ::
           {:ok, keyword()} | {:error, term()}
   def service_options(meta_conn, source_name, storage_config, opts \\ [])
-      when is_binary(source_name) and is_map(storage_config) do
+      when is_binary(source_name) do
     meta_module = Keyword.get(opts, :meta_module, Meta)
 
-    with {:ok, source} <- meta_module.get_source(meta_conn, source_name),
+    with {:ok, sink_module} <- resolve_sink_module_option(opts),
+         {:ok, storage} <- normalize_storage_config(storage_config, sink_module),
+         {:ok, source} <- meta_module.get_source(meta_conn, source_name),
          {:ok, designated_tables} <-
            meta_module.list_designated_tables(meta_conn, source_id: source.id) do
       {:ok,
@@ -353,8 +381,10 @@ defmodule DuckFeeder.Runtime do
          name: Keyword.get(opts, :name),
          designated_tables: designated_tables,
          meta_conn: meta_conn,
-         storage: storage_config,
+         storage: storage,
          writer: Keyword.get(opts, :writer, %{}),
+         duckdb: Keyword.get(opts, :duckdb),
+         sink_module: sink_module,
          committer_module: Keyword.get(opts, :committer_module),
          committer_opts: Keyword.get(opts, :committer_opts),
          object_prefix: Keyword.get(opts, :object_prefix, source.name),
@@ -369,7 +399,7 @@ defmodule DuckFeeder.Runtime do
     end
   end
 
-  @spec start_service(pid(), String.t(), map(), keyword()) ::
+  @spec start_service(pid(), String.t(), map() | nil, keyword()) ::
           GenServer.on_start() | {:error, term()}
   def start_service(meta_conn, source_name, storage_config, opts \\ []) do
     with {:ok, service_opts} <- service_options(meta_conn, source_name, storage_config, opts) do
@@ -377,7 +407,7 @@ defmodule DuckFeeder.Runtime do
     end
   end
 
-  @spec start_stream(pid(), String.t(), map(), keyword()) ::
+  @spec start_stream(pid(), String.t(), map() | nil, keyword()) ::
           {:ok, %{service_pid: pid(), cdc_pid: pid(), start_lsn: String.t(), source: map()}}
           | {:error, term()}
   def start_stream(meta_conn, source_name, storage_config, opts \\ []) do
@@ -386,7 +416,9 @@ defmodule DuckFeeder.Runtime do
     cdc_module = Keyword.get(opts, :cdc_module, Connection)
     connection_options_module = Keyword.get(opts, :connection_options_module, ConnectionOptions)
 
-    with {:ok, source} <- meta_module.get_source(meta_conn, source_name),
+    with {:ok, sink_module} <- resolve_sink_module_option(opts),
+         {:ok, storage} <- normalize_storage_config(storage_config, sink_module),
+         {:ok, source} <- meta_module.get_source(meta_conn, source_name),
          {:ok, designated_tables} <-
            meta_module.list_designated_tables(meta_conn, source_id: source.id),
          {:ok, slot_name} <- require_source_field(source, :slot_name),
@@ -427,7 +459,8 @@ defmodule DuckFeeder.Runtime do
                meta_conn,
                source,
                designated_tables,
-               storage_config,
+               storage,
+               sink_module,
                meta_module,
                with_snapshot_lsn_start(opts, snapshot_replay_plan.snapshot_lsn_start)
              )
@@ -500,6 +533,7 @@ defmodule DuckFeeder.Runtime do
          source,
          designated_tables,
          storage_config,
+         sink_module,
          meta_module,
          opts
        ) do
@@ -509,6 +543,8 @@ defmodule DuckFeeder.Runtime do
       meta_conn: meta_conn,
       storage: storage_config,
       writer: Keyword.get(opts, :writer, %{}),
+      duckdb: Keyword.get(opts, :duckdb),
+      sink_module: sink_module,
       committer_module: Keyword.get(opts, :committer_module),
       committer_opts: Keyword.get(opts, :committer_opts),
       object_prefix: Keyword.get(opts, :object_prefix, source.name),
