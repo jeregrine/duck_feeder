@@ -23,7 +23,6 @@ defmodule DuckFeeder.Sink.DuckDB do
 
   @behaviour DuckFeeder.Sink
 
-  alias DuckFeeder.DesignatedTable
   alias DuckFeeder.Meta
   alias DuckFeeder.DuckDB.Client, as: DuckDBClient
   alias DuckFeeder.DuckDB.Connection, as: DuckDBConnection
@@ -292,11 +291,11 @@ defmodule DuckFeeder.Sink.DuckDB do
     Enum.reduce(rows, {[], []}, fn row, {delete_acc, upsert_acc} ->
       case op_code(row) do
         op when op in ["I", "R"] ->
-          {delete_acc, [normalize_row_map(fetch_map_value(row, :_record, %{})) | upsert_acc]}
+          {delete_acc, [normalize_cdc_row_map(fetch_map_value(row, :_record, %{})) | upsert_acc]}
 
         "U" ->
-          record = normalize_row_map(fetch_map_value(row, :_record, %{}))
-          old_record = normalize_row_map(fetch_map_value(row, :_old_record, %{}))
+          record = normalize_cdc_row_map(fetch_map_value(row, :_record, %{}))
+          old_record = normalize_cdc_row_map(fetch_map_value(row, :_old_record, %{}))
 
           delete_acc =
             if primary_key_changed?(record, old_record, primary_keys) do
@@ -308,7 +307,7 @@ defmodule DuckFeeder.Sink.DuckDB do
           {delete_acc, [record | upsert_acc]}
 
         "D" ->
-          old_record = normalize_row_map(fetch_map_value(row, :_old_record, %{}))
+          old_record = normalize_cdc_row_map(fetch_map_value(row, :_old_record, %{}))
           {[slice_keys(old_record, primary_keys) | delete_acc], upsert_acc}
 
         "T" ->
@@ -547,7 +546,7 @@ defmodule DuckFeeder.Sink.DuckDB do
 
   defp checkpoint_key(context, table, designated_table) do
     checkpoint_key =
-      case DesignatedTable.checkpoint_key(designated_table) do
+      case fetch_map_value(designated_table, :checkpoint_key, nil) do
         value when is_binary(value) and value != "" -> value
         _ -> Map.get(context, :designated_table_by_target, %{}) |> Map.get(table)
       end
@@ -556,12 +555,6 @@ defmodule DuckFeeder.Sink.DuckDB do
       value when is_binary(value) and value != "" -> {:ok, value}
       _ -> {:error, {:unknown_target_table, table}}
     end
-  rescue
-    ArgumentError ->
-      case Map.get(context, :designated_table_by_target, %{}) |> Map.get(table) do
-        value when is_binary(value) and value != "" -> {:ok, value}
-        _ -> {:error, {:unknown_target_table, table}}
-      end
   end
 
   defp context_catalog(context) do
@@ -619,6 +612,38 @@ defmodule DuckFeeder.Sink.DuckDB do
   end
 
   defp normalize_row_map(_other), do: %{}
+
+  defp normalize_cdc_row_map(map) when is_map(map) do
+    map
+    |> Enum.map(fn {key, value} -> {to_string(key), normalize_cdc_value(value)} end)
+    |> Map.new()
+  end
+
+  defp normalize_cdc_row_map(_other), do: %{}
+
+  defp normalize_cdc_value(value) when is_binary(value) do
+    cond do
+      value == "true" ->
+        true
+
+      value == "false" ->
+        false
+
+      true ->
+        case Integer.parse(value) do
+          {int, ""} ->
+            int
+
+          _ ->
+            case Float.parse(value) do
+              {float, ""} -> float
+              _ -> value
+            end
+        end
+    end
+  end
+
+  defp normalize_cdc_value(value), do: value
 
   defp fetch_row_value(map, key) when is_map(map) and is_binary(key) do
     cond do

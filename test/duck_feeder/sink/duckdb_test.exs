@@ -61,6 +61,32 @@ defmodule DuckFeeder.Sink.DuckDBTest do
              query_map(conn, "SELECT id, kind FROM raw.events ORDER BY id")
   end
 
+  test "falls back to context checkpoint mapping when designated table config omits checkpoint key",
+       %{conn: conn} do
+    context = %{
+      meta_conn: self(),
+      meta_module: FakeMeta,
+      designated_table_by_target: %{{"raw", "events"} => "append-stream:raw.events"},
+      designated_table_config_by_target: %{
+        {"raw", "events"} => %{
+          target_schema: "raw",
+          target_table: "events"
+        }
+      },
+      duckdb: %{conn: conn}
+    }
+
+    batch = %{
+      rows: [%{"id" => 1, "kind" => "page_view"}],
+      lsn_start: "0/50",
+      lsn_end: "0/51"
+    }
+
+    assert {:ok, result} = DuckDB.process_batch(context, {"raw", "events"}, batch)
+    assert result.checkpoint_key == "append-stream:raw.events"
+    assert result.checkpoint_lsn == "0/51"
+  end
+
   test "applies CDC batches as table operations", %{conn: conn} do
     context = %{
       meta_conn: self(),
@@ -125,6 +151,52 @@ defmodule DuckFeeder.Sink.DuckDBTest do
 
     assert truncate_result.operation_counts == %{truncate: 1, deletes: 0, upserts: 0}
     assert %{"n" => [0]} = query_map(conn, "SELECT count(*) AS n FROM raw.users")
+  end
+
+  test "applies CDC batches after snapshot-created numeric columns", %{conn: conn} do
+    context = %{
+      meta_conn: self(),
+      meta_module: FakeMeta,
+      designated_table_by_target: %{{"raw", "users"} => "source-a:raw.users"},
+      designated_table_config_by_target: %{
+        {"raw", "users"} => %{
+          checkpoint_key: "source-a:raw.users",
+          source_schema: "public",
+          source_table: "users",
+          target_schema: "raw",
+          target_table: "users",
+          primary_keys: ["id"]
+        }
+      },
+      duckdb: %{conn: conn}
+    }
+
+    snapshot_batch = %{
+      rows: [
+        %{"id" => 1, "name" => "alice"},
+        %{"id" => 2, "name" => "bob"}
+      ],
+      lsn_start: "0/24",
+      lsn_end: "0/25"
+    }
+
+    assert {:ok, _} = DuckDB.process_batch(context, {"raw", "users"}, snapshot_batch)
+
+    cdc_batch = %{
+      rows: [
+        cdc_row("U", %{"id" => "1", "name" => "alice-2"}, %{"id" => "1", "name" => "alice"}),
+        cdc_row("D", %{}, %{"id" => "2", "name" => "bob"}),
+        cdc_row("I", %{"id" => "3", "name" => "carol"})
+      ],
+      lsn_start: "0/25",
+      lsn_end: "0/26"
+    }
+
+    assert {:ok, result} = DuckDB.process_batch(context, {"raw", "users"}, cdc_batch)
+    assert result.operation_counts == %{truncate: 0, deletes: 1, upserts: 2}
+
+    assert %{"id" => [1, 3], "name" => ["alice-2", "carol"]} =
+             query_map(conn, "SELECT id, name FROM raw.users ORDER BY id")
   end
 
   test "fails closed on CDC updates without primary keys", %{conn: conn} do
