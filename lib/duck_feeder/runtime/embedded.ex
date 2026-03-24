@@ -100,6 +100,10 @@ defmodule DuckFeeder.Runtime.Embedded do
   defp boot_runtime(module, otp_app, config) do
     with {:ok, resolved} <- DuckFeeder.Runtime.resolve_app_config(config) do
       if resolved.enabled? do
+        runtime_opts =
+          resolved.runtime_opts ++
+            [source: resolved.source, designated_tables: resolved.designated_tables]
+
         with {:ok, meta_conn} <-
                start_metadata_connection(resolved.validated_config.metadata.postgres_url),
              {:ok, _seed} <-
@@ -111,7 +115,7 @@ defmodule DuckFeeder.Runtime.Embedded do
                  meta_conn: meta_conn,
                  source_name: resolved.source_name,
                  duckdb_config: resolved.duckdb_config,
-                 runtime_opts: resolved.runtime_opts
+                 runtime_opts: runtime_opts
                ) do
           monitors = %{
             Process.monitor(meta_conn) => meta_conn,

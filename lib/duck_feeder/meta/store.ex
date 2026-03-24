@@ -2,91 +2,37 @@ defmodule DuckFeeder.Meta.Store do
   @moduledoc """
   PostgreSQL-backed control-plane store (`duckfeeder_meta`).
 
-  This module keeps the checkpoint and batch state machine persistence in Postgres.
+  This module keeps only the durable runtime state needed for restart
+  correctness in Postgres.
   """
 
   alias DuckFeeder.CDC.Lsn
-  alias DuckFeeder.Meta.{BatchState, SQL}
+  alias DuckFeeder.Meta.SQL
 
-  @register_source_sql """
-  INSERT INTO duckfeeder_meta.sources
-    (name, connection_info, slot_name, publication_name, status, inserted_at, updated_at)
-  VALUES
-    ($1, $2, $3, $4, $5, now(), now())
-  ON CONFLICT (name) DO UPDATE SET
-    connection_info = EXCLUDED.connection_info,
-    slot_name = EXCLUDED.slot_name,
-    publication_name = EXCLUDED.publication_name,
-    status = EXCLUDED.status,
-    updated_at = now()
-  RETURNING id
-  """
-
-  @register_designated_table_sql """
-  INSERT INTO duckfeeder_meta.designated_tables
-    (
-      source_id,
-      source_schema,
-      source_table,
-      target_schema,
-      target_table,
-      mode,
-      primary_keys,
-      partition_config,
-      inserted_at,
-      updated_at
-    )
-  VALUES
-    ($1, $2, $3, $4, $5, $6, $7, $8, now(), now())
-  ON CONFLICT (source_id, source_schema, source_table) DO UPDATE SET
-    target_schema = EXCLUDED.target_schema,
-    target_table = EXCLUDED.target_table,
-    mode = EXCLUDED.mode,
-    primary_keys = EXCLUDED.primary_keys,
-    partition_config = EXCLUDED.partition_config,
-    updated_at = now()
-  RETURNING id
-  """
-
-  @get_source_by_name_sql """
-  SELECT id, name, status, connection_info, slot_name, publication_name
-  FROM duckfeeder_meta.sources
-  WHERE name = $1
-  """
-
-  @list_designated_tables_sql """
-  SELECT id, source_id, source_schema, source_table, target_schema, target_table, mode, primary_keys, partition_config
-  FROM duckfeeder_meta.designated_tables
-  WHERE ($1::bigint IS NULL OR source_id = $1)
-  ORDER BY id
-  """
-
-  @fetch_source_start_lsn_sql """
-  SELECT COALESCE(MIN(checkpoints.last_committed_lsn)::text, $2::text)
-  FROM duckfeeder_meta.designated_tables designated_tables
-  LEFT JOIN duckfeeder_meta.checkpoints checkpoints
-    ON checkpoints.designated_table_id = designated_tables.id
-  WHERE designated_tables.source_id = $1
+  @fetch_start_lsn_sql """
+  SELECT COALESCE(MIN(last_committed_lsn)::text, $2::text)
+  FROM duckfeeder_meta.checkpoints
+  WHERE checkpoint_key = ANY($1::text[])
   """
 
   @fetch_checkpoint_sql """
   SELECT last_committed_lsn::text
   FROM duckfeeder_meta.checkpoints
-  WHERE designated_table_id = $1
+  WHERE checkpoint_key = $1
   """
 
   @fetch_snapshot_handoff_sql """
   SELECT state, boundary_lsn::text, started_at, completed_at, updated_at
   FROM duckfeeder_meta.snapshot_handoffs
-  WHERE source_id = $1
+  WHERE source_name = $1
   """
 
   @upsert_snapshot_handoff_pending_sql """
   INSERT INTO duckfeeder_meta.snapshot_handoffs
-    (source_id, state, boundary_lsn, started_at, completed_at, updated_at)
+    (source_name, state, boundary_lsn, started_at, completed_at, updated_at)
   VALUES
     ($1, 'pending', $2::pg_lsn, now(), NULL, now())
-  ON CONFLICT (source_id) DO UPDATE SET
+  ON CONFLICT (source_name) DO UPDATE SET
     state = 'pending',
     boundary_lsn = EXCLUDED.boundary_lsn,
     started_at = now(),
@@ -97,10 +43,10 @@ defmodule DuckFeeder.Meta.Store do
 
   @upsert_snapshot_handoff_complete_sql """
   INSERT INTO duckfeeder_meta.snapshot_handoffs
-    (source_id, state, boundary_lsn, started_at, completed_at, updated_at)
+    (source_name, state, boundary_lsn, started_at, completed_at, updated_at)
   VALUES
     ($1, 'complete', $2::pg_lsn, now(), now(), now())
-  ON CONFLICT (source_id) DO UPDATE SET
+  ON CONFLICT (source_name) DO UPDATE SET
     state = 'complete',
     boundary_lsn = EXCLUDED.boundary_lsn,
     completed_at = now(),
@@ -110,94 +56,16 @@ defmodule DuckFeeder.Meta.Store do
 
   @delete_snapshot_handoff_sql """
   DELETE FROM duckfeeder_meta.snapshot_handoffs
-  WHERE source_id = $1
+  WHERE source_name = $1
   """
 
   @upsert_checkpoint_sql """
-  INSERT INTO duckfeeder_meta.checkpoints (designated_table_id, last_committed_lsn, updated_at)
+  INSERT INTO duckfeeder_meta.checkpoints (checkpoint_key, last_committed_lsn, updated_at)
   VALUES ($1, $2::pg_lsn, now())
-  ON CONFLICT (designated_table_id) DO UPDATE SET
+  ON CONFLICT (checkpoint_key) DO UPDATE SET
     last_committed_lsn = EXCLUDED.last_committed_lsn,
     updated_at = now()
   RETURNING last_committed_lsn::text
-  """
-
-  @insert_batch_sql """
-  INSERT INTO duckfeeder_meta.batches
-    (batch_id, designated_table_id, lsn_start, lsn_end, state, error_message, retry_count, inserted_at, updated_at)
-  VALUES
-    ($1, $2, $3::pg_lsn, $4::pg_lsn, $5, $6, $7, now(), now())
-  ON CONFLICT (batch_id) DO NOTHING
-  RETURNING state
-  """
-
-  @get_batch_state_sql """
-  SELECT state
-  FROM duckfeeder_meta.batches
-  WHERE batch_id = $1
-  """
-
-  @lock_batch_state_sql """
-  SELECT state
-  FROM duckfeeder_meta.batches
-  WHERE batch_id = $1
-  FOR UPDATE
-  """
-
-  @lock_batch_for_commit_sql """
-  SELECT designated_table_id, lsn_end::text, state
-  FROM duckfeeder_meta.batches
-  WHERE batch_id = $1
-  FOR UPDATE
-  """
-
-  @upsert_checkpoint_max_sql """
-  INSERT INTO duckfeeder_meta.checkpoints (designated_table_id, last_committed_lsn, updated_at)
-  VALUES ($1, $2::pg_lsn, now())
-  ON CONFLICT (designated_table_id) DO UPDATE SET
-    last_committed_lsn = GREATEST(duckfeeder_meta.checkpoints.last_committed_lsn, EXCLUDED.last_committed_lsn),
-    updated_at = now()
-  RETURNING last_committed_lsn::text
-  """
-
-  @transition_batch_sql """
-  UPDATE duckfeeder_meta.batches
-  SET
-    state = $2,
-    error_message = $3,
-    retry_count = retry_count + CASE WHEN $2 = 'failed' THEN 1 ELSE 0 END,
-    updated_at = now()
-  WHERE batch_id = $1
-  RETURNING state
-  """
-
-  @insert_batch_file_sql """
-  INSERT INTO duckfeeder_meta.batch_files
-    (batch_id, object_key, row_count, file_size, checksum, etag, inserted_at)
-  VALUES
-    ($1, $2, $3, $4, $5, $6, now())
-  ON CONFLICT (batch_id, object_key) DO UPDATE SET
-    row_count = EXCLUDED.row_count,
-    file_size = EXCLUDED.file_size,
-    checksum = EXCLUDED.checksum,
-    etag = EXCLUDED.etag
-  RETURNING id
-  """
-
-  @list_batch_files_sql """
-  SELECT id, batch_id, object_key, row_count, file_size, checksum, etag
-  FROM duckfeeder_meta.batch_files
-  WHERE batch_id = $1
-  ORDER BY id
-  """
-
-  @list_stale_batches_sql """
-  SELECT batch_id, designated_table_id, lsn_start::text, lsn_end::text, state, updated_at
-  FROM duckfeeder_meta.batches
-  WHERE state = ANY($1::text[])
-    AND updated_at < $2::timestamptz
-    AND ($3::bigint IS NULL OR designated_table_id = $3)
-  ORDER BY updated_at ASC
   """
 
   @type conn :: pid()
@@ -213,123 +81,19 @@ defmodule DuckFeeder.Meta.Store do
     end)
   end
 
-  @spec register_source(conn(), map()) :: {:ok, pos_integer()} | {:error, term()}
-  def register_source(conn, attrs) when is_map(attrs) do
-    with {:ok, name} <- fetch_required(attrs, :name),
-         {:ok, status} <- normalize_source_status(get_attr(attrs, :status, "active")),
-         {:ok, result} <-
-           query(
-             conn,
-             @register_source_sql,
-             [
-               name,
-               get_attr(attrs, :connection_info, %{}),
-               get_attr(attrs, :slot_name),
-               get_attr(attrs, :publication_name),
-               status
-             ]
-           ),
-         {:ok, id} <- single_value(result) do
-      {:ok, id}
-    end
-  end
-
-  @spec register_designated_table(conn(), map()) :: {:ok, pos_integer()} | {:error, term()}
-  def register_designated_table(conn, attrs) when is_map(attrs) do
-    with {:ok, source_id} <- fetch_required(attrs, :source_id),
-         {:ok, source_schema} <- fetch_required(attrs, :source_schema),
-         {:ok, source_table} <- fetch_required(attrs, :source_table),
-         {:ok, target_schema} <- fetch_required(attrs, :target_schema),
-         {:ok, target_table} <- fetch_required(attrs, :target_table),
-         {:ok, mode} <- normalize_mode(get_attr(attrs, :mode, "cdc_changelog")),
-         {:ok, result} <-
-           query(
-             conn,
-             @register_designated_table_sql,
-             [
-               source_id,
-               source_schema,
-               source_table,
-               target_schema,
-               target_table,
-               mode,
-               get_attr(attrs, :primary_keys, []),
-               get_attr(attrs, :partition_config, %{})
-             ]
-           ),
-         {:ok, id} <- single_value(result) do
-      {:ok, id}
-    end
-  end
-
-  @spec get_source(conn(), String.t()) :: {:ok, map()} | {:error, term()}
-  def get_source(conn, source_name) when is_binary(source_name) do
-    with {:ok, result} <- query(conn, @get_source_by_name_sql, [source_name]) do
-      case result.rows do
-        [[id, name, status, connection_info, slot_name, publication_name]] ->
-          {:ok,
-           %{
-             id: id,
-             name: name,
-             status: status,
-             connection_info: connection_info,
-             slot_name: slot_name,
-             publication_name: publication_name
-           }}
-
-        [] ->
-          {:error, {:source_not_found, source_name}}
-      end
-    end
-  end
-
-  @spec list_designated_tables(conn(), keyword()) :: {:ok, [map()]} | {:error, term()}
-  def list_designated_tables(conn, opts \\ []) do
-    source_id = Keyword.get(opts, :source_id)
-
-    with {:ok, result} <- query(conn, @list_designated_tables_sql, [source_id]) do
-      tables =
-        Enum.map(result.rows, fn [
-                                   id,
-                                   source_id,
-                                   source_schema,
-                                   source_table,
-                                   target_schema,
-                                   target_table,
-                                   mode,
-                                   primary_keys,
-                                   partition_config
-                                 ] ->
-          %{
-            id: id,
-            source_id: source_id,
-            source_schema: source_schema,
-            source_table: source_table,
-            target_schema: target_schema,
-            target_table: target_table,
-            mode: mode,
-            primary_keys: primary_keys,
-            partition_config: partition_config
-          }
-        end)
-
-      {:ok, tables}
-    end
-  end
-
-  @spec fetch_source_start_lsn(conn(), pos_integer(), String.t()) ::
-          {:ok, String.t()} | {:error, term()}
-  def fetch_source_start_lsn(conn, source_id, default_lsn \\ "0/0")
-      when is_integer(source_id) and source_id > 0 and is_binary(default_lsn) do
-    with {:ok, result} <- query(conn, @fetch_source_start_lsn_sql, [source_id, default_lsn]),
+  @spec fetch_start_lsn(conn(), [String.t()], String.t()) :: {:ok, String.t()} | {:error, term()}
+  def fetch_start_lsn(conn, checkpoint_keys, default_lsn \\ "0/0")
+      when is_list(checkpoint_keys) and is_binary(default_lsn) do
+    with {:ok, normalized_keys} <- normalize_checkpoint_keys(checkpoint_keys),
+         {:ok, result} <- query(conn, @fetch_start_lsn_sql, [normalized_keys, default_lsn]),
          {:ok, lsn} <- single_value(result) do
       {:ok, lsn}
     end
   end
 
-  @spec fetch_checkpoint(conn(), pos_integer()) :: {:ok, String.t()} | {:error, term()}
-  def fetch_checkpoint(conn, designated_table_id) do
-    with {:ok, result} <- query(conn, @fetch_checkpoint_sql, [designated_table_id]) do
+  @spec fetch_checkpoint(conn(), String.t()) :: {:ok, String.t()} | {:error, term()}
+  def fetch_checkpoint(conn, checkpoint_key) when is_binary(checkpoint_key) do
+    with {:ok, result} <- query(conn, @fetch_checkpoint_sql, [checkpoint_key]) do
       case result.rows do
         [[lsn]] -> {:ok, lsn}
         [] -> {:ok, "0/0"}
@@ -337,25 +101,26 @@ defmodule DuckFeeder.Meta.Store do
     end
   end
 
-  @spec upsert_checkpoint(conn(), pos_integer(), String.t()) ::
-          {:ok, String.t()} | {:error, term()}
-  def upsert_checkpoint(conn, designated_table_id, lsn) when is_binary(lsn) do
+  @spec upsert_checkpoint(conn(), String.t(), String.t()) :: {:ok, String.t()} | {:error, term()}
+  def upsert_checkpoint(conn, checkpoint_key, lsn)
+      when is_binary(checkpoint_key) and is_binary(lsn) do
     with {:ok, lsn_param} <- lsn_param(lsn),
-         {:ok, result} <- query(conn, @upsert_checkpoint_sql, [designated_table_id, lsn_param]),
+         {:ok, result} <- query(conn, @upsert_checkpoint_sql, [checkpoint_key, lsn_param]),
          {:ok, committed_lsn} <- single_value(result) do
       {:ok, committed_lsn}
     end
   end
 
-  @spec fetch_snapshot_handoff(conn(), pos_integer()) :: {:ok, map() | nil} | {:error, term()}
-  def fetch_snapshot_handoff(conn, source_id) when is_integer(source_id) and source_id > 0 do
-    with {:ok, result} <- query(conn, @fetch_snapshot_handoff_sql, [source_id]) do
+  @spec fetch_snapshot_handoff(conn(), String.t()) :: {:ok, map() | nil} | {:error, term()}
+  def fetch_snapshot_handoff(conn, source_name)
+      when is_binary(source_name) and source_name != "" do
+    with {:ok, result} <- query(conn, @fetch_snapshot_handoff_sql, [source_name]) do
       case result.rows do
         [[state, boundary_lsn, started_at, completed_at, updated_at]] ->
           with {:ok, normalized_state} <- snapshot_handoff_state_from_db(state) do
             {:ok,
              %{
-               source_id: source_id,
+               source_name: source_name,
                state: normalized_state,
                boundary_lsn: boundary_lsn,
                started_at: started_at,
@@ -370,291 +135,38 @@ defmodule DuckFeeder.Meta.Store do
     end
   end
 
-  @spec mark_snapshot_handoff_pending(conn(), pos_integer(), String.t()) ::
+  @spec mark_snapshot_handoff_pending(conn(), String.t(), String.t()) ::
           {:ok, String.t()} | {:error, term()}
-  def mark_snapshot_handoff_pending(conn, source_id, boundary_lsn)
-      when is_integer(source_id) and source_id > 0 and is_binary(boundary_lsn) do
+  def mark_snapshot_handoff_pending(conn, source_name, boundary_lsn)
+      when is_binary(source_name) and source_name != "" and is_binary(boundary_lsn) do
     with {:ok, boundary_param} <- lsn_param(boundary_lsn),
          {:ok, result} <-
-           query(conn, @upsert_snapshot_handoff_pending_sql, [source_id, boundary_param]),
+           query(conn, @upsert_snapshot_handoff_pending_sql, [source_name, boundary_param]),
          {:ok, committed_lsn} <- single_value(result) do
       {:ok, committed_lsn}
     end
   end
 
-  @spec mark_snapshot_handoff_complete(conn(), pos_integer(), String.t()) ::
+  @spec mark_snapshot_handoff_complete(conn(), String.t(), String.t()) ::
           {:ok, String.t()} | {:error, term()}
-  def mark_snapshot_handoff_complete(conn, source_id, boundary_lsn)
-      when is_integer(source_id) and source_id > 0 and is_binary(boundary_lsn) do
+  def mark_snapshot_handoff_complete(conn, source_name, boundary_lsn)
+      when is_binary(source_name) and source_name != "" and is_binary(boundary_lsn) do
     with {:ok, boundary_param} <- lsn_param(boundary_lsn),
          {:ok, result} <-
-           query(conn, @upsert_snapshot_handoff_complete_sql, [source_id, boundary_param]),
+           query(conn, @upsert_snapshot_handoff_complete_sql, [source_name, boundary_param]),
          {:ok, committed_lsn} <- single_value(result) do
       {:ok, committed_lsn}
     end
   end
 
-  @spec clear_snapshot_handoff(conn(), pos_integer()) :: :ok | {:error, term()}
-  def clear_snapshot_handoff(conn, source_id) when is_integer(source_id) and source_id > 0 do
-    case query(conn, @delete_snapshot_handoff_sql, [source_id]) do
+  @spec clear_snapshot_handoff(conn(), String.t()) :: :ok | {:error, term()}
+  def clear_snapshot_handoff(conn, source_name)
+      when is_binary(source_name) and source_name != "" do
+    case query(conn, @delete_snapshot_handoff_sql, [source_name]) do
       {:ok, _result} -> :ok
       {:error, reason} -> {:error, reason}
     end
   end
-
-  @spec insert_batch(conn(), map()) :: {:ok, map()} | {:error, term()}
-  def insert_batch(conn, attrs) when is_map(attrs) do
-    with {:ok, batch_id} <- fetch_required(attrs, :batch_id),
-         {:ok, designated_table_id} <- fetch_required(attrs, :designated_table_id),
-         {:ok, lsn_start} <- fetch_required(attrs, :lsn_start),
-         {:ok, lsn_end} <- fetch_required(attrs, :lsn_end),
-         {:ok, lsn_start_param} <- lsn_param(lsn_start),
-         {:ok, lsn_end_param} <- lsn_param(lsn_end),
-         {:ok, state_db} <- BatchState.to_db(get_attr(attrs, :state, :pending)),
-         {:ok, result} <-
-           query(
-             conn,
-             @insert_batch_sql,
-             [
-               batch_id,
-               designated_table_id,
-               lsn_start_param,
-               lsn_end_param,
-               state_db,
-               get_attr(attrs, :error_message),
-               get_attr(attrs, :retry_count, 0)
-             ]
-           ) do
-      case result.rows do
-        [[inserted_state]] ->
-          {:ok, normalized_state} = BatchState.from_db(inserted_state)
-          {:ok, %{batch_id: batch_id, state: normalized_state, inserted?: true}}
-
-        [] ->
-          with {:ok, existing_state} <- get_batch_state(conn, batch_id) do
-            {:ok, %{batch_id: batch_id, state: existing_state, inserted?: false}}
-          end
-      end
-    end
-  end
-
-  @spec get_batch_state(conn(), String.t()) :: {:ok, BatchState.t()} | {:error, term()}
-  def get_batch_state(conn, batch_id) when is_binary(batch_id) do
-    with {:ok, result} <- query(conn, @get_batch_state_sql, [batch_id]) do
-      case result.rows do
-        [[state]] -> BatchState.from_db(state)
-        [] -> {:error, {:batch_not_found, batch_id}}
-      end
-    end
-  end
-
-  @spec transition_batch(conn(), String.t(), BatchState.t() | String.t(), keyword()) ::
-          {:ok, %{batch_id: String.t(), from: BatchState.t(), to: BatchState.t()}}
-          | {:error, term()}
-  def transition_batch(conn, batch_id, to_state, opts \\ []) when is_binary(batch_id) do
-    error_message = Keyword.get(opts, :error_message)
-
-    with {:ok, to_state} <- BatchState.normalize_state(to_state) do
-      conn
-      |> Postgrex.transaction(fn tx_conn ->
-        with {:ok, from_state} <- lock_batch_state(tx_conn, batch_id),
-             :ok <- BatchState.validate_transition(from_state, to_state),
-             {:ok, _} <- update_batch_state(tx_conn, batch_id, to_state, error_message) do
-          %{batch_id: batch_id, from: from_state, to: to_state}
-        else
-          {:error, reason} -> Postgrex.rollback(tx_conn, reason)
-        end
-      end)
-      |> normalize_transaction_result()
-    end
-  end
-
-  @spec commit_uploaded_batch(conn(), String.t()) ::
-          {:ok,
-           %{
-             batch_id: String.t(),
-             designated_table_id: pos_integer(),
-             batch_lsn_end: String.t(),
-             checkpoint_lsn: String.t(),
-             committed?: true,
-             already_committed?: boolean()
-           }}
-          | {:error, term()}
-  def commit_uploaded_batch(conn, batch_id) when is_binary(batch_id) do
-    conn
-    |> Postgrex.transaction(fn tx_conn ->
-      case commit_uploaded_batch_tx(tx_conn, batch_id) do
-        {:ok, result} -> result
-        {:error, reason} -> Postgrex.rollback(tx_conn, reason)
-      end
-    end)
-    |> normalize_transaction_result()
-  end
-
-  @spec commit_uploaded_batch_tx(conn(), String.t()) ::
-          {:ok,
-           %{
-             batch_id: String.t(),
-             designated_table_id: pos_integer(),
-             batch_lsn_end: String.t(),
-             checkpoint_lsn: String.t(),
-             committed?: true,
-             already_committed?: boolean()
-           }}
-          | {:error, term()}
-  def commit_uploaded_batch_tx(conn, batch_id) when is_binary(batch_id) do
-    with {:ok, batch} <- lock_batch_for_commit(conn, batch_id),
-         {:ok, to_state} <- commit_target_state(batch.state),
-         {:ok, checkpoint_lsn} <-
-           upsert_checkpoint_max(conn, batch.designated_table_id, batch.lsn_end),
-         {:ok, _} <- maybe_transition_for_commit(conn, batch_id, batch.state, to_state) do
-      {:ok,
-       %{
-         batch_id: batch_id,
-         designated_table_id: batch.designated_table_id,
-         batch_lsn_end: batch.lsn_end,
-         checkpoint_lsn: checkpoint_lsn,
-         committed?: true,
-         already_committed?: batch.state == :committed
-       }}
-    end
-  end
-
-  @spec list_batch_files(conn(), String.t()) :: {:ok, [map()]} | {:error, term()}
-  def list_batch_files(conn, batch_id) when is_binary(batch_id) do
-    with {:ok, result} <- query(conn, @list_batch_files_sql, [batch_id]) do
-      files =
-        Enum.map(result.rows, fn [id, batch_id, object_key, row_count, file_size, checksum, etag] ->
-          %{
-            id: id,
-            batch_id: batch_id,
-            object_key: object_key,
-            row_count: row_count,
-            file_size: file_size,
-            checksum: checksum,
-            etag: etag
-          }
-        end)
-
-      {:ok, files}
-    end
-  end
-
-  @spec list_stale_batches(conn(), keyword()) :: {:ok, [map()]} | {:error, term()}
-  def list_stale_batches(conn, opts \\ []) do
-    states =
-      opts
-      |> Keyword.get(:states, [:uploaded, :failed])
-      |> Enum.map(&state_to_db!/1)
-
-    stale_before =
-      Keyword.get(opts, :stale_before, DateTime.add(DateTime.utc_now(), -30 * 60, :second))
-
-    designated_table_id = Keyword.get(opts, :designated_table_id)
-
-    with {:ok, result} <-
-           query(conn, @list_stale_batches_sql, [states, stale_before, designated_table_id]) do
-      batches =
-        Enum.map(result.rows, fn [
-                                   batch_id,
-                                   designated_table_id,
-                                   lsn_start,
-                                   lsn_end,
-                                   state,
-                                   updated_at
-                                 ] ->
-          %{
-            batch_id: batch_id,
-            designated_table_id: designated_table_id,
-            lsn_start: lsn_start,
-            lsn_end: lsn_end,
-            state: state,
-            updated_at: updated_at
-          }
-        end)
-
-      {:ok, batches}
-    end
-  end
-
-  @spec put_batch_file(conn(), map()) :: {:ok, pos_integer()} | {:error, term()}
-  def put_batch_file(conn, attrs) when is_map(attrs) do
-    with {:ok, batch_id} <- fetch_required(attrs, :batch_id),
-         {:ok, object_key} <- fetch_required(attrs, :object_key),
-         {:ok, result} <-
-           query(
-             conn,
-             @insert_batch_file_sql,
-             [
-               batch_id,
-               object_key,
-               get_attr(attrs, :row_count, 0),
-               get_attr(attrs, :file_size, 0),
-               get_attr(attrs, :checksum),
-               get_attr(attrs, :etag)
-             ]
-           ),
-         {:ok, id} <- single_value(result) do
-      {:ok, id}
-    end
-  end
-
-  defp lock_batch_for_commit(conn, batch_id) do
-    with {:ok, result} <- query(conn, @lock_batch_for_commit_sql, [batch_id]) do
-      case result.rows do
-        [[designated_table_id, lsn_end, state]] ->
-          with {:ok, state} <- BatchState.from_db(state) do
-            {:ok, %{designated_table_id: designated_table_id, lsn_end: lsn_end, state: state}}
-          end
-
-        [] ->
-          {:error, {:batch_not_found, batch_id}}
-      end
-    end
-  end
-
-  defp commit_target_state(:uploaded), do: {:ok, :committed}
-  defp commit_target_state(:committed), do: {:ok, :committed}
-  defp commit_target_state(state), do: {:error, {:invalid_batch_commit_state, state}}
-
-  defp upsert_checkpoint_max(conn, designated_table_id, lsn_end) do
-    with {:ok, lsn_param} <- lsn_param(lsn_end),
-         {:ok, result} <-
-           query(conn, @upsert_checkpoint_max_sql, [designated_table_id, lsn_param]),
-         {:ok, checkpoint_lsn} <- single_value(result) do
-      {:ok, checkpoint_lsn}
-    end
-  end
-
-  defp maybe_transition_for_commit(_conn, _batch_id, :committed, :committed),
-    do: {:ok, :committed}
-
-  defp maybe_transition_for_commit(conn, batch_id, from_state, to_state) do
-    with :ok <- BatchState.validate_transition(from_state, to_state),
-         {:ok, _} <- update_batch_state(conn, batch_id, to_state, nil) do
-      {:ok, to_state}
-    end
-  end
-
-  defp lock_batch_state(conn, batch_id) do
-    with {:ok, result} <- query(conn, @lock_batch_state_sql, [batch_id]) do
-      case result.rows do
-        [[state]] -> BatchState.from_db(state)
-        [] -> {:error, {:batch_not_found, batch_id}}
-      end
-    end
-  end
-
-  defp update_batch_state(conn, batch_id, to_state, error_message) do
-    with {:ok, state_db} <- BatchState.to_db(to_state),
-         {:ok, result} <- query(conn, @transition_batch_sql, [batch_id, state_db, error_message]),
-         {:ok, _state} <- single_value(result) do
-      {:ok, to_state}
-    end
-  end
-
-  defp normalize_transaction_result({:ok, result}), do: {:ok, result}
-  defp normalize_transaction_result({:error, reason}), do: {:error, reason}
 
   defp query(conn, sql, params) do
     case Postgrex.query(conn, sql, params) do
@@ -670,61 +182,18 @@ defmodule DuckFeeder.Meta.Store do
   defp lsn_param(lsn) when is_integer(lsn) and lsn >= 0, do: {:ok, lsn}
   defp lsn_param(other), do: {:error, {:invalid_lsn, other}}
 
-  defp fetch_required(attrs, key) do
-    case get_attr(attrs, key) do
-      nil -> {:error, {:missing_required, key}}
-      "" -> {:error, {:missing_required, key}}
-      value -> {:ok, value}
-    end
+  defp normalize_checkpoint_keys(checkpoint_keys) do
+    checkpoint_keys =
+      checkpoint_keys
+      |> Enum.filter(&(is_binary(&1) and &1 != ""))
+      |> Enum.uniq()
+
+    {:ok, checkpoint_keys}
   end
-
-  defp get_attr(attrs, key, default \\ nil) do
-    atom_value = Map.get(attrs, key)
-    string_key = Atom.to_string(key)
-
-    cond do
-      not is_nil(atom_value) -> atom_value
-      Map.has_key?(attrs, key) -> atom_value
-      Map.has_key?(attrs, string_key) -> Map.get(attrs, string_key)
-      true -> default
-    end
-  end
-
-  defp normalize_source_status(status) when is_atom(status),
-    do: normalize_source_status(Atom.to_string(status))
-
-  defp normalize_source_status(status) when is_binary(status) do
-    if status in ["active", "paused", "error"] do
-      {:ok, status}
-    else
-      {:error, {:invalid_source_status, status}}
-    end
-  end
-
-  defp normalize_source_status(status), do: {:error, {:invalid_source_status, status}}
-
-  defp normalize_mode(mode) when is_atom(mode), do: normalize_mode(Atom.to_string(mode))
-
-  defp normalize_mode(mode) when is_binary(mode) do
-    if mode == "cdc_changelog" do
-      {:ok, mode}
-    else
-      {:error, {:invalid_designated_table_mode, mode}}
-    end
-  end
-
-  defp normalize_mode(mode), do: {:error, {:invalid_designated_table_mode, mode}}
 
   defp snapshot_handoff_state_from_db("pending"), do: {:ok, :pending}
   defp snapshot_handoff_state_from_db("complete"), do: {:ok, :complete}
 
   defp snapshot_handoff_state_from_db(other),
     do: {:error, {:invalid_snapshot_handoff_state, other}}
-
-  defp state_to_db!(state) do
-    case BatchState.to_db(state) do
-      {:ok, db_state} -> db_state
-      {:error, reason} -> raise ArgumentError, "invalid batch state for query: #{inspect(reason)}"
-    end
-  end
 end

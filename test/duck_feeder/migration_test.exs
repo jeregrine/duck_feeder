@@ -26,10 +26,6 @@ defmodule DuckFeeder.MigrationTest do
           Process.put(:migration_version, version)
           {:ok, %{rows: []}}
 
-        String.starts_with?(String.trim(sql), "DROP SCHEMA IF EXISTS ducklake_metadata") ->
-          send(self(), {:migration_query, :drop_ducklake})
-          {:ok, %{rows: []}}
-
         String.starts_with?(String.trim(sql), "DROP SCHEMA IF EXISTS duckfeeder_meta") ->
           send(self(), {:migration_query, :drop_duckfeeder})
           {:ok, %{rows: []}}
@@ -62,10 +58,9 @@ defmodule DuckFeeder.MigrationTest do
     assert Process.get(:bootstrap_queries, 0) == 0
   end
 
-  test "down drops metadata schemas" do
+  test "down drops the duckfeeder metadata schema" do
     assert :ok = Migrations.down(repo: FakeRepo)
 
-    assert_received {:migration_query, :drop_ducklake}
     assert_received {:migration_query, :drop_duckfeeder}
   end
 end

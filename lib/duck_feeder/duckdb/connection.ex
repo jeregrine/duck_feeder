@@ -3,6 +3,8 @@ defmodule DuckFeeder.DuckDB.Connection do
 
   use GenServer
 
+  @driver_download_key {__MODULE__, :duckdb_driver_downloaded}
+
   def start_link(opts \\ []) do
     case Keyword.get(opts, :name, __MODULE__) do
       nil ->
@@ -17,16 +19,9 @@ defmodule DuckFeeder.DuckDB.Connection do
     GenServer.call(server, :get_conn)
   end
 
-  def load_extension(extension, server \\ __MODULE__) when is_atom(extension) do
-    conn = get_conn(server)
-    ext = Atom.to_string(extension)
-    Adbc.Connection.query!(conn, "INSTALL #{ext}; LOAD #{ext};")
-    :ok
-  end
-
   @impl true
   def init(opts) do
-    Adbc.download_driver!(:duckdb)
+    ensure_driver_downloaded!()
 
     db_opts =
       case Keyword.get(opts, :path) do
@@ -42,5 +37,17 @@ defmodule DuckFeeder.DuckDB.Connection do
   @impl true
   def handle_call(:get_conn, _from, %{conn: conn} = state) do
     {:reply, conn, state}
+  end
+
+  defp ensure_driver_downloaded! do
+    case :persistent_term.get(@driver_download_key, false) do
+      true ->
+        :ok
+
+      false ->
+        :ok = Adbc.download_driver!(:duckdb)
+        :persistent_term.put(@driver_download_key, true)
+        :ok
+    end
   end
 end

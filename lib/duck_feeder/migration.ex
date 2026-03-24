@@ -56,7 +56,6 @@ defmodule DuckFeeder.Migration do
   def down(opts \\ []) when is_list(opts) do
     repo = fetch_repo!(opts)
 
-    query!(repo, "DROP SCHEMA IF EXISTS ducklake_metadata CASCADE")
     query!(repo, "DROP SCHEMA IF EXISTS duckfeeder_meta CASCADE")
 
     :ok

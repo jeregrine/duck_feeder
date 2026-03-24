@@ -135,8 +135,6 @@ defmodule DuckFeeder.Runtime.Manager do
   end
 
   defp drop_source(%State{} = state, source_name) do
-    source_pid = Map.get(state.sources, source_name)
-
     monitor_ref =
       Enum.find_value(state.monitors, fn {ref, name} ->
         if name == source_name, do: ref, else: nil
@@ -153,9 +151,5 @@ defmodule DuckFeeder.Runtime.Manager do
             else: state.monitors
           )
     }
-    |> then(fn s ->
-      # Keep behavior idempotent if pid already gone.
-      if is_pid(source_pid) and Process.alive?(source_pid), do: s, else: s
-    end)
   end
 end

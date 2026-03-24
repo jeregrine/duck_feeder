@@ -29,7 +29,7 @@ defmodule DuckFeeder.AppendStream do
 
   use GenServer
 
-  alias DuckFeeder.{BatchQueue, Sink, TablePipeline}
+  alias DuckFeeder.{BatchQueue, DesignatedTable, Sink, TablePipeline}
   alias DuckFeeder.CDC.Lsn
   alias DuckFeeder.DuckDB.Connection, as: DuckDBConnection
 
@@ -71,7 +71,7 @@ defmodule DuckFeeder.AppendStream do
             pipeline_supervisor: pid(),
             pipeline_opts: map(),
             context: map(),
-            designated_table_by_target: %{optional({String.t(), String.t()}) => pos_integer()},
+            designated_table_by_target: %{optional({String.t(), String.t()}) => String.t()},
             default_target_schema: String.t(),
             observer_pid: pid(),
             lsn_counter: non_neg_integer(),
@@ -144,12 +144,15 @@ defmodule DuckFeeder.AppendStream do
            normalize_overflow_strategy(Keyword.get(opts, :overflow_strategy, :fail)),
          {:ok, pipeline_supervisor} <- DynamicSupervisor.start_link(strategy: :one_for_one),
          {:ok, batch_task_supervisor} <- Task.Supervisor.start_link(strategy: :one_for_one) do
+      object_prefix = Keyword.get(opts, :object_prefix, "duck_feeder_append")
+      designated_table_by_target = designated_table_mapping(designated_tables, object_prefix)
+
       context =
         %{
           meta_conn: Keyword.fetch!(opts, :meta_conn),
-          designated_table_by_target: designated_table_mapping(designated_tables),
+          designated_table_by_target: designated_table_by_target,
           designated_table_config_by_target: designated_table_config_mapping(designated_tables),
-          object_prefix: Keyword.get(opts, :object_prefix, "duck_feeder_append"),
+          object_prefix: object_prefix,
           sink_module: sink_module
         }
         |> maybe_put_optional(:duckdb, duckdb)
@@ -162,7 +165,7 @@ defmodule DuckFeeder.AppendStream do
          pipeline_supervisor: pipeline_supervisor,
          pipeline_opts: Keyword.get(opts, :pipeline_opts, %{}) |> Map.new(),
          context: context,
-         designated_table_by_target: designated_table_mapping(designated_tables),
+         designated_table_by_target: designated_table_by_target,
          default_target_schema: Keyword.get(opts, :default_target_schema, "raw"),
          observer_pid: Keyword.get(opts, :observer_pid, self()),
          lsn_counter: lsn_counter,
@@ -439,15 +442,10 @@ defmodule DuckFeeder.AppendStream do
 
   defp normalize_table(other, _default_schema), do: {:error, {:invalid_table, other}}
 
-  defp designated_table_mapping(designated_tables) do
+  defp designated_table_mapping(designated_tables, object_prefix) do
     Enum.reduce(designated_tables, %{}, fn designated_table, acc ->
-      id = Map.fetch!(designated_table, :id)
-
-      target =
-        {Map.fetch!(designated_table, :target_schema),
-         Map.fetch!(designated_table, :target_table)}
-
-      Map.put(acc, target, id)
+      target = DesignatedTable.target_relation(designated_table)
+      Map.put(acc, target, DesignatedTable.checkpoint_key(designated_table, object_prefix))
     end)
   end
 

@@ -12,21 +12,14 @@ defmodule DuckFeeder.Bootstrap do
 
     with {:ok, validated} <- Config.validate(config),
          :ok <- maybe_bootstrap(meta_module, meta_conn, opts),
-         {:ok, source_id} <- register_source(meta_module, meta_conn, validated.source, opts),
+         source_name <- source_name(validated.source, opts),
          {:ok, designated_tables} <-
-           resolve_designated_tables(validated.source.designated_tables, opts),
-         {:ok, designated_table_ids} <-
-           register_designated_tables(
-             meta_module,
-             meta_conn,
-             source_id,
-             designated_tables
-           ) do
+           resolve_designated_tables(validated.source.designated_tables, opts) do
       {:ok,
        %{
-         source_id: source_id,
-         designated_table_ids: designated_table_ids,
-         source_name: source_name(validated.source, opts)
+         source_name: source_name,
+         source: Runtime.build_runtime_source(source_name, validated.source),
+         designated_tables: Runtime.put_runtime_checkpoint_keys(source_name, designated_tables)
        }}
     end
   end
@@ -41,7 +34,12 @@ defmodule DuckFeeder.Bootstrap do
     with {:ok, validated} <- Config.validate(config),
          {:ok, seed_result} <- seed_meta(meta_conn, config, seed_opts),
          {:ok, runtime_start_opts} <-
-           runtime_start_opts(validated.source, seed_opts, start_opts),
+           runtime_start_opts(
+             seed_result.source,
+             seed_result.designated_tables,
+             seed_opts,
+             start_opts
+           ),
          duckdb_config <- Config.duckdb_config(validated),
          {:ok, runtime_result} <-
            runtime_module.start_stream(
@@ -52,9 +50,9 @@ defmodule DuckFeeder.Bootstrap do
            ) do
       {:ok,
        %{
-         source_id: seed_result.source_id,
-         designated_table_ids: seed_result.designated_table_ids,
          source_name: seed_result.source_name,
+         source: seed_result.source,
+         designated_tables: seed_result.designated_tables,
          runtime: runtime_result
        }}
     end
@@ -65,59 +63,6 @@ defmodule DuckFeeder.Bootstrap do
       meta_module.bootstrap(meta_conn)
     else
       :ok
-    end
-  end
-
-  defp register_source(meta_module, meta_conn, source, opts) do
-    source_name = source_name(source, opts)
-
-    base_connection_info =
-      source.postgres_url
-      |> sanitize_url_value()
-      |> case do
-        nil -> %{}
-        sanitized_url -> %{postgres_url: sanitized_url}
-      end
-
-    connection_info =
-      opts
-      |> Keyword.get(:connection_info, %{})
-      |> Map.new()
-      |> sanitize_connection_info()
-      |> Map.merge(base_connection_info)
-
-    meta_module.register_source(meta_conn, %{
-      name: source_name,
-      connection_info: connection_info,
-      slot_name: source.slot_name,
-      publication_name: source.publication_name,
-      status: Keyword.get(opts, :source_status, "active")
-    })
-  end
-
-  defp register_designated_tables(meta_module, meta_conn, source_id, tables) do
-    tables
-    |> Enum.reduce_while({:ok, []}, fn table, {:ok, acc} ->
-      attrs =
-        table
-        |> Map.take([
-          :source_schema,
-          :source_table,
-          :target_schema,
-          :target_table,
-          :mode,
-          :primary_keys
-        ])
-        |> Map.put(:source_id, source_id)
-
-      case meta_module.register_designated_table(meta_conn, attrs) do
-        {:ok, id} -> {:cont, {:ok, [id | acc]}}
-        {:error, _reason} = error -> {:halt, error}
-      end
-    end)
-    |> case do
-      {:ok, ids} -> {:ok, Enum.reverse(ids)}
-      {:error, _reason} = error -> error
     end
   end
 
@@ -226,16 +171,16 @@ defmodule DuckFeeder.Bootstrap do
     |> Map.put_new(:primary_keys, defaults.primary_keys)
   end
 
-  defp runtime_start_opts(source, seed_opts, start_opts) when is_map(source) do
+  defp runtime_start_opts(source, designated_tables, seed_opts, start_opts)
+       when is_map(source) and is_list(designated_tables) do
     seed_meta_module = Keyword.get(seed_opts, :meta_module)
 
     opts =
-      case Keyword.has_key?(start_opts, :meta_module) do
-        true -> start_opts
-        false -> maybe_put(start_opts, :meta_module, seed_meta_module)
-      end
-
-    opts = maybe_put_runtime_connection_opts(opts, source)
+      start_opts
+      |> maybe_put_missing(:meta_module, seed_meta_module)
+      |> maybe_put_missing(:source, source)
+      |> maybe_put_missing(:designated_tables, designated_tables)
+      |> maybe_put_runtime_connection_opts(source)
 
     {:ok, opts}
   end
@@ -251,129 +196,13 @@ defmodule DuckFeeder.Bootstrap do
     end
   end
 
-  @secret_connection_keys ~w[
-    password
-    pass
-    secret
-    secret_key
-    secret_access_key
-    access_key
-    access_key_id
-    session_token
-    token
-    auth_token
-    api_key
-    credentials
-  ]
-
-  @connection_url_keys ~w[postgres_url dsn database_url url]
-
-  defp sanitize_connection_info(value) when is_map(value) do
-    Enum.reduce(value, %{}, fn {key, raw_value}, acc ->
-      key_name = normalize_connection_key_name(key)
-
-      cond do
-        key_name in @secret_connection_keys ->
-          acc
-
-        key_name in @connection_url_keys ->
-          case sanitize_url_value(raw_value) do
-            nil -> acc
-            sanitized -> Map.put(acc, key, sanitized)
-          end
-
-        true ->
-          Map.put(acc, key, sanitize_connection_info(raw_value))
-      end
-    end)
-  end
-
-  defp sanitize_connection_info(value) when is_list(value) do
-    value
-    |> Enum.reduce([], fn
-      {key, raw_value}, acc ->
-        key_name = normalize_connection_key_name(key)
-
-        cond do
-          key_name in @secret_connection_keys ->
-            acc
-
-          key_name in @connection_url_keys ->
-            case sanitize_url_value(raw_value) do
-              nil -> acc
-              sanitized -> [{key, sanitized} | acc]
-            end
-
-          true ->
-            [{key, sanitize_connection_info(raw_value)} | acc]
-        end
-
-      element, acc ->
-        [sanitize_connection_info(element) | acc]
-    end)
-    |> Enum.reverse()
-  end
-
-  defp sanitize_connection_info(value), do: value
-
-  defp sanitize_url_value(value) when is_binary(value) do
-    uri = URI.parse(value)
-
-    if is_binary(uri.scheme) do
-      userinfo =
-        case uri.userinfo do
-          nil ->
-            nil
-
-          userinfo when is_binary(userinfo) ->
-            case String.split(userinfo, ":", parts: 2) do
-              [username, _password] when username != "" -> URI.encode_www_form(username)
-              [username] when username != "" -> URI.encode_www_form(username)
-              _ -> nil
-            end
-        end
-
-      query =
-        uri.query
-        |> sanitize_url_query()
-
-      uri
-      |> Map.put(:userinfo, userinfo)
-      |> Map.put(:query, query)
-      |> URI.to_string()
-    else
-      nil
-    end
-  rescue
-    _ -> nil
-  end
-
-  defp sanitize_url_value(_value), do: nil
-
-  defp sanitize_url_query(nil), do: nil
-
-  defp sanitize_url_query(query_string) when is_binary(query_string) do
-    query_string
-    |> URI.decode_query()
-    |> Map.drop(@secret_connection_keys)
-    |> case do
-      map when map_size(map) == 0 -> nil
-      map -> URI.encode_query(map)
-    end
-  rescue
-    _ -> nil
-  end
-
-  defp normalize_connection_key_name(key) when is_atom(key),
-    do: key |> Atom.to_string() |> String.downcase()
-
-  defp normalize_connection_key_name(key) when is_binary(key), do: String.downcase(key)
-  defp normalize_connection_key_name(_key), do: ""
-
   defp source_name(source, opts) do
     Keyword.get(opts, :source_name, Map.get(source, :name, "default"))
   end
 
-  defp maybe_put(opts, _key, nil), do: opts
-  defp maybe_put(opts, key, value), do: Keyword.put(opts, key, value)
+  defp maybe_put_missing(opts, _key, nil), do: opts
+
+  defp maybe_put_missing(opts, key, value) do
+    if Keyword.has_key?(opts, key), do: opts, else: Keyword.put(opts, key, value)
+  end
 end

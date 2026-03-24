@@ -3,21 +3,6 @@ defmodule DuckFeeder.CDC.SnapshotBoundary do
   Snapshot boundary helpers for initial snapshot + WAL handoff.
   """
 
-  alias DuckFeeder.CDC.Lsn
-
-  @type decision :: :accept | :skip | {:error, term()}
-
-  @spec should_process_transaction?(String.t(), String.t()) :: decision()
-  def should_process_transaction?(tx_end_lsn, boundary_lsn)
-      when is_binary(tx_end_lsn) and is_binary(boundary_lsn) do
-    case Lsn.compare(tx_end_lsn, boundary_lsn) do
-      :gt -> :accept
-      :eq -> :skip
-      :lt -> :skip
-      {:error, _} = error -> error
-    end
-  end
-
   @spec tag_snapshot_row(map(), String.t(), keyword()) :: map()
   def tag_snapshot_row(row, boundary_lsn, opts \\ [])
       when is_map(row) and is_binary(boundary_lsn) do

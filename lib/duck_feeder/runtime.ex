@@ -1,10 +1,10 @@
 defmodule DuckFeeder.Runtime do
   @moduledoc """
-  Runtime wiring helpers to start `DuckFeeder.Service` from metadata tables.
+  Runtime wiring helpers to start `DuckFeeder.Service` from app config.
 
   High-level startup flow:
 
-      Meta.get_source/list_designated_tables
+      app config / Ecto-derived source + designated tables
                 |
                 v
       resolve start_lsn + snapshot handoff plan
@@ -35,7 +35,7 @@ defmodule DuckFeeder.Runtime do
   and manage stream startup as a supervised child.
   """
 
-  alias DuckFeeder.{Config, Meta, Service, Sink}
+  alias DuckFeeder.{Config, DesignatedTable, Meta, Service, Sink}
   alias DuckFeeder.CDC.{Bootstrap, Connection, ConnectionOptions, Lsn}
 
   @default_reconnect_backoff 1_000
@@ -92,10 +92,17 @@ defmodule DuckFeeder.Runtime do
 
       with {:ok, runtime_config} <- runtime_config(cfg, source_name),
            {:ok, validated} <- Config.validate(runtime_config) do
+        designated_tables =
+          put_runtime_checkpoint_keys(source_name, validated.source.designated_tables)
+
+        source = build_runtime_source(source_name, validated.source)
+
         {:ok,
          %{
            enabled?: true,
            source_name: source_name,
+           source: source,
+           designated_tables: designated_tables,
            validated_config: validated,
            duckdb_config: Config.duckdb_config(validated),
            runtime_opts: runtime_opts
@@ -104,6 +111,30 @@ defmodule DuckFeeder.Runtime do
     else
       {:ok, %{enabled?: false}}
     end
+  end
+
+  @doc false
+  @spec build_runtime_source(String.t(), map()) :: map()
+  def build_runtime_source(source_name, source) when is_binary(source_name) and is_map(source) do
+    postgres_url = Map.get(source, :postgres_url)
+
+    %{
+      name: source_name,
+      postgres_url: postgres_url,
+      connection_info:
+        if(is_binary(postgres_url) and postgres_url != "", do: %{postgres_url: postgres_url}),
+      slot_name: Map.get(source, :slot_name),
+      publication_name: Map.get(source, :publication_name)
+    }
+    |> Enum.reject(fn {_key, value} -> is_nil(value) end)
+    |> Map.new()
+  end
+
+  @doc false
+  @spec put_runtime_checkpoint_keys(String.t(), [map()]) :: [map()]
+  def put_runtime_checkpoint_keys(source_name, designated_tables)
+      when is_binary(source_name) and is_list(designated_tables) do
+    DesignatedTable.put_checkpoint_keys(designated_tables, source_name)
   end
 
   @spec repo_postgres_url(module()) :: {:ok, String.t()} | {:error, term()}
@@ -331,7 +362,7 @@ defmodule DuckFeeder.Runtime do
     Map.get(map, key, Map.get(map, Atom.to_string(key), default))
   end
 
-  defp truthy?(value), do: value in [true, 1, "1", "true", true]
+  defp truthy?(value), do: value in [true, 1, "1", "true"]
 
   defp resolve_sink_module_option(opts) when is_list(opts) do
     sink_module =
@@ -360,6 +391,90 @@ defmodule DuckFeeder.Runtime do
   defp implied_sink_module_from_duckdb(nil), do: nil
   defp implied_sink_module_from_duckdb(_duckdb), do: DuckFeeder.Sink.DuckDB
 
+  defp resolve_runtime_source(meta_module, meta_conn, source_name, opts)
+       when is_atom(meta_module) and is_binary(source_name) and is_list(opts) do
+    case Keyword.get(opts, :source) do
+      source when is_map(source) ->
+        {:ok, normalize_runtime_source(source_name, source)}
+
+      nil ->
+        if function_exported?(meta_module, :get_source, 2) do
+          with {:ok, source} <- meta_module.get_source(meta_conn, source_name) do
+            {:ok, normalize_runtime_source(source_name, source)}
+          end
+        else
+          {:error, {:missing_runtime_source, source_name}}
+        end
+
+      other ->
+        {:error, {:invalid_option, :source, other}}
+    end
+  end
+
+  defp resolve_runtime_designated_tables(meta_module, meta_conn, source_name, source, opts)
+       when is_atom(meta_module) and is_binary(source_name) and is_map(source) and is_list(opts) do
+    case Keyword.get(opts, :designated_tables) do
+      designated_tables when is_list(designated_tables) ->
+        {:ok, put_runtime_checkpoint_keys(source_name, designated_tables)}
+
+      nil ->
+        if function_exported?(meta_module, :list_designated_tables, 2) and
+             Map.has_key?(source, :id) do
+          with {:ok, designated_tables} <-
+                 meta_module.list_designated_tables(meta_conn, source_id: source.id) do
+            {:ok, put_runtime_checkpoint_keys(source_name, designated_tables)}
+          end
+        else
+          {:error, {:missing_designated_tables, source_name}}
+        end
+
+      other ->
+        {:error, {:invalid_option, :designated_tables, other}}
+    end
+  end
+
+  defp fetch_runtime_start_lsn(meta_module, meta_conn, source, designated_tables, opts)
+       when is_atom(meta_module) and is_map(source) and is_list(designated_tables) and
+              is_list(opts) do
+    default_start_lsn = Keyword.get(opts, :default_start_lsn, "0/0")
+    checkpoint_keys = DesignatedTable.checkpoint_keys(designated_tables)
+
+    cond do
+      function_exported?(meta_module, :fetch_start_lsn, 3) ->
+        meta_module.fetch_start_lsn(meta_conn, checkpoint_keys, default_start_lsn)
+
+      function_exported?(meta_module, :fetch_source_start_lsn, 3) and Map.has_key?(source, :id) ->
+        meta_module.fetch_source_start_lsn(meta_conn, source.id, default_start_lsn)
+
+      true ->
+        {:ok, default_start_lsn}
+    end
+  end
+
+  defp normalize_runtime_source(source_name, source)
+       when is_binary(source_name) and is_map(source) do
+    source
+    |> Map.new()
+    |> Map.put_new(:name, source_name)
+    |> maybe_put_connection_info()
+  end
+
+  defp maybe_put_connection_info(source) when is_map(source) do
+    case Map.get(source, :connection_info) do
+      value when is_map(value) ->
+        source
+
+      _ ->
+        case Map.get(source, :postgres_url) do
+          postgres_url when is_binary(postgres_url) and postgres_url != "" ->
+            Map.put(source, :connection_info, %{postgres_url: postgres_url})
+
+          _ ->
+            source
+        end
+    end
+  end
+
   @spec service_options(pid(), String.t(), map() | keyword() | nil, keyword()) ::
           {:ok, keyword()} | {:error, term()}
   def service_options(meta_conn, source_name, duckdb_config, opts \\ [])
@@ -368,9 +483,9 @@ defmodule DuckFeeder.Runtime do
 
     with {:ok, sink_module} <- resolve_sink_module_option(opts),
          {:ok, duckdb} <- normalize_duckdb_config(duckdb_config || Keyword.get(opts, :duckdb)),
-         {:ok, source} <- meta_module.get_source(meta_conn, source_name),
+         {:ok, source} <- resolve_runtime_source(meta_module, meta_conn, source_name, opts),
          {:ok, designated_tables} <-
-           meta_module.list_designated_tables(meta_conn, source_id: source.id) do
+           resolve_runtime_designated_tables(meta_module, meta_conn, source_name, source, opts) do
       {:ok,
        [
          name: Keyword.get(opts, :name),
@@ -409,19 +524,15 @@ defmodule DuckFeeder.Runtime do
 
     with {:ok, sink_module} <- resolve_sink_module_option(opts),
          {:ok, duckdb} <- normalize_duckdb_config(duckdb_config || Keyword.get(opts, :duckdb)),
-         {:ok, source} <- meta_module.get_source(meta_conn, source_name),
+         {:ok, source} <- resolve_runtime_source(meta_module, meta_conn, source_name, opts),
          {:ok, designated_tables} <-
-           meta_module.list_designated_tables(meta_conn, source_id: source.id),
+           resolve_runtime_designated_tables(meta_module, meta_conn, source_name, source, opts),
          {:ok, slot_name} <- require_source_field(source, :slot_name),
          {:ok, publication_name} <- require_source_field(source, :publication_name),
          {:ok, meta_start_lsn} <-
-           meta_module.fetch_source_start_lsn(
-             meta_conn,
-             source.id,
-             Keyword.get(opts, :default_start_lsn, "0/0")
-           ),
+           fetch_runtime_start_lsn(meta_module, meta_conn, source, designated_tables, opts),
          {:ok, snapshot_handoff} <-
-           fetch_snapshot_handoff(meta_module, meta_conn, source.id),
+           fetch_snapshot_handoff(meta_module, meta_conn, source_name, source),
          {:ok, snapshot_plan} <- snapshot_plan(meta_start_lsn, snapshot_handoff, opts),
          {:ok, connection_opts} <- connection_options_module.resolve(source, opts),
          {:ok, bootstrap_start_lsn} <-
@@ -460,7 +571,8 @@ defmodule DuckFeeder.Runtime do
              maybe_mark_snapshot_handoff_pending(
                meta_module,
                meta_conn,
-               source.id,
+               source_name,
+               source,
                snapshot_plan,
                snapshot_result,
                opts
@@ -484,7 +596,8 @@ defmodule DuckFeeder.Runtime do
                    maybe_mark_snapshot_handoff_complete(
                      meta_module,
                      meta_conn,
-                     source.id,
+                     source_name,
+                     source,
                      snapshot_result,
                      opts
                    ) do
@@ -814,10 +927,10 @@ defmodule DuckFeeder.Runtime do
     end
   end
 
-  defp fetch_snapshot_handoff(meta_module, meta_conn, source_id)
-       when is_atom(meta_module) and is_integer(source_id) and source_id > 0 do
+  defp fetch_snapshot_handoff(meta_module, meta_conn, source_name, source)
+       when is_atom(meta_module) and is_binary(source_name) and is_map(source) do
     if function_exported?(meta_module, :fetch_snapshot_handoff, 2) do
-      meta_module.fetch_snapshot_handoff(meta_conn, source_id)
+      meta_module.fetch_snapshot_handoff(meta_conn, Map.get(source, :id, source_name))
     else
       {:ok, nil}
     end
@@ -826,54 +939,90 @@ defmodule DuckFeeder.Runtime do
   defp maybe_mark_snapshot_handoff_pending(
          _meta_module,
          _meta_conn,
-         source_id,
+         _source_name,
+         _source,
          %{mark_pending?: false},
          _snapshot_result,
          _opts
-       )
-       when is_integer(source_id) and source_id > 0,
+       ),
        do: :ok
 
   defp maybe_mark_snapshot_handoff_pending(
          meta_module,
          meta_conn,
-         source_id,
+         source_name,
+         source,
          %{mark_pending?: true},
          %{boundary_lsn: boundary_lsn},
          opts
        )
-       when is_atom(meta_module) and is_integer(source_id) and source_id > 0 do
-    if is_binary(boundary_lsn) and
-         function_exported?(meta_module, :mark_snapshot_handoff_pending, 3) do
-      retry_mark_snapshot_handoff(opts, fn ->
-        case meta_module.mark_snapshot_handoff_pending(meta_conn, source_id, boundary_lsn) do
-          {:ok, _} -> :ok
-          {:error, _reason} = error -> error
-        end
-      end)
-    else
-      :ok
+       when is_atom(meta_module) and is_binary(source_name) and is_map(source) do
+    cond do
+      not is_binary(boundary_lsn) ->
+        :ok
+
+      function_exported?(meta_module, :mark_snapshot_handoff_pending, 3) ->
+        retry_mark_snapshot_handoff(opts, fn ->
+          mark_snapshot_handoff_pending(meta_module, meta_conn, source_name, source, boundary_lsn)
+        end)
+
+      true ->
+        :ok
     end
   end
 
   defp maybe_mark_snapshot_handoff_complete(
          meta_module,
          meta_conn,
-         source_id,
+         source_name,
+         source,
          %{boundary_lsn: boundary_lsn},
          opts
        )
-       when is_atom(meta_module) and is_integer(source_id) and source_id > 0 do
-    if is_binary(boundary_lsn) and
-         function_exported?(meta_module, :mark_snapshot_handoff_complete, 3) do
-      retry_mark_snapshot_handoff(opts, fn ->
-        case meta_module.mark_snapshot_handoff_complete(meta_conn, source_id, boundary_lsn) do
-          {:ok, _} -> :ok
-          {:error, _reason} = error -> error
-        end
-      end)
-    else
-      :ok
+       when is_atom(meta_module) and is_binary(source_name) and is_map(source) do
+    cond do
+      not is_binary(boundary_lsn) ->
+        :ok
+
+      function_exported?(meta_module, :mark_snapshot_handoff_complete, 3) ->
+        retry_mark_snapshot_handoff(opts, fn ->
+          mark_snapshot_handoff_complete(
+            meta_module,
+            meta_conn,
+            source_name,
+            source,
+            boundary_lsn
+          )
+        end)
+
+      true ->
+        :ok
+    end
+  end
+
+  defp mark_snapshot_handoff_pending(meta_module, meta_conn, source_name, source, boundary_lsn)
+       when is_atom(meta_module) and is_binary(source_name) and is_map(source) and
+              is_binary(boundary_lsn) do
+    case meta_module.mark_snapshot_handoff_pending(
+           meta_conn,
+           Map.get(source, :id, source_name),
+           boundary_lsn
+         ) do
+      {:ok, _} -> :ok
+      {:error, _reason} = error -> error
+    end
+  end
+
+  defp mark_snapshot_handoff_complete(meta_module, meta_conn, source_name, source, boundary_lsn)
+       when is_atom(meta_module) and is_binary(source_name) and is_map(source) and
+              is_binary(boundary_lsn) do
+    case meta_module.mark_snapshot_handoff_complete(
+           meta_conn,
+           Map.get(source, :id, source_name),
+           boundary_lsn
+         ) do
+      {:ok, _} -> :ok
+      {:error, _reason} = error -> error
     end
   end
 
@@ -938,13 +1087,13 @@ defmodule DuckFeeder.Runtime do
   end
 
   defp build_snapshot_spool_collector do
-    path =
-      Path.join(
-        System.tmp_dir!(),
-        "duck_feeder_snapshot_rows_#{System.unique_integer([:positive, :monotonic])}.spool"
-      )
+    open_snapshot_spool_file(5)
+  end
 
-    case File.open(path, [:write, :binary]) do
+  defp open_snapshot_spool_file(remaining_attempts) when is_integer(remaining_attempts) do
+    path = snapshot_spool_path()
+
+    case File.open(path, [:write, :binary, :exclusive]) do
       {:ok, io_device} ->
         counter = :atomics.new(1, [])
 
@@ -959,9 +1108,17 @@ defmodule DuckFeeder.Runtime do
 
         {:ok, row_handler, collect_rows}
 
+      {:error, :eexist} when remaining_attempts > 1 ->
+        open_snapshot_spool_file(remaining_attempts - 1)
+
       {:error, reason} ->
         {:error, {:snapshot_collector_start_failed, reason}}
     end
+  end
+
+  defp snapshot_spool_path do
+    suffix = Base.url_encode64(:crypto.strong_rand_bytes(16), padding: false)
+    Path.join(System.tmp_dir!(), "duck_feeder_snapshot_rows_#{suffix}.spool")
   end
 
   defp snapshot_spool_push(io_device, counter, designated_table, row)

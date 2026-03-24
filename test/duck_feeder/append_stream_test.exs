@@ -4,28 +4,7 @@ defmodule DuckFeeder.AppendStreamTest do
   alias DuckFeeder.AppendStream
 
   defmodule FakeMeta do
-    def build_batch_id(_designated_table_id, _lsn_start, _lsn_end, _indexes), do: "batch-append"
-
-    def insert_batch(_conn, attrs) do
-      Process.put({:designated_table_id, attrs.batch_id}, attrs.designated_table_id)
-      {:ok, %{batch_id: attrs.batch_id, inserted?: true, state: :pending}}
-    end
-
-    def transition_batch(_conn, batch_id, to_state, _opts \\ []),
-      do: {:ok, %{batch_id: batch_id, from: :pending, to: to_state}}
-
-    def put_batch_file(_conn, _attrs), do: {:ok, 1}
-
-    def commit_uploaded_batch(_conn, batch_id) do
-      {:ok,
-       %{
-         batch_id: batch_id,
-         designated_table_id: Process.get({:designated_table_id, batch_id}),
-         checkpoint_lsn: "0/120"
-       }}
-    end
-
-    def upsert_checkpoint(_conn, _designated_table_id, lsn), do: {:ok, lsn}
+    def upsert_checkpoint(_conn, _checkpoint_key, lsn), do: {:ok, lsn}
   end
 
   defmodule SlowSink do
@@ -39,7 +18,7 @@ defmodule DuckFeeder.AppendStreamTest do
        %{
          status: :committed,
          batch_id: "append-slow-sink-batch",
-         designated_table_id: Map.fetch!(context.designated_table_by_target, table),
+         checkpoint_key: Map.fetch!(context.designated_table_by_target, table),
          checkpoint_lsn: batch.lsn_end
        }}
     end
@@ -58,7 +37,7 @@ defmodule DuckFeeder.AppendStreamTest do
        %{
          status: :committed,
          batch_id: "append-sink-batch",
-         designated_table_id: Map.fetch!(context.designated_table_by_target, table),
+         checkpoint_key: Map.fetch!(context.designated_table_by_target, table),
          checkpoint_lsn: batch.lsn_end
        }}
     end

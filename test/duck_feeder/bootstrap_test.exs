@@ -8,22 +8,10 @@ defmodule DuckFeeder.BootstrapTest do
       if pid = Process.get(:test_pid), do: send(pid, :meta_bootstrap)
       :ok
     end
-
-    def register_source(_conn, attrs) do
-      if pid = Process.get(:test_pid), do: send(pid, {:meta_register_source, attrs})
-      {:ok, 10}
-    end
-
-    def register_designated_table(_conn, attrs) do
-      if pid = Process.get(:test_pid), do: send(pid, {:meta_register_designated_table, attrs})
-      {:ok, attrs.source_id + map_size(attrs)}
-    end
   end
 
   defmodule FakeMetaError do
-    def bootstrap(_conn), do: :ok
-    def register_source(_conn, _attrs), do: {:ok, 10}
-    def register_designated_table(_conn, _attrs), do: {:error, :insert_failed}
+    def bootstrap(_conn), do: {:error, :bootstrap_failed}
   end
 
   defmodule FakeRuntime do
@@ -41,7 +29,7 @@ defmodule DuckFeeder.BootstrapTest do
     :ok
   end
 
-  test "seeds source and designated tables from runtime config" do
+  test "bootstraps metadata and resolves runtime source/tables from config" do
     config = %{
       source: %{
         postgres_url:
@@ -65,31 +53,24 @@ defmodule DuckFeeder.BootstrapTest do
       metadata: %{postgres_url: "postgres://meta"}
     }
 
-    assert {:ok, %{source_id: 10, designated_table_ids: [17], source_name: "source-a"}} =
+    assert {:ok, %{source_name: "source-a", source: source, designated_tables: [table]}} =
              Bootstrap.seed_meta(:meta_conn, config,
                meta_module: FakeMeta,
-               source_name: "source-a",
-               connection_info: %{
-                 dsn: "postgres://dsn_user:dsn_password@dsn.example:5432/dsn_db",
-                 password: "should_not_persist"
-               }
+               source_name: "source-a"
              )
 
     assert_received :meta_bootstrap
 
-    assert_received {:meta_register_source, source_attrs}
-    assert source_attrs.name == "source-a"
-    assert source_attrs.slot_name == "duck_slot"
+    assert source.name == "source-a"
+    assert source.slot_name == "duck_slot"
+    assert source.publication_name == "duck_pub"
 
-    assert source_attrs.connection_info.postgres_url ==
-             "postgres://source_user@db.example:5432/source_db?sslmode=require"
+    assert source.connection_info.postgres_url =~
+             "postgres://source_user:source_password@db.example"
 
-    assert source_attrs.connection_info.dsn == "postgres://dsn_user@dsn.example:5432/dsn_db"
-    refute Map.has_key?(source_attrs.connection_info, :password)
-
-    assert_received {:meta_register_designated_table, table_attrs}
-    assert table_attrs.source_id == 10
-    assert table_attrs.source_table == "users"
+    assert table.source_table == "users"
+    assert table.target_table == "users"
+    assert table.checkpoint_key == "source-a:raw.users"
   end
 
   test "can seed metadata and start runtime stream from config" do
@@ -123,7 +104,6 @@ defmodule DuckFeeder.BootstrapTest do
                start_opts: [bootstrap_replication?: false]
              )
 
-    assert result.source_id == 10
     assert result.source_name == "source-a"
     assert result.runtime.start_lsn == "0/0"
 
@@ -131,6 +111,8 @@ defmodule DuckFeeder.BootstrapTest do
     assert duckdb_config.path == "/tmp/source-a.duckdb"
     assert duckdb_config.catalog == "lake"
     assert start_opts[:meta_module] == FakeMeta
+    assert start_opts[:source].name == "source-a"
+    assert start_opts[:designated_tables] == result.designated_tables
     assert start_opts[:connection_opts][:hostname] == "localhost"
     assert start_opts[:connection_opts][:database] == "source_db"
     assert start_opts[:connection_opts][:username] == "stream_user"
@@ -168,7 +150,7 @@ defmodule DuckFeeder.BootstrapTest do
       metadata: %{postgres_url: "postgres://meta"}
     }
 
-    assert {:ok, %{source_id: 10, source_name: "source-a"}} =
+    assert {:ok, %{source_name: "source-a", designated_tables: [users, orders]}} =
              Bootstrap.seed_meta(:meta_conn, config,
                meta_module: FakeMeta,
                source_name: "source-a",
@@ -178,13 +160,13 @@ defmodule DuckFeeder.BootstrapTest do
                ]
              )
 
-    assert_received {:meta_register_designated_table, users_attrs}
-    assert users_attrs.source_table == "users"
-    assert users_attrs.target_table == "users"
+    assert users.source_table == "users"
+    assert users.target_table == "users"
+    assert users.checkpoint_key == "source-a:raw.users"
 
-    assert_received {:meta_register_designated_table, orders_attrs}
-    assert orders_attrs.source_table == "orders"
-    assert orders_attrs.target_table == "orders_iceberg"
+    assert orders.source_table == "orders"
+    assert orders.target_table == "orders_iceberg"
+    assert orders.checkpoint_key == "source-a:raw.orders_iceberg"
   end
 
   test "returns error for invalid table selection opts" do
@@ -208,7 +190,7 @@ defmodule DuckFeeder.BootstrapTest do
              )
   end
 
-  test "returns errors when designated table registration fails" do
+  test "returns errors when bootstrap fails" do
     config = %{
       source: %{
         postgres_url: "postgres://source",
@@ -229,10 +211,10 @@ defmodule DuckFeeder.BootstrapTest do
       metadata: %{postgres_url: "postgres://meta"}
     }
 
-    assert {:error, :insert_failed} =
+    assert {:error, :bootstrap_failed} =
              Bootstrap.seed_meta(:meta_conn, config,
                meta_module: FakeMetaError,
-               bootstrap_schema?: false
+               bootstrap_schema?: true
              )
   end
 end

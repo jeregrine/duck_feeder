@@ -204,6 +204,8 @@ defmodule DuckFeeder.Config do
 
   defp normalize_value_for_key(_key, value), do: {:ok, value}
 
+  defp deep_to_map([]), do: []
+
   defp deep_to_map(list) when is_list(list) do
     if Keyword.keyword?(list) do
       list

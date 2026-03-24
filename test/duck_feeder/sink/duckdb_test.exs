@@ -4,9 +4,9 @@ defmodule DuckFeeder.Sink.DuckDBTest do
   alias DuckFeeder.Sink.DuckDB
 
   defmodule FakeMeta do
-    def upsert_checkpoint(conn, designated_table_id, lsn) do
+    def upsert_checkpoint(conn, checkpoint_key, lsn) do
       if is_pid(conn) do
-        send(conn, {:checkpoint_upserted, designated_table_id, lsn})
+        send(conn, {:checkpoint_upserted, checkpoint_key, lsn})
       end
 
       {:ok, lsn}
@@ -30,9 +30,13 @@ defmodule DuckFeeder.Sink.DuckDBTest do
     context = %{
       meta_conn: self(),
       meta_module: FakeMeta,
-      designated_table_by_target: %{{"raw", "events"} => 11},
+      designated_table_by_target: %{{"raw", "events"} => "source-a:raw.events"},
       designated_table_config_by_target: %{
-        {"raw", "events"} => %{id: 11, target_schema: "raw", target_table: "events"}
+        {"raw", "events"} => %{
+          checkpoint_key: "source-a:raw.events",
+          target_schema: "raw",
+          target_table: "events"
+        }
       },
       duckdb: %{conn: conn}
     }
@@ -48,10 +52,10 @@ defmodule DuckFeeder.Sink.DuckDBTest do
 
     assert {:ok, result} = DuckDB.process_batch(context, {"raw", "events"}, batch)
     assert result.status == :committed
-    assert result.designated_table_id == 11
+    assert result.checkpoint_key == "source-a:raw.events"
     assert result.checkpoint_lsn == "0/11"
 
-    assert_receive {:checkpoint_upserted, 11, "0/11"}
+    assert_receive {:checkpoint_upserted, "source-a:raw.events", "0/11"}
 
     assert %{"id" => [1, 2], "kind" => ["page_view", "signup"]} =
              query_map(conn, "SELECT id, kind FROM raw.events ORDER BY id")
@@ -61,10 +65,10 @@ defmodule DuckFeeder.Sink.DuckDBTest do
     context = %{
       meta_conn: self(),
       meta_module: FakeMeta,
-      designated_table_by_target: %{{"raw", "users"} => 21},
+      designated_table_by_target: %{{"raw", "users"} => "source-a:raw.users"},
       designated_table_config_by_target: %{
         {"raw", "users"} => %{
-          id: 21,
+          checkpoint_key: "source-a:raw.users",
           source_schema: "public",
           source_table: "users",
           target_schema: "raw",
@@ -127,9 +131,13 @@ defmodule DuckFeeder.Sink.DuckDBTest do
     context = %{
       meta_conn: self(),
       meta_module: FakeMeta,
-      designated_table_by_target: %{{"raw", "users"} => 31},
+      designated_table_by_target: %{{"raw", "users"} => "source-a:raw.users"},
       designated_table_config_by_target: %{
-        {"raw", "users"} => %{id: 31, target_schema: "raw", target_table: "users"}
+        {"raw", "users"} => %{
+          checkpoint_key: "source-a:raw.users",
+          target_schema: "raw",
+          target_table: "users"
+        }
       },
       duckdb: %{conn: conn}
     }
@@ -144,6 +152,41 @@ defmodule DuckFeeder.Sink.DuckDBTest do
 
     assert {:error, {:missing_primary_keys, {"raw", "users"}}} =
              DuckDB.process_batch(context, {"raw", "users"}, batch)
+  end
+
+  test "runs setup hooks once per connection/config", %{conn: conn} do
+    context = %{
+      meta_conn: self(),
+      meta_module: FakeMeta,
+      designated_table_by_target: %{{"raw", "events"} => "source-a:raw.events"},
+      designated_table_config_by_target: %{
+        {"raw", "events"} => %{
+          checkpoint_key: "source-a:raw.events",
+          target_schema: "raw",
+          target_table: "events"
+        }
+      },
+      duckdb: %{
+        conn: conn,
+        setup_sql: ["CREATE SCHEMA IF NOT EXISTS raw"],
+        setup_fun: fn _ ->
+          send(self(), :setup_fun_called)
+          :ok
+        end
+      }
+    }
+
+    batch = %{
+      rows: [%{"id" => 1, "kind" => "page_view"}],
+      lsn_start: "0/40",
+      lsn_end: "0/41"
+    }
+
+    assert {:ok, _} = DuckDB.process_batch(context, {"raw", "events"}, batch)
+    assert {:ok, _} = DuckDB.process_batch(context, {"raw", "events"}, %{batch | lsn_end: "0/42"})
+
+    assert_receive :setup_fun_called
+    refute_receive :setup_fun_called
   end
 
   defp cdc_row(op, record, old_record \\ %{}) do

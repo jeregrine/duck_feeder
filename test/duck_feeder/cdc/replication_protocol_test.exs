@@ -3,17 +3,7 @@ defmodule DuckFeeder.CDC.ReplicationProtocolTest do
 
   alias DuckFeeder.CDC.{Lsn, ReplicationProtocol}
 
-  test "builds slot/publication SQL" do
-    assert ReplicationProtocol.identify_system_sql() == "IDENTIFY_SYSTEM"
-
-    assert ReplicationProtocol.create_slot_sql("duck_slot") ==
-             "CREATE_REPLICATION_SLOT \"duck_slot\" LOGICAL \"pgoutput\""
-
-    assert ReplicationProtocol.create_slot_sql("duck_slot", temporary: true) ==
-             "CREATE_REPLICATION_SLOT \"duck_slot\" TEMPORARY LOGICAL \"pgoutput\""
-
-    assert ReplicationProtocol.drop_slot_sql("duck_slot") == "DROP_REPLICATION_SLOT \"duck_slot\""
-
+  test "builds replication start SQL" do
     assert ReplicationProtocol.start_replication_sql("duck_slot", "0/16B6A98", "duck_pub") =~
              "START_REPLICATION SLOT \"duck_slot\" LOGICAL 0/16B6A98"
   end

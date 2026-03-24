@@ -16,7 +16,7 @@ defmodule DuckFeeder.CDC.RouterTest do
 
     designated_tables = [
       %{
-        id: 1,
+        checkpoint_key: "source-a:raw.users",
         source_schema: "public",
         source_table: "users",
         target_schema: "raw",
@@ -31,7 +31,7 @@ defmodule DuckFeeder.CDC.RouterTest do
 
     assert [change] = routed.routes[{"raw", "users"}]
     assert change.op == :insert
-    assert change.designated_table_id == 1
+    assert change.checkpoint_key == "source-a:raw.users"
     assert change.target_relation == {"raw", "users"}
   end
 

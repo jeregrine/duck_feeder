@@ -37,7 +37,7 @@ defmodule DuckFeeder.Service do
 
   use GenServer
 
-  alias DuckFeeder.{BatchQueue, Ingest, Sink, TablePipeline}
+  alias DuckFeeder.{BatchQueue, DesignatedTable, Ingest, Sink, TablePipeline}
   alias DuckFeeder.CDC.{Lsn, Pipeline}
   alias DuckFeeder.DuckDB.Connection, as: DuckDBConnection
 
@@ -474,13 +474,8 @@ defmodule DuckFeeder.Service do
   defp designated_table_mapping(designated_tables) do
     designated_tables
     |> Enum.reduce(%{}, fn designated_table, acc ->
-      id = Map.fetch!(designated_table, :id)
-
-      target =
-        {Map.fetch!(designated_table, :target_schema),
-         Map.fetch!(designated_table, :target_table)}
-
-      Map.put(acc, target, id)
+      target = DesignatedTable.target_relation(designated_table)
+      Map.put(acc, target, DesignatedTable.checkpoint_key(designated_table))
     end)
   end
 
@@ -503,8 +498,7 @@ defmodule DuckFeeder.Service do
 
   defp build_snapshot_row(designated_table, row, lsn)
        when is_map(designated_table) and is_map(row) and is_binary(lsn) do
-    with {:ok, designated_table_id} <- fetch_map_value(designated_table, :id),
-         {:ok, source_schema} <- fetch_map_string(designated_table, :source_schema),
+    with {:ok, source_schema} <- fetch_map_string(designated_table, :source_schema),
          {:ok, source_table} <- fetch_map_string(designated_table, :source_table),
          {:ok, target_schema} <- fetch_map_string(designated_table, :target_schema),
          {:ok, target_table} <- fetch_map_string(designated_table, :target_table) do
@@ -512,7 +506,7 @@ defmodule DuckFeeder.Service do
 
       {:ok,
        Map.merge(snapshot_payload, %{
-         designated_table_id: designated_table_id,
+         checkpoint_key: DesignatedTable.checkpoint_key(designated_table),
          target_relation: {target_schema, target_table}
        })}
     end
@@ -585,7 +579,7 @@ defmodule DuckFeeder.Service do
       "_relation_table",
       "_record",
       "_old_record",
-      "designated_table_id",
+      "checkpoint_key",
       "target_relation"
     ]
   end
@@ -614,13 +608,6 @@ defmodule DuckFeeder.Service do
     case Map.get(map, key) do
       value when is_binary(value) and value != "" -> {:ok, value}
       _ -> {:error, {:invalid_designated_table_field, key}}
-    end
-  end
-
-  defp fetch_map_value(map, key) when is_map(map) do
-    case Map.get(map, key) do
-      nil -> {:error, {:invalid_designated_table_field, key}}
-      value -> {:ok, value}
     end
   end
 

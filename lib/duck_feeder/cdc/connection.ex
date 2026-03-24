@@ -220,7 +220,6 @@ defmodule DuckFeeder.CDC.Connection do
     with :ok <- maybe_enforce_lag(state) do
       if reply == 1 do
         DuckFeeder.Telemetry.cdc_frame(:keepalive, :ack_requested, %{wal_end: wal_end})
-        state = maybe_advance_flush_from_keepalive(state, wal_end)
         state = maybe_track_backpressure(state, :keepalive)
         {:noreply, [standby_status_update(state)], state}
       else
@@ -265,9 +264,8 @@ defmodule DuckFeeder.CDC.Connection do
               event_type: event.__struct__
             })
 
-            {acks, state} = maybe_ack_event(state, event)
             state = maybe_track_backpressure(state, :xlog)
-            {:noreply, acks, state}
+            {:noreply, [], state}
           else
             {:error, reason} -> disconnect_with_reason(state, reason)
           end
@@ -385,10 +383,6 @@ defmodule DuckFeeder.CDC.Connection do
          step: :disconnected
      }}
   end
-
-  defp maybe_ack_event(state, _event), do: {[], state}
-
-  defp maybe_advance_flush_from_keepalive(state, _wal_end), do: state
 
   defp bump_received_lsn(%State{} = state, wal_end) do
     %{state | received_lsn: max(state.received_lsn, wal_end)}

@@ -23,8 +23,11 @@ defmodule DuckFeeder.Sink.DuckDB do
 
   @behaviour DuckFeeder.Sink
 
+  alias DuckFeeder.DesignatedTable
   alias DuckFeeder.Meta
   alias DuckFeeder.DuckDB.Connection, as: DuckDBConnection
+
+  @setup_registry __MODULE__.SetupRegistry
 
   @impl true
   def process_batch(context, table, batch)
@@ -34,18 +37,18 @@ defmodule DuckFeeder.Sink.DuckDB do
     with {:ok, conn} <- duckdb_conn(context),
          :ok <- ensure_setup(conn, context),
          {:ok, designated_table} <- designated_table(context, table),
-         {:ok, designated_table_id} <- designated_table_id(context, table, designated_table),
+         {:ok, checkpoint_key} <- checkpoint_key(context, table, designated_table),
          {:ok, result} <- apply_batch(conn, context, designated_table, table, batch),
          {:ok, checkpoint_lsn} <-
            meta_module.upsert_checkpoint(
              Map.fetch!(context, :meta_conn),
-             designated_table_id,
+             checkpoint_key,
              batch_lsn_end(batch)
            ) do
       {:ok,
        result
        |> Map.put(:status, :committed)
-       |> Map.put(:designated_table_id, designated_table_id)
+       |> Map.put(:checkpoint_key, checkpoint_key)
        |> Map.put(:checkpoint_lsn, checkpoint_lsn)}
     end
   end
@@ -426,7 +429,7 @@ defmodule DuckFeeder.Sink.DuckDB do
   defp base_sql_literal(value) when is_binary(value), do: quote_string(value)
 
   defp base_sql_literal(value) when is_map(value) or is_list(value),
-    do: value |> Jason.encode!() |> quote_string()
+    do: value |> JSON.encode!() |> quote_string()
 
   defp base_sql_literal(value), do: value |> inspect() |> quote_string()
 
@@ -467,10 +470,15 @@ defmodule DuckFeeder.Sink.DuckDB do
 
   defp ensure_setup(conn, context) do
     duckdb = Map.get(context, :duckdb, %{}) |> Map.new()
+    key = setup_key(conn, duckdb)
 
-    with :ok <- execute_setup_sql(conn, Map.get(duckdb, :setup_sql, [])),
-         :ok <- execute_setup_fun(conn, Map.get(duckdb, :setup_fun)) do
+    if setup_complete?(key) do
       :ok
+    else
+      with :ok <- execute_setup_sql(conn, Map.get(duckdb, :setup_sql, [])),
+           :ok <- execute_setup_fun(conn, Map.get(duckdb, :setup_fun)) do
+        remember_setup(key)
+      end
     end
   end
 
@@ -499,6 +507,35 @@ defmodule DuckFeeder.Sink.DuckDB do
 
   defp execute_setup_fun(_conn, other), do: {:error, {:invalid_duckdb_setup_fun, other}}
 
+  defp setup_key(conn, duckdb) when is_pid(conn) and is_map(duckdb) do
+    {conn, Map.get(duckdb, :setup_sql, []), Map.get(duckdb, :setup_fun)}
+  end
+
+  defp setup_complete?(key) do
+    registry = ensure_setup_registry()
+    match?([{^key, true}], :ets.lookup(registry, key))
+  end
+
+  defp remember_setup(key) do
+    registry = ensure_setup_registry()
+    true = :ets.insert(registry, {key, true})
+    :ok
+  end
+
+  defp ensure_setup_registry do
+    case :ets.whereis(@setup_registry) do
+      :undefined ->
+        try do
+          :ets.new(@setup_registry, [:named_table, :public, :set, read_concurrency: true])
+        catch
+          :error, :badarg -> @setup_registry
+        end
+
+      registry ->
+        registry
+    end
+  end
+
   defp designated_table(context, table) do
     case Map.get(context, :designated_table_config_by_target, %{}) |> Map.get(table) do
       nil -> {:ok, %{}}
@@ -507,15 +544,23 @@ defmodule DuckFeeder.Sink.DuckDB do
     end
   end
 
-  defp designated_table_id(context, table, designated_table) do
-    id =
-      Map.get(designated_table, :id) ||
-        Map.get(context, :designated_table_by_target, %{}) |> Map.get(table)
+  defp checkpoint_key(context, table, designated_table) do
+    checkpoint_key =
+      case DesignatedTable.checkpoint_key(designated_table) do
+        value when is_binary(value) and value != "" -> value
+        _ -> Map.get(context, :designated_table_by_target, %{}) |> Map.get(table)
+      end
 
-    case id do
-      value when is_integer(value) and value > 0 -> {:ok, value}
+    case checkpoint_key do
+      value when is_binary(value) and value != "" -> {:ok, value}
       _ -> {:error, {:unknown_target_table, table}}
     end
+  rescue
+    ArgumentError ->
+      case Map.get(context, :designated_table_by_target, %{}) |> Map.get(table) do
+        value when is_binary(value) and value != "" -> {:ok, value}
+        _ -> {:error, {:unknown_target_table, table}}
+      end
   end
 
   defp context_catalog(context) do

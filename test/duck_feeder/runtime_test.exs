@@ -112,6 +112,8 @@ defmodule DuckFeeder.RuntimeTest do
     def fetch_source_start_lsn(_conn, 13, _default), do: {:ok, "0/34"}
 
     def fetch_snapshot_handoff(_conn, source_id) do
+      ensure_state_table()
+
       case :ets.lookup(@state_table, {self(), source_id}) do
         [{{_pid, ^source_id}, handoff}] -> {:ok, handoff}
         [] -> {:ok, nil}
@@ -120,17 +122,21 @@ defmodule DuckFeeder.RuntimeTest do
 
     def fail_mark_snapshot_handoff_pending(source_id, attempts)
         when is_integer(source_id) and source_id > 0 and is_integer(attempts) and attempts >= 0 do
+      ensure_state_table()
       true = :ets.insert(@state_table, {{self(), {:fail_pending, source_id}}, attempts})
       :ok
     end
 
     def fail_mark_snapshot_handoff_complete(source_id, attempts)
         when is_integer(source_id) and source_id > 0 and is_integer(attempts) and attempts >= 0 do
+      ensure_state_table()
       true = :ets.insert(@state_table, {{self(), {:fail_complete, source_id}}, attempts})
       :ok
     end
 
     def mark_snapshot_handoff_pending(_conn, source_id, boundary_lsn) do
+      ensure_state_table()
+
       case consume_fail_attempt({:fail_pending, source_id}) do
         true ->
           {:error, :forced_mark_pending_failure}
@@ -143,6 +149,8 @@ defmodule DuckFeeder.RuntimeTest do
     end
 
     def mark_snapshot_handoff_complete(_conn, source_id, boundary_lsn) do
+      ensure_state_table()
+
       case consume_fail_attempt({:fail_complete, source_id}) do
         true ->
           {:error, :forced_mark_complete_failure}
@@ -155,6 +163,7 @@ defmodule DuckFeeder.RuntimeTest do
     end
 
     def clear_snapshot_handoff(_conn, source_id) do
+      ensure_state_table()
       _ = :ets.delete(@state_table, {self(), source_id})
       _ = :ets.delete(@state_table, {self(), {:fail_pending, source_id}})
       _ = :ets.delete(@state_table, {self(), {:fail_complete, source_id}})
@@ -169,6 +178,21 @@ defmodule DuckFeeder.RuntimeTest do
 
         _ ->
           false
+      end
+    end
+
+    defp ensure_state_table do
+      case :ets.whereis(@state_table) do
+        :undefined ->
+          try do
+            _ = :ets.new(@state_table, [:named_table, :public, :set])
+            :ok
+          rescue
+            ArgumentError -> :ok
+          end
+
+        _ ->
+          :ok
       end
     end
   end

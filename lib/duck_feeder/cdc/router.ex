@@ -8,6 +8,7 @@ defmodule DuckFeeder.CDC.Router do
           required(:source_table) => String.t(),
           required(:target_schema) => String.t(),
           required(:target_table) => String.t(),
+          optional(:checkpoint_key) => String.t(),
           optional(:id) => integer(),
           optional(:mode) => String.t()
         }
@@ -37,7 +38,7 @@ defmodule DuckFeeder.CDC.Router do
 
             routed_change =
               change
-              |> Map.put(:designated_table_id, designated.id)
+              |> Map.put(:checkpoint_key, designated.checkpoint_key)
               |> Map.put(:target_relation, target)
 
             Map.update(acc, target, [routed_change], &[routed_change | &1])
@@ -57,6 +58,7 @@ defmodule DuckFeeder.CDC.Router do
   @spec build_mapping([designated_table()]) ::
           %{
             optional({String.t(), String.t()}) => %{
+              checkpoint_key: String.t() | nil,
               id: integer() | nil,
               target: {String.t(), String.t()},
               mode: String.t()
@@ -78,6 +80,7 @@ defmodule DuckFeeder.CDC.Router do
         }
 
       Map.put(acc, source, %{
+        checkpoint_key: Map.get(designated_table, :checkpoint_key),
         id: Map.get(designated_table, :id),
         target: target,
         mode: Map.get(designated_table, :mode, "cdc_changelog")

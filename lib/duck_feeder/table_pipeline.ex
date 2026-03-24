@@ -13,12 +13,14 @@ defmodule DuckFeeder.TablePipeline do
     @enforce_keys [:table, :buffer, :flush_interval_ms]
     defstruct [:table, :buffer, :flush_interval_ms, :sink_pid, :on_flush, :timer_ref]
 
+    @type on_flush_callback :: function()
+
     @type t :: %__MODULE__{
             table: {String.t(), String.t()},
             buffer: BatchBuffer.t(),
             flush_interval_ms: pos_integer(),
             sink_pid: pid() | nil,
-            on_flush: ({{String.t(), String.t()}, BatchBuffer.batch()} -> any()) | nil,
+            on_flush: on_flush_callback() | nil,
             timer_ref: reference() | nil
           }
   end
@@ -30,7 +32,7 @@ defmodule DuckFeeder.TablePipeline do
           | {:max_bytes, pos_integer()}
           | {:flush_interval_ms, pos_integer()}
           | {:sink_pid, pid()}
-          | {:on_flush, ({{String.t(), String.t()}, BatchBuffer.batch()} -> any())}
+          | {:on_flush, function()}
 
   @spec start_link([option()]) :: GenServer.on_start()
   def start_link(opts) do
@@ -162,12 +164,19 @@ defmodule DuckFeeder.TablePipeline do
       send(sink_pid, {:duck_feeder_batch, table, batch})
     end
 
-    if is_function(on_flush, 2) do
-      on_flush.(table, batch)
-    end
-
+    run_on_flush(on_flush, table, batch)
     :ok
   end
+
+  defp run_on_flush(on_flush, table, batch) when is_function(on_flush, 2) do
+    on_flush.(table, batch)
+  end
+
+  defp run_on_flush(on_flush, table, batch) when is_function(on_flush, 1) do
+    on_flush.({table, batch})
+  end
+
+  defp run_on_flush(_on_flush, _table, _batch), do: :ok
 
   defp schedule_flush_tick(%State{flush_interval_ms: interval, timer_ref: timer_ref} = state) do
     if is_reference(timer_ref), do: Process.cancel_timer(timer_ref)

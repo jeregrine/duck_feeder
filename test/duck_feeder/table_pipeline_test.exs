@@ -59,4 +59,40 @@ defmodule DuckFeeder.TablePipelineTest do
 
     assert :empty = TablePipeline.flush(pid)
   end
+
+  test "invokes one-arity on_flush callback" do
+    parent = self()
+
+    {:ok, pid} =
+      TablePipeline.start_link(
+        table: {"raw", "callbacks"},
+        max_rows: 1,
+        max_bytes: 10_000,
+        flush_interval_ms: 60_000,
+        on_flush: fn {table, batch} -> send(parent, {:on_flush, table, batch}) end
+      )
+
+    :ok = TablePipeline.append(pid, %{"id" => 1}, "0/41")
+
+    assert_receive {:on_flush, {"raw", "callbacks"}, batch}, 200
+    assert batch.row_count == 1
+  end
+
+  test "invokes two-arity on_flush callback" do
+    parent = self()
+
+    {:ok, pid} =
+      TablePipeline.start_link(
+        table: {"raw", "callbacks"},
+        max_rows: 1,
+        max_bytes: 10_000,
+        flush_interval_ms: 60_000,
+        on_flush: fn table, batch -> send(parent, {:on_flush, table, batch}) end
+      )
+
+    :ok = TablePipeline.append(pid, %{"id" => 1}, "0/42")
+
+    assert_receive {:on_flush, {"raw", "callbacks"}, batch}, 200
+    assert batch.row_count == 1
+  end
 end

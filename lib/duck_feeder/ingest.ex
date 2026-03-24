@@ -109,14 +109,6 @@ defmodule DuckFeeder.Ingest do
     end
   end
 
-  @impl true
-  def handle_cast({:ingest_transaction, transaction}, state) do
-    case ingest_transaction_now(state, transaction) do
-      {:ok, next_state} -> {:noreply, next_state}
-      {:error, _reason, next_state} -> {:noreply, next_state}
-    end
-  end
-
   defp ingest_transaction_now(%State{} = state, transaction) when is_map(transaction) do
     routed = Router.route_transaction(transaction, state.designated_tables)
 
@@ -191,7 +183,7 @@ defmodule DuckFeeder.Ingest do
   defp enrich_change(change, transaction) do
     change
     |> ChangelogRow.from_change(transaction)
-    |> Map.put(:designated_table_id, change[:designated_table_id])
+    |> Map.put(:checkpoint_key, change[:checkpoint_key])
     |> Map.put(:target_relation, change[:target_relation])
   end
 end

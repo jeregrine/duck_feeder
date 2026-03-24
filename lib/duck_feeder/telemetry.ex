@@ -20,23 +20,6 @@ defmodule DuckFeeder.Telemetry do
     )
   end
 
-  @spec batch_processed({String.t(), String.t()}, {:ok, map()} | {:error, term()}) :: :ok
-  def batch_processed({schema, table}, {:ok, result}) do
-    execute(
-      [:batch, :processed],
-      %{success: 1, error: 0},
-      %{schema: schema, table: table, result: result}
-    )
-  end
-
-  def batch_processed({schema, table}, {:error, reason}) do
-    execute(
-      [:batch, :processed],
-      %{success: 0, error: 1},
-      %{schema: schema, table: table, reason: reason}
-    )
-  end
-
   @spec cdc_event(atom() | String.t(), :buffering | :committed | :error) :: :ok
   def cdc_event(event_type, status) do
     execute(

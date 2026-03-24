@@ -6,7 +6,7 @@ defmodule DuckFeeder.IngestTest do
   test "routes transaction changes to designated table pipelines" do
     designated_tables = [
       %{
-        id: 1,
+        checkpoint_key: "source-a:raw.users",
         source_schema: "public",
         source_table: "users",
         target_schema: "raw",
@@ -37,7 +37,7 @@ defmodule DuckFeeder.IngestTest do
 
     assert batch.row_count == 1
     assert [row] = batch.rows
-    assert row.designated_table_id == 1
+    assert row.checkpoint_key == "source-a:raw.users"
     assert row._op == "I"
     assert row._commit_lsn == "0/120"
     assert row._xid == 100
@@ -46,7 +46,7 @@ defmodule DuckFeeder.IngestTest do
   test "flush_table flushes buffered rows" do
     designated_tables = [
       %{
-        id: 2,
+        checkpoint_key: "source-a:raw.events",
         source_schema: "public",
         source_table: "events",
         target_schema: "raw",
