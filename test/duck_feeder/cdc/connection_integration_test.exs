@@ -15,6 +15,14 @@ defmodule DuckFeeder.CDC.ConnectionIntegrationTest do
     {:ok, conn_opts} = ConnectionOptions.parse_url(pg_url)
     {:ok, conn} = Postgrex.start_link(conn_opts ++ [types: DuckFeeder.Postgrex.Types])
 
+    on_exit(fn ->
+      _ = GenServer.stop(conn)
+    end)
+
+    {:ok, conn: conn, pg_url: pg_url}
+  end
+
+  setup %{conn: conn} do
     unique =
       "#{System.system_time(:microsecond)}_#{System.unique_integer([:positive, :monotonic])}"
 
@@ -36,10 +44,9 @@ defmodule DuckFeeder.CDC.ConnectionIntegrationTest do
       _ = Setup.drop_slot(conn, slot)
       _ = Postgrex.query(conn, "DROP PUBLICATION IF EXISTS \"#{publication}\"", [])
       _ = Postgrex.query(conn, "DROP TABLE IF EXISTS public.\"#{table}\"", [])
-      _ = GenServer.stop(conn)
     end)
 
-    {:ok, conn: conn, table: table, publication: publication, slot: slot, pg_url: pg_url}
+    {:ok, conn: conn, table: table, publication: publication, slot: slot}
   end
 
   test "streams insert transaction events", %{
@@ -49,6 +56,69 @@ defmodule DuckFeeder.CDC.ConnectionIntegrationTest do
     slot: slot,
     pg_url: pg_url
   } do
+    {:ok, cdc_conn} = start_cdc_connection(conn, pg_url, table, publication, slot)
+
+    assert {:ok, _} =
+             Postgrex.query(
+               conn,
+               "INSERT INTO public.\"#{table}\" (id, name) VALUES (1, 'duck')",
+               []
+             )
+
+    assert_receive {:duck_feeder_cdc_event, %Event.Relation{table: ^table}}, 5_000
+    assert_receive {:duck_feeder_cdc_event, %Event.Begin{}}, 5_000
+
+    assert_receive {:duck_feeder_cdc_event,
+                    %Event.Insert{record: %{"id" => "1", "name" => "duck"}}},
+                   5_000
+
+    assert_receive {:duck_feeder_cdc_event, %Event.Commit{}}, 5_000
+
+    GenServer.stop(cdc_conn)
+  end
+
+  test "streams additive schema change relation metadata before row changes", %{
+    conn: conn,
+    table: table,
+    publication: publication,
+    slot: slot,
+    pg_url: pg_url
+  } do
+    {:ok, cdc_conn} = start_cdc_connection(conn, pg_url, table, publication, slot)
+
+    assert {:ok, _} =
+             Postgrex.query(conn, "ALTER TABLE public.\"#{table}\" ADD COLUMN email text", [])
+
+    assert {:ok, _} =
+             Postgrex.query(
+               conn,
+               "INSERT INTO public.\"#{table}\" (id, name, email) VALUES (1, 'duck', 'duck@example.com')",
+               []
+             )
+
+    assert_receive {:duck_feeder_cdc_event, %Event.Relation{table: ^table, columns: columns}},
+                   5_000
+
+    assert Enum.map(columns, & &1.name) == ["id", "name", "email"]
+
+    assert_receive {:duck_feeder_cdc_event, %Event.Begin{}}, 5_000
+
+    assert_receive {:duck_feeder_cdc_event,
+                    %Event.Insert{
+                      record: %{
+                        "id" => "1",
+                        "name" => "duck",
+                        "email" => "duck@example.com"
+                      }
+                    }},
+                   5_000
+
+    assert_receive {:duck_feeder_cdc_event, %Event.Commit{}}, 5_000
+
+    GenServer.stop(cdc_conn)
+  end
+
+  defp start_cdc_connection(conn, pg_url, table, publication, slot) do
     assert {:ok, bootstrap} =
              Bootstrap.bootstrap(conn, %{
                publication_name: publication,
@@ -69,25 +139,8 @@ defmodule DuckFeeder.CDC.ConnectionIntegrationTest do
                status_interval_ms: 500
              )
 
-    # Give replication stream a moment to initialize.
     Process.sleep(100)
 
-    assert {:ok, _} =
-             Postgrex.query(
-               conn,
-               "INSERT INTO public.\"#{table}\" (id, name) VALUES (1, 'duck')",
-               []
-             )
-
-    assert_receive {:duck_feeder_cdc_event, %Event.Relation{table: ^table}}, 5_000
-    assert_receive {:duck_feeder_cdc_event, %Event.Begin{}}, 5_000
-
-    assert_receive {:duck_feeder_cdc_event,
-                    %Event.Insert{record: %{"id" => "1", "name" => "duck"}}},
-                   5_000
-
-    assert_receive {:duck_feeder_cdc_event, %Event.Commit{}}, 5_000
-
-    GenServer.stop(cdc_conn)
+    {:ok, cdc_conn}
   end
 end

@@ -35,7 +35,7 @@ Most important invariant:
 
 Mirrored tables are normal DuckDB tables. Append tables are normal DuckDB tables too.
 
-The old Parquet/object-storage/DuckLake runtime path has been removed.
+The old custom Parquet/object-storage/DuckLake runtime path has been removed. DuckFeeder should rely on DuckDB/DuckLake directly rather than carrying its own warehouse layer.
 
 ## Quick start
 

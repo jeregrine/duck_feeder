@@ -71,6 +71,7 @@ Bootstrap via `DuckFeeder.Meta.Store.bootstrap/1` or `DuckFeeder.Migration.up/1`
 ## Current Cleanup / Design Direction
 - Keep metadata minimal and durable.
 - Keep source name / slot / publication / designated tables in app config or Ecto-derived runtime config.
+- Move DuckDB access back behind `dux ~> 0.2` before expanding the broader integration matrix.
 - Prefer real DuckDB tables over warehouse-specific envelopes.
 - Preserve loud failure semantics over silent fallback behavior.
 
@@ -79,7 +80,7 @@ Current notable items:
 - `Sink.DuckDB` still builds SQL via string interpolation; continue auditing validation/escaping paths.
 - `rows_source/1` still generates large `VALUES` clauses and may not scale to very large batches.
 - `infer_columns/1` is still more expensive than it should be for wide batches.
-- There is still private helper duplication between `Service` and `AppendStream`.
+- DuckLake-backed end-to-end integration coverage is still too thin, especially for local filesystem-backed setups.
 - Append-stream restart semantics still rely on caller-provided synthetic LSN continuity.
 
 ## Hex Publish Notes

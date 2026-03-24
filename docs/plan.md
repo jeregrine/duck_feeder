@@ -1,350 +1,176 @@
 # DuckFeeder plan
 
-## Goal
+This document is intentionally short.
 
-DuckFeeder should be the cleanest way for an Elixir app to mirror Postgres data into DuckDB-managed tables.
+README and `AGENTS.md` already cover the product story, architecture, and guiding principles.
+This file should stay focused on the next concrete work items for this branch.
 
-A great DuckFeeder experience should feel like:
+## Current branch direction
 
-- pick Ecto schemas,
-- point DuckFeeder at a DuckDB database,
-- start the runtime,
-- query mirrored tables immediately,
-- append app events into the same database,
-- trust restart/checkpoint behavior without thinking about pipeline internals.
+Keep optimizing for:
 
-This work should optimize for beautiful developer experience, strong correctness, and clear docs/examples.
+- config-first runtime setup
+- real DuckDB-managed target tables
+- minimal DuckFeeder metadata in Postgres
+- strong restart/checkpoint correctness
+- simple defaults and copy-pasteable setup
 
----
+Most important invariant:
 
-## Product shape
+- **WAL ACK advances only after DuckDB table writes are committed and the checkpoint is durably persisted.**
 
-### Mirror mode
+## Important terminology
 
-Given:
+There are two different metadata concerns here and we should keep them separate:
 
-- `repo: MyApp.Repo`
-- `schemas: [MyApp.Users, MyApp.Orders, ...]`
-- `duckdb: %{path: "/path/to/app.duckdb"}`
+### DuckFeeder metadata
 
-DuckFeeder should:
+This remains the durable runtime metadata owned by DuckFeeder and stored in Postgres:
 
-- infer source schema/table/primary keys from Ecto schemas,
-- snapshot current rows,
-- follow WAL,
-- apply inserts/updates/deletes into real target tables,
-- persist checkpoints,
-- resume safely after restart.
+- `checkpoints`
+- `snapshot_handoffs`
+- `migration_versions`
 
-### Append mode
+### DuckLake metadata
 
-DuckFeeder should also support append-only app data in the same DuckDB database for:
+This is the catalog/storage metadata managed by DuckDB/DuckLake.
 
-- analytics events,
-- audit logs,
-- telemetry,
-- domain event streams.
+The immediate goal is to verify DuckFeeder works cleanly with DuckLake configured the way DuckDB expects, without reintroducing a DuckFeeder-specific storage layer.
 
----
+## Highest-priority next steps
 
-## Core architecture
+### 1. Move DuckDB access back behind Dux
 
-DuckFeeder owns:
+Before expanding the integration matrix further, switch DuckFeeder from using raw `adbc` directly to using `dux ~> 0.2` as the primary DuckDB access layer.
 
-- snapshot + WAL handoff,
-- CDC decoding and routing,
-- batching,
-- checkpoint durability,
-- restart correctness.
+Goals:
 
-DuckDB owns:
+- follow the intended DuckDB access abstraction for this project
+- stop scattering raw ADBC concerns through the runtime and tests
+- keep setup and connection handling closer to the library we actually want to expose/support
+- make the upcoming DuckLake integration work reflect the intended stack
 
-- real table writes,
-- table schema state,
-- query surface.
+This should be treated as the top priority before the broader DuckLake integration push.
 
-Core downstream path:
+### 2. Build a real DuckLake integration matrix
 
-```text
-Postgres WAL
-  -> CDC pipeline
-  -> table batches
-  -> DuckDB sink
-  -> checkpoint persisted
-  -> WAL ack
-```
+This is the biggest gap after the Dux cleanup.
 
----
+We need env-gated end-to-end integration tests that exercise DuckFeeder with DuckLake storing actual data locally on the filesystem. These tests should remain opt-in for normal local development runs.
 
-## Durability rule
+Target configurations:
 
-This remains the most important invariant:
+1. **DuckLake metadata in DuckDB**
+   - DuckLake catalog/metadata managed from DuckDB
+   - DuckLake data files stored locally on disk
+2. **DuckLake metadata in Postgres**
+   - DuckLake catalog/metadata managed from Postgres
+   - DuckLake data files stored locally on disk
 
-- **WAL ACK advances only after downstream table changes are committed and the checkpoint is durably persisted.**
+For each configuration, verify at minimum:
 
----
+- runtime boot/setup succeeds
+- snapshot loads initial rows correctly
+- CDC inserts work
+- CDC updates work
+- CDC deletes work
+- truncates behave correctly
+- additive columns are handled correctly
+- schema-change behavior is explicitly covered, starting with additive columns and the relation/update flow around them
+- append streams can write into the same database/catalog setup
+- checkpoints persist correctly
+- restart/resume from checkpoints works
+- snapshot handoff recovery works
+- resulting tables are queryable directly from DuckDB
 
-## Table model
+Also add a third integration path focused on **append-only telemetry ingestion without CDC**.
+A logger-backed or telemetry-backed append stream is a good starting point. The goal is to verify that a real append-only operational data flow works cleanly with the same local DuckLake setups.
 
-Mirrored tables should be normal tables with normal columns.
+These tests should use real temporary directories and real database state, not just mocks.
+Prefer one explicit env gate for the suite such as `RUN_INTEGRATION_TESTS=1`.
+There is already basic opt-in integration coverage for metadata roundtrips and CDC connection streaming; extend that foundation rather than creating a separate test style.
+
+### 3. Define the recommended DuckLake default
+
+We should lean heavily on how DuckDB recommends using DuckLake.
 
 That means:
 
-- source table shape maps to target table shape,
-- inserts become upserts,
-- updates become upserts,
-- deletes delete by primary key,
-- truncates clear the target table.
+- prefer DuckDB/DuckLake-native setup patterns over DuckFeeder-specific abstractions
+- keep DuckFeeder's `duckdb` config small
+- use `setup_sql` / `setup_fun` for catalog/storage initialization where possible
+- avoid inventing extra storage concepts unless DuckDB itself requires them
 
-Append tables should also be normal tables.
+Questions to answer explicitly:
 
-No special warehouse-only envelope should define the primary product experience.
+- Which local DuckLake setup should be the **golden path**?
+- Should the default docs prefer DuckLake metadata in DuckDB or Postgres?
+- What exact `setup_sql` should we recommend for local filesystem-backed DuckLake use?
+- What setup should we call the supported default for local development?
 
----
+### 4. Refresh docs around the tested DuckLake path
 
-## Schema handling
+Once the integration matrix is real, update docs to match what we actually verified.
 
-What should work well first:
+Docs should clearly explain:
 
-- additive columns,
-- snapshot + WAL handoff while writes continue,
-- restart from durable checkpoints,
-- failure that is loud and clear when a change cannot be applied safely.
+- the difference between DuckFeeder metadata and DuckLake metadata
+- the recommended local filesystem-backed DuckLake setup
+- the alternate Postgres-backed DuckLake metadata setup
+- how to inspect/query the resulting local DuckDB/DuckLake state
+- how restart/checkpoint behavior works in those setups
 
-Target behavior:
+README should show the recommended default, not a speculative one.
 
-- automatically add safe new columns,
-- fail closed on ambiguous/destructive changes,
-- make the failure message obvious and actionable.
+### 5. Keep improving sink scalability and correctness
 
----
+After the integration matrix is in place, continue on the known sink work:
 
-## Runtime/config shape
+- replace giant `VALUES` SQL generation with a better bulk-write path
+- reduce `infer_columns/1` overhead
+- keep auditing dynamic SQL construction/validation
+- add more large-batch correctness coverage
 
-The runtime should be DuckDB-first and simple.
+## Nice-to-have follow-ons
 
-Source and table selection should come from app config / Ecto schemas, not from a separately managed persisted registry.
+After the items above:
 
-Expected config direction:
-
-```elixir
-config :my_app, MyApp.DuckFeeder,
-  enabled: true,
-  repo: MyApp.Repo,
-  schemas: [MyApp.Users, MyApp.Orders],
-  duckdb: %{
-    path: "/var/lib/my_app/analytics.duckdb"
-  }
-```
-
-DuckDB config should stay small and ergonomic:
-
-- `path`
-- `catalog` when needed
-- `setup_sql`
-- `setup_fun`
-
-### Metadata should be minimal and durable
-
-Postgres metadata should only persist the state needed for correctness and restart behavior.
-
-Keep in Postgres:
-
-- checkpoints
-- snapshot handoffs
-- migration version bookkeeping
-
-Keep in app config / code:
-
-- source name / slot / publication
-- source-to-target table mapping
-- primary keys
-- other runtime table options derived from Ecto schemas/config
-
----
-
-## Developer experience goals
-
-DuckFeeder should feel genuinely pleasant to use.
-
-### Golden-path setup
-
-It should be easy to:
-
-- add one migration,
-- define one runtime module,
-- configure one DuckDB path,
-- start supervision,
-- query `raw.users` and `raw.orders` right away.
-
-### Great errors
-
-Common problems should produce clear messages:
-
-- missing primary keys,
-- invalid DuckDB config,
-- unsupported schema changes,
-- checkpoint/startup issues,
-- snapshot handoff failures.
-
-### Great defaults
-
-Defaults should make local development delightful:
-
-- simple local DuckDB file path,
-- sensible target schema naming,
-- minimal required configuration,
-- examples that run without ceremony.
-
----
-
-## Docs and examples goals
-
-Docs/examples are now the highest-value product work.
-
-### Docs
-
-Ship:
-
-- concise README with a real golden path,
-- clear config reference,
-- append-stream docs,
-- checkpoint/restart model explained simply,
-- schema evolution behavior documented clearly,
-- troubleshooting section for common failures.
-
-### Examples
-
-Add examples that are easy to copy:
-
-1. **Minimal Ecto app mirror**
-   - repo + schemas + runtime module + DuckDB path
-2. **Append stream example**
-   - application events into `raw.app_events`
-3. **Local dev demo**
-   - seed data, run app, query DuckDB
-4. **Telemetry example**
-   - forward events into append tables safely
-
-### Nice finishing touches
-
-- example queries people actually want,
-- clear naming conventions,
-- readable generated docs,
-- small end-to-end snippets instead of giant walls of config.
-
----
-
-## Next steps
-
-### 1. Refresh public docs around the config-first architecture
-
-The most important cleanup now is documentation.
-
-Update README/docs to clearly explain:
-
-- source/table config lives in app config / Ecto schemas,
-- Postgres metadata only stores checkpoints + snapshot handoffs,
-- mirrored tables are real DuckDB tables,
-- WAL durability semantics in plain language,
-- how to inspect/query the resulting DuckDB file locally.
-
-### 2. Tighten the public API and naming
-
-Make the public surface feel intentional:
-
-- standardize on `duckdb` naming while keeping legacy `duckdb_config` compatibility where needed,
-- reduce surprising runtime option combinations,
-- improve option validation and startup errors,
-- make the config-first path the obvious primary path.
-
-### 3. Improve append-stream semantics and docs
-
-The append path still needs a sharper product story.
-
-Clarify and/or improve:
-
-- synthetic LSN / checkpoint continuity across restart,
-- fail-closed vs lossy overflow behavior,
-- the recommended telemetry/event ingestion setup,
-- what guarantees append streams do and do not provide.
-
-### 4. Improve sink scalability
-
-The DuckDB sink works, but it still has obvious scaling limits.
-
-Priorities:
-
-- replace giant `VALUES` SQL generation with a better bulk-write path,
-- reduce `infer_columns/1` overhead,
-- keep auditing dynamic SQL construction/validation,
-- add tests around large batches and setup hooks.
-
-### 5. Expand correctness coverage
-
-Add more coverage around:
-
-- primary key changes,
-- additive schema changes,
-- restart/resume behavior,
-- snapshot handoff recovery,
-- failure semantics when a table change is unsafe.
-
-### 6. Keep polishing the product feel
-
-Push on details that make the system shine:
-
-- better names,
-- better defaults,
-- better messages,
-- fewer required decisions,
-- clearer onboarding.
-
----
+- sharpen append-stream restart semantics/docs
+- improve schema evolution coverage matrix
+- keep polishing startup validation and error messages
+- add copy-pasteable examples for the tested DuckLake setups
 
 ## Relevant files for the next session
 
-Read these first:
+Start here:
 
 - `README.md`
+- `AGENTS.md`
 - `docs/plan.md`
-- `mix.exs`
-- `lib/duck_feeder.ex`
+- `docs/runtime.md`
 - `lib/duck_feeder/runtime.ex`
 - `lib/duck_feeder/runtime/embedded.ex`
-- `lib/duck_feeder/runtime/supervisor.ex`
-- `lib/duck_feeder/runtime/stream_worker.ex`
-- `lib/duck_feeder/runtime/manager.ex`
-- `lib/duck_feeder/integration.ex`
 - `lib/duck_feeder/bootstrap.ex`
 - `lib/duck_feeder/config.ex`
-- `lib/duck_feeder/designated_table.ex`
-- `lib/duck_feeder/service.ex`
-- `lib/duck_feeder/append_stream.ex`
-- `lib/duck_feeder/sink.ex`
 - `lib/duck_feeder/sink/duckdb.ex`
 - `lib/duck_feeder/duckdb/connection.ex`
-- `lib/duck_feeder/meta.ex`
 - `lib/duck_feeder/meta/store.ex`
-- `lib/duck_feeder/cdc/*`
+- `test/test_helper.exs`
 - `test/duck_feeder/runtime_test.exs`
 - `test/duck_feeder/service_test.exs`
 - `test/duck_feeder/append_stream_test.exs`
 - `test/duck_feeder/sink/duckdb_test.exs`
-- `test/duck_feeder/config_test.exs`
-- `test/duck_feeder/bootstrap_test.exs`
+- `test/duck_feeder/cdc/connection_integration_test.exs`
+- `test/duck_feeder/meta/store_integration_test.exs`
 
----
+## Decision rules
 
-## Source of truth for this branch
+When in doubt, prefer:
 
-When making decisions, prefer:
-
-- simpler runtime shape,
-- config-first setup,
-- minimal durable metadata,
-- real DuckDB tables,
-- strong durability semantics,
-- clear docs,
-- copy-pasteable examples,
-- beautiful DevUX.
+- simpler runtime shape
+- config-first setup
+- minimal DuckFeeder metadata
+- DuckDB/DuckLake-native defaults
+- real end-to-end verification
+- loud failures over silent fallback
+- beautiful DevUX
