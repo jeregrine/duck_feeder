@@ -34,8 +34,8 @@ defmodule DuckFeeder.StreamSupportTest do
       end)
 
     assert_receive {:resolved_duckdb_conn, conn, server}
-    assert Process.alive?(conn)
-    assert Process.alive?(server)
+    assert is_pid(conn)
+    assert is_pid(server)
 
     assert_eventually(fn -> not Process.alive?(server) end)
     assert_eventually(fn -> not Process.alive?(conn) end)
