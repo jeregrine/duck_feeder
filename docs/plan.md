@@ -13,7 +13,7 @@ A great DuckFeeder experience should feel like:
 - append app events into the same database,
 - trust restart/checkpoint behavior without thinking about pipeline internals.
 
-This branch should optimize for a beautiful developer experience, strong correctness, and clear docs/examples.
+This work should optimize for beautiful developer experience, strong correctness, and clear docs/examples.
 
 ---
 
@@ -165,7 +165,7 @@ Keep in app config / code:
 
 ## Developer experience goals
 
-This branch should become genuinely pleasant to use.
+DuckFeeder should feel genuinely pleasant to use.
 
 ### Golden-path setup
 
@@ -200,11 +200,11 @@ Defaults should make local development delightful:
 
 ## Docs and examples goals
 
-A major priority now is polished docs/examples.
-
-We should ship a really strong DevUX story:
+Docs/examples are now the highest-value product work.
 
 ### Docs
+
+Ship:
 
 - concise README with a real golden path,
 - clear config reference,
@@ -215,7 +215,7 @@ We should ship a really strong DevUX story:
 
 ### Examples
 
-We should add examples that are easy to copy:
+Add examples that are easy to copy:
 
 1. **Minimal Ecto app mirror**
    - repo + schemas + runtime module + DuckDB path
@@ -235,69 +235,64 @@ We should add examples that are easy to copy:
 
 ---
 
-## Current branch status
+## Next steps
 
-This branch already has the core new path in place:
+### 1. Refresh public docs around the config-first architecture
 
-- DuckDB sink is the default downstream path.
-- Service and append stream write through the DuckDB sink.
-- CDC batches apply as direct table operations:
-  - `MERGE`
-  - `DELETE`
-  - clear target table on truncate
-- Checkpoints persist through `DuckFeeder.Meta.upsert_checkpoint/3`.
-- Runtime/config uses `duckdb` config.
-- Metadata bootstrap is now trimmed to the durable runtime state only:
-  - `duckfeeder_meta.checkpoints`
-  - `duckfeeder_meta.snapshot_handoffs`
-  - migration version bookkeeping
-- Source/table registry data now lives in app config / Ecto-derived runtime config instead of persisted metadata tables.
-- Legacy batch-pipeline metadata/store code has been removed from the active codebase.
-- DuckDB `setup_sql` / `setup_fun` run once per connection/config instead of once per batch.
-- Tests cover the new sink and reduced runtime surface.
+The most important cleanup now is documentation.
 
----
+Update README/docs to clearly explain:
 
-## Next execution steps
+- source/table config lives in app config / Ecto schemas,
+- Postgres metadata only stores checkpoints + snapshot handoffs,
+- mirrored tables are real DuckDB tables,
+- WAL durability semantics in plain language,
+- how to inspect/query the resulting DuckDB file locally.
 
-### 1. Tighten the public API
+### 2. Tighten the public API and naming
 
-Make naming and behavior consistent everywhere:
+Make the public surface feel intentional:
 
-- prefer `duckdb_config` / `duckdb` terminology consistently,
-- keep only the intended runtime/service options,
-- improve option validation and error messages.
+- keep `duckdb` / `duckdb_config` naming consistent,
+- reduce surprising runtime option combinations,
+- improve option validation and startup errors,
+- make the config-first path the obvious primary path.
 
-### 2. Polish DuckDB setup ergonomics
+### 3. Improve append-stream semantics and docs
 
-Make startup/setup pleasant:
+The append path still needs a sharper product story.
 
-- smooth path handling,
-- clear support for `catalog`, `setup_sql`, `setup_fun`,
-- obvious story for local dev vs app-managed deployment.
+Clarify and/or improve:
 
-### 3. Improve mirror behavior coverage
+- synthetic LSN / checkpoint continuity across restart,
+- fail-closed vs lossy overflow behavior,
+- the recommended telemetry/event ingestion setup,
+- what guarantees append streams do and do not provide.
 
-Add more tests around:
+### 4. Improve sink scalability
+
+The DuckDB sink works, but it still has obvious scaling limits.
+
+Priorities:
+
+- replace giant `VALUES` SQL generation with a better bulk-write path,
+- reduce `infer_columns/1` overhead,
+- keep auditing dynamic SQL construction/validation,
+- add tests around large batches and setup hooks.
+
+### 5. Expand correctness coverage
+
+Add more coverage around:
 
 - primary key changes,
 - additive schema changes,
 - restart/resume behavior,
+- snapshot handoff recovery,
 - failure semantics when a table change is unsafe.
 
-### 4. Build excellent docs and examples
+### 6. Keep polishing the product feel
 
-This is the biggest product-quality step left:
-
-- README polish,
-- docs reference cleanup,
-- example apps/snippets,
-- troubleshooting guide,
-- query examples.
-
-### 5. Make it feel great
-
-Push on the details that make the system shine:
+Push on details that make the system shine:
 
 - better names,
 - better defaults,
@@ -320,14 +315,15 @@ Read these first:
 - `lib/duck_feeder/runtime/supervisor.ex`
 - `lib/duck_feeder/runtime/stream_worker.ex`
 - `lib/duck_feeder/runtime/manager.ex`
+- `lib/duck_feeder/integration.ex`
+- `lib/duck_feeder/bootstrap.ex`
+- `lib/duck_feeder/config.ex`
+- `lib/duck_feeder/designated_table.ex`
 - `lib/duck_feeder/service.ex`
 - `lib/duck_feeder/append_stream.ex`
-- `lib/duck_feeder/designated_table.ex`
 - `lib/duck_feeder/sink.ex`
 - `lib/duck_feeder/sink/duckdb.ex`
 - `lib/duck_feeder/duckdb/connection.ex`
-- `lib/duck_feeder/config.ex`
-- `lib/duck_feeder/bootstrap.ex`
 - `lib/duck_feeder/meta.ex`
 - `lib/duck_feeder/meta/store.ex`
 - `lib/duck_feeder/cdc/*`
@@ -345,6 +341,8 @@ Read these first:
 When making decisions, prefer:
 
 - simpler runtime shape,
+- config-first setup,
+- minimal durable metadata,
 - real DuckDB tables,
 - strong durability semantics,
 - clear docs,
