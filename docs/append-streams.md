@@ -37,7 +37,7 @@ Append batches reuse the same downstream sink path as CDC batches:
 ```text
 append/4
   -> table pipeline
-  -> DuckDB write
+  -> DuckDB write (with dedup tracking)
   -> checkpoint persisted in Postgres
 ```
 
@@ -47,9 +47,12 @@ For append streams, DuckFeeder still persists checkpoints only after the DuckDB 
 
 There is no WAL ACK step here, but the same durable ordering idea applies:
 
-- write rows into DuckDB
-- persist checkpoint
+- check if the batch was already applied (dedup)
+- write rows into DuckDB and record applied batch (in one transaction)
+- persist checkpoint in Postgres
 - report success
+
+If the Postgres checkpoint fails after a DuckDB commit, the batch is tracked inside DuckDB so it will be skipped on retry.
 
 ## Synthetic LSNs and restart continuity
 

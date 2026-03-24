@@ -22,7 +22,7 @@ defmodule DuckFeeder.Service do
          async bounded queue/tasks
                  |
                  v
-                Sink
+         Sink (dedup + DuckDB write)
                  |
                  v
           committed checkpoint_lsn

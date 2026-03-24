@@ -179,12 +179,17 @@ The runtime is built around one invariant:
 
 That is the reason checkpoints live in Postgres and why snapshot handoff state is persisted there too.
 
+If a Postgres checkpoint write fails after a successful DuckDB commit, the batch is tracked inside DuckDB (in `duck_feeder_internal.applied_batches`) so it will be detected and skipped on the next attempt instead of being written twice.
+
 ## Schema evolution
 
-Current intended behavior:
+Current behavior:
 
 - additive columns are added to the DuckDB target table automatically
-- destructive or ambiguous changes fail closed
+- existing target column types are respected during CDC merges (incoming values are cast to the target type rather than re-inferred)
+- destructive or ambiguous type changes fail closed
 - missing primary keys cause loud failures for update/delete semantics
+- type compatibility is checked with widening rules (e.g. `INTEGER` → `BIGINT` is safe, `VARCHAR` accepts anything)
+- type names are validated against a strict allowlist before being interpolated into SQL
 
 When a change cannot be applied safely, DuckFeeder should stop loudly instead of guessing.

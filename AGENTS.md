@@ -27,12 +27,13 @@ Runtime deps (from `mix.exs`):
 - `postgrex ~> 0.20` — Postgres connections + replication protocol
 - `dux ~> 0.2` — DuckDB access layer over DuckDB/ADBC
 - `nimble_options ~> 1.1` — config validation
-- `jason ~> 1.4` — optional dependency
 
 Dev/test only:
 - `ecto_sql ~> 3.12` (test) — migration integration tests
 - `benchee ~> 1.3` (dev)
 - `ex_doc ~> 0.38` (dev)
+
+Note: JSON encoding uses Elixir 1.19+'s built-in `JSON` module. The `jason` optional dependency has been removed.
 
 ## Data Flow
 
@@ -42,7 +43,7 @@ Postgres WAL
   → CDC.Connection (Postgrex.ReplicationConnection)
   → CDC.Pipeline (TransactionBuffer → Ingest)
   → TablePipeline (micro-batch buffer)
-  → Sink.DuckDB (MERGE/DELETE/INSERT via Dux/DuckDB)
+  → Sink.DuckDB (dedup check → MERGE/DELETE/INSERT via Dux/DuckDB → record applied batch)
   → Meta.Store.upsert_checkpoint (Postgres)
   → CDC.Connection ack_lsn
 ```
@@ -51,7 +52,7 @@ Postgres WAL
 ```
 AppendStream.append/4
   → TablePipeline (micro-batch buffer)
-  → Sink.DuckDB (INSERT via Dux/DuckDB)
+  → Sink.DuckDB (dedup check → INSERT via Dux/DuckDB → record applied batch)
   → Meta.Store.upsert_checkpoint (Postgres)
 ```
 
@@ -77,11 +78,11 @@ Bootstrap via `DuckFeeder.Meta.Store.bootstrap/1` or `DuckFeeder.Migration.up/1`
 
 ## Known Technical Debt
 Current notable items:
-- `Sink.DuckDB` still builds SQL via string interpolation; continue auditing validation/escaping paths.
-- `rows_source/1` still generates large `VALUES` clauses and may not scale to very large batches.
-- `infer_columns/1` is still more expensive than it should be for wide batches.
+- `Sink.DuckDB` builds SQL via string interpolation with `validate_sql_type/1` allowlisting and `escape_sql_string/1` hardening; continue auditing validation/escaping paths.
 - DuckLake-backed end-to-end integration coverage is still too thin, especially for local filesystem-backed setups.
 - Append-stream restart semantics still rely on caller-provided synthetic LSN continuity.
+- `StreamSupport.maybe_start_duckdb_connection/2` starts a `Dux.Connection` process that is linked to the caller but not explicitly supervised; it will leak if the caller traps exits.
+- `snapshot_handoff_source_key/2` in `Runtime` has dead code branches for `source.id` (string/integer) that are never hit in the config-first model.
 
 ## Hex Publish Notes
 Before publish:

@@ -24,7 +24,7 @@ Core flow:
 ```text
 Postgres WAL
   -> DuckFeeder CDC pipeline
-  -> DuckDB sink
+  -> DuckDB sink (dedup check + write + record applied batch)
   -> checkpoint persisted in Postgres
   -> WAL ack
 ```
@@ -32,6 +32,8 @@ Postgres WAL
 Most important invariant:
 
 - **WAL ACK only advances after DuckDB table writes are committed and the checkpoint is durably persisted.**
+
+If a checkpoint write to Postgres fails after a DuckDB commit, the batch is tracked inside DuckDB so it will be skipped (deduped) on retry instead of being written twice.
 
 Mirrored tables are normal DuckDB tables. Append tables are normal DuckDB tables too.
 
@@ -145,7 +147,10 @@ CDC batches are applied as direct table operations:
 
 Primary keys are required for correct update/delete behavior.
 
+CDC values from the WAL are passed through without type coercion — column types are inferred from the target table when it already exists, or from the first batch when creating the table.
+
 Additive schema changes are handled by adding missing columns on the DuckDB side.
+Type compatibility follows widening rules (e.g. `INTEGER` → `BIGINT` is safe).
 Ambiguous or destructive changes fail closed instead of being guessed.
 
 ## What lives in app config vs Postgres metadata
@@ -254,9 +259,11 @@ If you do not want the repo/schema wrapper, DuckFeeder also supports the explici
 Useful DuckDB options:
 
 - `path` - database file path; omit for in-memory
-- `catalog` - optional catalog prefix
-- `setup_sql` - SQL statements to run before writes
-- `setup_fun` - one-arg callback receiving the DuckDB connection
+- `catalog` - optional catalog prefix (e.g. for DuckLake)
+- `setup_sql` - SQL statements to run once before writes (e.g. `["INSTALL ducklake", "LOAD ducklake"]`)
+- `setup_fun` - one-arg callback receiving the DuckDB connection pid
+
+Setup hooks are memoized per connection and re-run automatically if the connection process restarts.
 
 ## Public API highlights
 

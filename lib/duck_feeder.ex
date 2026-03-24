@@ -18,7 +18,7 @@ defmodule DuckFeeder do
           |<----------- {:duck_feeder_batch, ...} -----------|
           |
           v
-      Sink (durable downstream commit)
+      Sink (dedup check + DuckDB write + record applied batch)
           |
           v
       checkpoint_lsn persisted in Postgres
@@ -34,7 +34,7 @@ defmodule DuckFeeder do
       AppendStream -> TablePipeline (flush)
           |
           v
-      Sink (shared downstream commit path)
+      Sink (dedup check + DuckDB write + record applied batch)
 
   Use the delegates in this module when integrating DuckFeeder into your OTP app.
   """

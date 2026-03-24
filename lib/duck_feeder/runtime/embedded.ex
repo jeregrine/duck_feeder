@@ -13,7 +13,7 @@ defmodule DuckFeeder.Runtime.Embedded do
       Postgrex metadata connection
           |
           v
-      DuckFeeder.seed_meta/3
+      DuckFeeder.Bootstrap.seed_meta_validated/3
           |
           v
       DuckFeeder.Runtime.Supervisor (stream worker)

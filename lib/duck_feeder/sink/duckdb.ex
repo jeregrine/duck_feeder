@@ -8,17 +8,20 @@ defmodule DuckFeeder.Sink.DuckDB do
   - append batches are inserted directly into target tables
   - CDC batches are applied as table operations (`MERGE`, `DELETE`, `TRUNCATE`)
   - checkpoints are persisted through `DuckFeeder.Meta`
+  - batches are tracked inside DuckDB (`duck_feeder_internal.applied_batches`)
+    so that a retry after a failed checkpoint write is deduped instead of duplicated
 
-  Optional DuckDB config lives in `context[:duckdb]`:
+  DuckDB config lives in `context[:duckdb]`:
 
       %{
-        conn: pid(),
-        catalog: "lake",
-        setup_sql: ["INSTALL ducklake", "LOAD ducklake"],
-        setup_fun: &my_setup/1
+        conn: pid(),            # required — the Dux connection pid
+        catalog: "lake",        # optional — DuckLake catalog prefix
+        setup_sql: ["INSTALL ducklake", "LOAD ducklake"],  # optional — run once per conn
+        setup_fun: &my_setup/1  # optional — run once per conn
       }
 
-  `:conn` is required in `context[:duckdb]`.
+  Setup hooks are memoized per connection and automatically re-run if the
+  connection process restarts.
   """
 
   @behaviour DuckFeeder.Sink

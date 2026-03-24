@@ -51,6 +51,30 @@ The goal is to verify DuckFeeder works cleanly with DuckLake configured the way 
   - append checkpoint-key fallback
   - idempotent DuckLake attach setup in tests
   - snapshot-created numeric columns followed by CDC string values
+- hardened `Sink.DuckDB` SQL construction:
+  - `validate_sql_type/1` allowlist for type names interpolated into SQL
+  - `escape_sql_string/1` now escapes backslashes and rejects null bytes
+  - `fetch_target_columns/3` replaced separate `relation_exists?` + `describe_columns` with single query
+  - `infer_columns/2` rewritten as single-pass with target column type overrides
+  - `rows_sources/2` chunks large batches instead of building one giant `VALUES` clause
+- added DuckDB-side batch dedup tracking (`duck_feeder_internal.applied_batches`) so retries after failed Postgres checkpoint writes are skipped
+- added `with_transaction` try/rescue/catch cleanup so DuckDB connection is always rolled back on crash
+- removed implicit global DuckDB connection fallback — `duckdb.conn` is now required
+- added ETS setup invalidation on connection death via monitor/watcher
+- removed `normalize_cdc_value` type coercion — CDC values are now passed through without string-to-integer/boolean guessing
+- extracted shared batch dispatch logic into `BatchDispatch` module
+- fixed `Runtime.Manager.stop_source/2` to actually stop the source supervisor process
+- fixed `Meta.Store.fetch_start_lsn/3` to fall back to default when any checkpoint key is missing
+- fixed `Meta.Store.lsn_param/1` to return error tuples instead of raising
+- fixed `Config` to accept map-shaped designated tables with string keys
+- fixed `Runtime.Shared.fetch_duckdb!/1` to raise a helpful error message
+- fixed `Runtime.Supervisor` to avoid injecting `duckdb: nil` when neither key was provided
+- fixed `StreamSupport.designated_table_config_mapping/1` to normalize tables before extracting target relations
+- added `DesignatedTable.normalize/1` for consistent atom-key handling of string-keyed maps
+- added `priv` to hex package `files`
+- removed `jason` optional dependency (uses Elixir 1.19+ built-in `JSON`)
+- added CI matrix testing against OTP 27 and OTP 28
+- widened `compatible_type?/2` to handle integer/float promotion paths
 
 ## Highest-priority next steps
 
@@ -107,11 +131,10 @@ Next steps here:
 
 After docs + matrix cleanup:
 
-- replace giant `VALUES` SQL generation with a better bulk-write path
-- reduce `infer_columns/1` overhead
+- consider parameterized query paths for DuckDB writes instead of string interpolation
 - keep auditing dynamic SQL construction/validation
 - add more large-batch correctness coverage
-- decide whether CDC value normalization should stay heuristic or become more explicitly typed
+- consider whether the `applied_batches` dedup table needs periodic cleanup/compaction
 
 ## Nice-to-have follow-ons
 

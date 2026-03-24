@@ -6,8 +6,9 @@ defmodule DuckFeeder.Sink do
   above this module. The sink is the seam where a flushed table batch becomes a
   durable downstream commit.
 
-  The default sink is DuckDB-backed. Legacy object-storage/downstream code is
-  being removed rather than preserved.
+  The default (and currently only) sink is `DuckFeeder.Sink.DuckDB`, which
+  writes directly into DuckDB-managed tables and tracks applied batches for
+  deduplication.
   """
 
   @type context :: map()

@@ -67,9 +67,17 @@ If the checkpoint is not advancing:
 
 Remember: WAL ACK will not advance before DuckDB commit plus checkpoint persistence.
 
+Note: if a checkpoint write to Postgres fails after the DuckDB write succeeded, the batch is tracked inside DuckDB (`duck_feeder_internal.applied_batches`) so it will be skipped on the next retry. You can inspect this with:
+
+```sql
+SELECT * FROM duck_feeder_internal.applied_batches;
+```
+
 ## Incompatible schema change
 
-DuckFeeder handles additive columns automatically, but destructive or ambiguous changes should fail closed.
+DuckFeeder handles additive columns automatically, but destructive or ambiguous changes fail closed.
+
+During CDC merges, DuckFeeder respects existing target column types — incoming CDC values are cast to the target type rather than being re-inferred from the raw WAL values. Type compatibility follows widening rules (e.g. `INTEGER` column accepts `SMALLINT` values; `VARCHAR` accepts anything). Incompatible narrowing changes will produce an error.
 
 If a source column changes type incompatibly, expect startup or batch processing to stop loudly instead of guessing.
 
