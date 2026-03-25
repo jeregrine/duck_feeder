@@ -1,7 +1,7 @@
 defmodule DuckFeeder.RuntimeSupport do
   @moduledoc false
 
-  alias DuckFeeder.DesignatedTable
+  alias DuckFeeder.{DesignatedTable, Meta}
   alias DuckFeeder.DuckDB.{Connection, Init}
 
   @spec resolve_common_init([map()], keyword(), keyword()) :: {:ok, map()} | {:error, term()}
@@ -42,7 +42,7 @@ defmodule DuckFeeder.RuntimeSupport do
            meta_conn: Keyword.fetch!(opts, :meta_conn),
            designated_tables_by_target: designated_tables_by_target,
            duckdb: duckdb,
-           meta_module: Keyword.get(opts, :meta_module),
+           meta_module: Keyword.get(opts, :meta_module, Meta),
            batch_processor: batch_processor
          }
        }}
