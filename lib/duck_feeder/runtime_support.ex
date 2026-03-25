@@ -7,7 +7,8 @@ defmodule DuckFeeder.RuntimeSupport do
   @spec resolve_common_init([map()], keyword(), keyword()) :: {:ok, map()} | {:error, term()}
   def resolve_common_init(designated_tables, opts, defaults \\ [])
       when is_list(designated_tables) and is_list(opts) and is_list(defaults) do
-    with {:ok, duckdb} <- Connection.resolve_opts(opts),
+    with {:ok, duckdb_opts} <- Connection.resolve_opts(opts),
+         {:ok, duckdb} <- start_duckdb(duckdb_opts),
          :ok <- Init.initialize(duckdb),
          {:ok, batch_processor} <- normalize_batch_processor(Keyword.get(opts, :batch_processor)),
          {:ok, max_inflight_batches} <-
@@ -53,6 +54,23 @@ defmodule DuckFeeder.RuntimeSupport do
     do: {:ok, value}
 
   def normalize_positive_integer(value, key), do: {:error, {:invalid_option, key, value}}
+
+  defp start_duckdb(%{conn: conn} = duckdb) when is_pid(conn), do: {:ok, duckdb}
+
+  defp start_duckdb(duckdb_opts) when is_map(duckdb_opts) do
+    start_opts =
+      [name: nil, path: Map.get(duckdb_opts, :path)]
+      |> Enum.reject(fn {key, value} -> is_nil(value) and key != :name end)
+
+    with {:ok, server} <- Connection.start_link(start_opts) do
+      {:ok,
+       duckdb_opts
+       |> Map.put(:server, server)
+       |> Map.put(:conn, Connection.get_conn(server))}
+    else
+      {:error, reason} -> {:error, {:duckdb_connection_start_failed, reason}}
+    end
+  end
 
   defp normalize_batch_processor(nil), do: {:ok, &DuckFeeder.Sink.DuckDB.process_batch/3}
   defp normalize_batch_processor(fun) when is_function(fun, 3), do: {:ok, fun}

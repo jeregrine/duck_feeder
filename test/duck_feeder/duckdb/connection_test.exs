@@ -3,37 +3,19 @@ defmodule DuckFeeder.DuckDB.ConnectionTest do
 
   alias DuckFeeder.DuckDB.Connection
 
-  test "resolve_opts explicitly stops owned duckdb connections when the caller exits normally" do
-    parent = self()
-
-    _caller =
-      spawn(fn ->
-        Process.flag(:trap_exit, true)
-
-        assert {:ok, %{conn: conn, server: server}} =
-                 Connection.resolve_opts(duckdb: %{})
-
-        send(parent, {:resolved_duckdb_conn, conn, server})
-      end)
-
-    assert_receive {:resolved_duckdb_conn, conn, server}
-    assert is_pid(conn)
-    assert is_pid(server)
-
-    assert_eventually(fn -> not Process.alive?(server) end)
-    assert_eventually(fn -> not Process.alive?(conn) end)
+  test "resolve_opts leaves owned duckdb startup to the caller" do
+    assert {:ok, duckdb} = Connection.resolve_opts(duckdb: %{})
+    assert duckdb == %{}
   end
 
-  defp assert_eventually(fun, attempts \\ 20)
+  test "resolve_opts keeps explicit external connections" do
+    assert {:ok, server} = Connection.start_link(name: nil)
+    conn = Connection.get_conn(server)
 
-  defp assert_eventually(fun, attempts) when attempts > 0 do
-    if fun.() do
-      :ok
-    else
-      Process.sleep(25)
-      assert_eventually(fun, attempts - 1)
+    try do
+      assert {:ok, %{conn: ^conn}} = Connection.resolve_opts(duckdb: %{conn: conn})
+    after
+      GenServer.stop(server)
     end
   end
-
-  defp assert_eventually(_fun, 0), do: flunk("condition did not become true")
 end

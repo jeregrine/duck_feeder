@@ -130,22 +130,19 @@ defmodule DuckFeeder.Service do
   def init(opts) do
     designated_tables = Keyword.fetch!(opts, :designated_tables)
 
-    {:ok, ingest_pid} =
-      Ingest.start_link(
-        designated_tables: designated_tables,
-        sink_pid: self(),
-        pipeline_opts: Keyword.get(opts, :pipeline_opts, %{})
-      )
-
-    {:ok, cdc_pipeline_pid} =
-      Pipeline.start_link(
-        ingest_pid: ingest_pid,
-        max_tx_changes: Keyword.get(opts, :max_tx_changes)
-      )
-
-    {:ok, batch_task_supervisor} = Task.Supervisor.start_link(strategy: :one_for_one)
-
     with {:ok, common} <- RuntimeSupport.resolve_common_init(designated_tables, opts),
+         {:ok, ingest_pid} <-
+           Ingest.start_link(
+             designated_tables: designated_tables,
+             sink_pid: self(),
+             pipeline_opts: Keyword.get(opts, :pipeline_opts, %{})
+           ),
+         {:ok, cdc_pipeline_pid} <-
+           Pipeline.start_link(
+             ingest_pid: ingest_pid,
+             max_tx_changes: Keyword.get(opts, :max_tx_changes)
+           ),
+         {:ok, batch_task_supervisor} <- Task.Supervisor.start_link(strategy: :one_for_one),
          {:ok, snapshot_lsn_counter} <- snapshot_lsn_counter(opts) do
       {:ok,
        %State{
