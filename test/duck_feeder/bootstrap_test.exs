@@ -169,6 +169,42 @@ defmodule DuckFeeder.BootstrapTest do
     assert orders.checkpoint_key == "source-a:raw.orders_iceberg"
   end
 
+  test "supports string-key table selection maps at the bootstrap boundary" do
+    config = %{
+      source: %{
+        postgres_url: "postgres://source",
+        slot_name: "duck_slot",
+        publication_name: "duck_pub",
+        designated_tables: []
+      },
+      duckdb: %{
+        path: "/tmp/source-a.duckdb"
+      },
+      metadata: %{postgres_url: "postgres://meta"}
+    }
+
+    assert {:ok, %{designated_tables: [table]}} =
+             Bootstrap.seed_meta(:meta_conn, config,
+               meta_module: FakeMeta,
+               source_name: "source-a",
+               tables: [
+                 %{
+                   "source_schema" => "public",
+                   "source_table" => "users",
+                   "target_schema" => "analytics",
+                   "target_table" => "users_copy",
+                   "primary_keys" => ["id"]
+                 }
+               ]
+             )
+
+    assert table.source_schema == "public"
+    assert table.target_schema == "analytics"
+    assert table.target_table == "users_copy"
+    assert table.primary_keys == ["id"]
+    assert table.checkpoint_key == "source-a:analytics.users_copy"
+  end
+
   test "returns error for invalid table selection opts" do
     config = %{
       source: %{

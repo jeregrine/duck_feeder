@@ -3,7 +3,7 @@ defmodule DuckFeeder.Bootstrap do
   Helpers for bootstrapping `duckfeeder_meta` from runtime config.
   """
 
-  alias DuckFeeder.{Config, Meta, Runtime}
+  alias DuckFeeder.{Config, DesignatedTable, Meta, Runtime}
   alias DuckFeeder.CDC.ConnectionOptions
 
   @spec seed_meta(pid(), map() | keyword(), keyword()) :: {:ok, map()} | {:error, term()}
@@ -120,20 +120,18 @@ defmodule DuckFeeder.Bootstrap do
   end
 
   defp normalize_selection(selection) when is_map(selection) do
-    selection = Map.new(selection)
+    selection = selection |> Map.new() |> DesignatedTable.normalize()
 
-    case Map.get(selection, :source_table) || Map.get(selection, "source_table") do
+    case Map.get(selection, :source_table) do
       source_table when is_binary(source_table) and source_table != "" ->
         {:ok,
          %{
-           source_schema:
-             Map.get(selection, :source_schema) || Map.get(selection, "source_schema"),
+           source_schema: Map.get(selection, :source_schema),
            source_table: source_table,
-           target_schema:
-             Map.get(selection, :target_schema) || Map.get(selection, "target_schema"),
-           target_table: Map.get(selection, :target_table) || Map.get(selection, "target_table"),
-           mode: Map.get(selection, :mode) || Map.get(selection, "mode"),
-           primary_keys: Map.get(selection, :primary_keys) || Map.get(selection, "primary_keys")
+           target_schema: Map.get(selection, :target_schema),
+           target_table: Map.get(selection, :target_table),
+           mode: Map.get(selection, :mode),
+           primary_keys: Map.get(selection, :primary_keys)
          }
          |> Enum.reject(fn {_k, v} -> is_nil(v) end)
          |> Map.new()}

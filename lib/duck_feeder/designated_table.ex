@@ -46,9 +46,8 @@ defmodule DuckFeeder.DesignatedTable do
 
   @spec put_checkpoint_key(t(), String.t() | nil) :: t()
   def put_checkpoint_key(designated_table, prefix \\ nil) when is_map(designated_table) do
-    designated_table
-    |> normalize()
-    |> Map.put_new(:checkpoint_key, checkpoint_key(designated_table, prefix))
+    normalized_table = normalize(designated_table)
+    Map.put_new(normalized_table, :checkpoint_key, checkpoint_key(normalized_table, prefix))
   end
 
   @spec checkpoint_keys([t()], String.t() | nil) :: [String.t()]
@@ -58,6 +57,8 @@ defmodule DuckFeeder.DesignatedTable do
 
   @spec checkpoint_key(t(), String.t() | nil) :: String.t()
   def checkpoint_key(designated_table, prefix \\ nil) when is_map(designated_table) do
+    designated_table = normalize(designated_table)
+
     case fetch_value(designated_table, :checkpoint_key) do
       value when is_binary(value) and value != "" ->
         value
@@ -75,6 +76,8 @@ defmodule DuckFeeder.DesignatedTable do
 
   @spec target_relation(t()) :: {String.t(), String.t()}
   def target_relation(designated_table) when is_map(designated_table) do
+    designated_table = normalize(designated_table)
+
     {fetch_string!(designated_table, :target_schema),
      fetch_string!(designated_table, :target_table)}
   end
@@ -107,7 +110,5 @@ defmodule DuckFeeder.DesignatedTable do
     end
   end
 
-  defp fetch_value(map, key) when is_map(map) and is_atom(key) do
-    Map.get(map, key) || Map.get(map, Atom.to_string(key))
-  end
+  defp fetch_value(map, key) when is_map(map) and is_atom(key), do: Map.get(map, key)
 end

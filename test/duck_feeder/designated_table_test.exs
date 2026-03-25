@@ -20,4 +20,16 @@ defmodule DuckFeeder.DesignatedTableTest do
     assert table.target_table == "users"
     assert table.checkpoint_key == "source-a:raw.users"
   end
+
+  test "target_relation and checkpoint_key normalize string-key designated tables at the boundary" do
+    designated_table = %{
+      "source_schema" => "public",
+      "source_table" => "users",
+      "target_schema" => "raw",
+      "target_table" => "users"
+    }
+
+    assert DesignatedTable.target_relation(designated_table) == {"raw", "users"}
+    assert DesignatedTable.checkpoint_key(designated_table, "source-a") == "source-a:raw.users"
+  end
 end
