@@ -1,5 +1,4 @@
 Code.require_file("../test_support/integration_helpers.ex", __DIR__)
-Code.require_file("../test_support/process_helpers.ex", __DIR__)
 Code.require_file("../test_support/duckdb_helpers.ex", __DIR__)
 Code.require_file("../test_support/fake_meta.ex", __DIR__)
 

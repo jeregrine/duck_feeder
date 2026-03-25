@@ -89,7 +89,8 @@ defmodule DuckFeeder.DuckDB.Connection do
     receive do
       {:DOWN, ^owner_ref, :process, ^owner, _reason} ->
         clear_owned_conn_watcher(server)
-        safe_stop(server)
+        Process.exit(server, :shutdown)
+        :ok
 
       {:DOWN, ^server_ref, :process, ^server, _reason} ->
         clear_owned_conn_watcher(server)
@@ -121,13 +122,4 @@ defmodule DuckFeeder.DuckDB.Connection do
         :ok
     end
   end
-
-  defp safe_stop(pid) when is_pid(pid) do
-    _ = GenServer.stop(pid, :shutdown)
-    :ok
-  catch
-    :exit, _reason -> :ok
-  end
-
-  defp safe_stop(_other), do: :ok
 end

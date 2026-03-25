@@ -6,23 +6,22 @@ defmodule DuckFeeder.AppendStreamTest do
   alias DuckFeeder.AppendStream
   alias DuckFeeder.TestSupport.DuckDBHelpers
   alias DuckFeeder.TestSupport.FakeMeta
-  alias DuckFeeder.TestSupport.ProcessHelpers
 
   test "appends event rows and processes batch" do
     path = DuckDBHelpers.temp_duckdb_path("append_stream")
 
-    {:ok, stream} =
-      AppendStream.start_link(
-        designated_tables: [%{id: 1, target_schema: "raw", target_table: "events"}],
-        meta_module: FakeMeta,
-        meta_conn: self(),
-        duckdb: %{path: path},
-        pipeline_opts: %{max_rows: 1, max_bytes: 10_000, flush_interval_ms: 60_000},
-        observer_pid: self()
+    stream =
+      start_supervised!(
+        {AppendStream,
+         designated_tables: [%{id: 1, target_schema: "raw", target_table: "events"}],
+         meta_module: FakeMeta,
+         meta_conn: self(),
+         duckdb: %{path: path},
+         pipeline_opts: %{max_rows: 1, max_bytes: 10_000, flush_interval_ms: 60_000},
+         observer_pid: self()}
       )
 
     on_exit(fn ->
-      ProcessHelpers.safe_stop(stream)
       _ = File.rm(path)
     end)
 
@@ -41,32 +40,26 @@ defmodule DuckFeeder.AppendStreamTest do
   end
 
   test "returns error for unknown target table" do
-    {:ok, stream} =
-      AppendStream.start_link(
-        designated_tables: [%{id: 1, target_schema: "raw", target_table: "events"}],
-        meta_module: FakeMeta,
-        meta_conn: self()
+    stream =
+      start_supervised!(
+        {AppendStream,
+         designated_tables: [%{id: 1, target_schema: "raw", target_table: "events"}],
+         meta_module: FakeMeta,
+         meta_conn: self()}
       )
-
-    on_exit(fn ->
-      ProcessHelpers.safe_stop(stream)
-    end)
 
     assert {:error, {:unknown_target_table, {"raw", "missing"}}} =
              AppendStream.append(stream, "missing", %{"kind" => "log"})
   end
 
   test "returns error for invalid explicit lsn without crashing stream" do
-    {:ok, stream} =
-      AppendStream.start_link(
-        designated_tables: [%{id: 1, target_schema: "raw", target_table: "events"}],
-        meta_module: FakeMeta,
-        meta_conn: self()
+    stream =
+      start_supervised!(
+        {AppendStream,
+         designated_tables: [%{id: 1, target_schema: "raw", target_table: "events"}],
+         meta_module: FakeMeta,
+         meta_conn: self()}
       )
-
-    on_exit(fn ->
-      ProcessHelpers.safe_stop(stream)
-    end)
 
     assert {:error, {:invalid_lsn, {:invalid_lsn, "bad"}}} =
              AppendStream.append(stream, "events", %{"kind" => "log"}, lsn: "bad")
@@ -78,24 +71,24 @@ defmodule DuckFeeder.AppendStreamTest do
     path = DuckDBHelpers.temp_duckdb_path("append_stream_startup_setup")
     caller = self()
 
-    {:ok, stream} =
-      AppendStream.start_link(
-        designated_tables: [%{id: 1, target_schema: "raw", target_table: "events"}],
-        meta_module: FakeMeta,
-        meta_conn: self(),
-        duckdb: %{
-          path: path,
-          setup_sql: ["CREATE SCHEMA IF NOT EXISTS raw"],
-          setup_fun: fn _conn ->
-            send(caller, :append_stream_duckdb_setup_ran)
-            :ok
-          end
-        },
-        observer_pid: self()
+    _stream =
+      start_supervised!(
+        {AppendStream,
+         designated_tables: [%{id: 1, target_schema: "raw", target_table: "events"}],
+         meta_module: FakeMeta,
+         meta_conn: self(),
+         duckdb: %{
+           path: path,
+           setup_sql: ["CREATE SCHEMA IF NOT EXISTS raw"],
+           setup_fun: fn _conn ->
+             send(caller, :append_stream_duckdb_setup_ran)
+             :ok
+           end
+         },
+         observer_pid: self()}
       )
 
     on_exit(fn ->
-      ProcessHelpers.safe_stop(stream)
       _ = File.rm(path)
     end)
 
@@ -124,18 +117,18 @@ defmodule DuckFeeder.AppendStreamTest do
   test "supports explicit flush for append stream table" do
     path = DuckDBHelpers.temp_duckdb_path("append_stream_flush")
 
-    {:ok, stream} =
-      AppendStream.start_link(
-        designated_tables: [%{id: 1, target_schema: "raw", target_table: "events"}],
-        meta_module: FakeMeta,
-        meta_conn: self(),
-        duckdb: %{path: path},
-        pipeline_opts: %{max_rows: 100, max_bytes: 10_000, flush_interval_ms: 60_000},
-        observer_pid: self()
+    stream =
+      start_supervised!(
+        {AppendStream,
+         designated_tables: [%{id: 1, target_schema: "raw", target_table: "events"}],
+         meta_module: FakeMeta,
+         meta_conn: self(),
+         duckdb: %{path: path},
+         pipeline_opts: %{max_rows: 100, max_bytes: 10_000, flush_interval_ms: 60_000},
+         observer_pid: self()}
       )
 
     on_exit(fn ->
-      ProcessHelpers.safe_stop(stream)
       _ = File.rm(path)
     end)
 
@@ -155,24 +148,25 @@ defmodule DuckFeeder.AppendStreamTest do
       Process.flag(:trap_exit, previous)
     end)
 
-    {:ok, stream} =
-      AppendStream.start_link(
-        designated_tables: [%{id: 1, target_schema: "raw", target_table: "events"}],
-        meta_module: FakeMeta,
-        meta_conn: self(),
-        observer_pid: self(),
-        max_inflight_batches: 1,
-        max_pending_batches: 1,
-        batch_processor: fn _context, _table, _batch ->
-          Process.sleep(250)
+    stream =
+      start_supervised!(
+        {AppendStream,
+         designated_tables: [%{id: 1, target_schema: "raw", target_table: "events"}],
+         meta_module: FakeMeta,
+         meta_conn: self(),
+         observer_pid: self(),
+         max_inflight_batches: 1,
+         max_pending_batches: 1,
+         batch_processor: fn _context, _table, _batch ->
+           Process.sleep(250)
 
-          {:ok,
-           %{
-             status: :committed,
-             checkpoint_key: "duck_feeder_append:raw.events",
-             checkpoint_lsn: "0/1"
-           }}
-        end
+           {:ok,
+            %{
+              status: :committed,
+              checkpoint_key: "duck_feeder_append:raw.events",
+              checkpoint_lsn: "0/1"
+            }}
+         end}
       )
 
     batch = %{
@@ -199,7 +193,8 @@ defmodule DuckFeeder.AppendStreamTest do
                       {:batch_queue_overflow, 1}},
                      1_000
 
-      assert_receive {:EXIT, ^stream, {:batch_queue_overflow, 1}}, 1_000
+      ref = Process.monitor(stream)
+      assert_receive {:DOWN, ^ref, :process, ^stream, {:batch_queue_overflow, 1}}, 1_000
     end)
   end
 
@@ -210,25 +205,26 @@ defmodule DuckFeeder.AppendStreamTest do
       Process.flag(:trap_exit, previous)
     end)
 
-    {:ok, stream} =
-      AppendStream.start_link(
-        designated_tables: [%{id: 1, target_schema: "raw", target_table: "events"}],
-        meta_module: FakeMeta,
-        meta_conn: self(),
-        observer_pid: self(),
-        max_inflight_batches: 1,
-        max_pending_batches: 1,
-        overflow_strategy: :drop_oldest,
-        batch_processor: fn _context, _table, _batch ->
-          Process.sleep(250)
+    stream =
+      start_supervised!(
+        {AppendStream,
+         designated_tables: [%{id: 1, target_schema: "raw", target_table: "events"}],
+         meta_module: FakeMeta,
+         meta_conn: self(),
+         observer_pid: self(),
+         max_inflight_batches: 1,
+         max_pending_batches: 1,
+         overflow_strategy: :drop_oldest,
+         batch_processor: fn _context, _table, _batch ->
+           Process.sleep(250)
 
-          {:ok,
-           %{
-             status: :committed,
-             checkpoint_key: "duck_feeder_append:raw.events",
-             checkpoint_lsn: "0/1"
-           }}
-        end
+           {:ok,
+            %{
+              status: :committed,
+              checkpoint_key: "duck_feeder_append:raw.events",
+              checkpoint_lsn: "0/1"
+            }}
+         end}
       )
 
     batch = %{rows: [%{"kind" => "telemetry"}], row_count: 1, lsn_start: "0/1", lsn_end: "0/1"}
@@ -262,8 +258,6 @@ defmodule DuckFeeder.AppendStreamTest do
 
     assert last_batch.lsn_end == "0/3"
     refute_received {:EXIT, ^stream, _}
-
-    ProcessHelpers.safe_stop(stream)
   end
 
   test "validates append stream queue options" do

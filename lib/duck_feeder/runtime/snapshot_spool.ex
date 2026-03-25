@@ -196,8 +196,10 @@ defmodule DuckFeeder.Runtime.SnapshotSpool do
        when is_binary(path) and is_integer(row_count) and row_count >= 0 and
               is_integer(replayed_count) and replayed_count >= 0 do
     if replayed_count >= row_count do
-      _ = safe_delete_snapshot_spool(path)
-      {:ok, []}
+      case safe_delete_snapshot_spool(path) do
+        :ok -> {:ok, []}
+        {:error, reason} -> {:error, reason}
+      end
     else
       {:ok, {:spooled_snapshot_rows, path, replayed_count, row_count}}
     end

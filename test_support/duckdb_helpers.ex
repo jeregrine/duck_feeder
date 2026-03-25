@@ -3,7 +3,6 @@ defmodule DuckFeeder.TestSupport.DuckDBHelpers do
 
   alias DuckFeeder.DuckDB.Client, as: DuckDBClient
   alias DuckFeeder.DuckDB.Connection, as: DuckDBConnection
-  alias DuckFeeder.TestSupport.ProcessHelpers
 
   def temp_duckdb_path(prefix) when is_binary(prefix) do
     path =
@@ -24,7 +23,7 @@ defmodule DuckFeeder.TestSupport.DuckDBHelpers do
       {:ok, result} = DuckDBClient.query_map(conn, sql)
       result
     after
-      ProcessHelpers.safe_stop(server)
+      GenServer.stop(server)
     end
   end
 end

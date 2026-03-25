@@ -6,7 +6,6 @@ defmodule DuckFeeder.Sink.DuckDBTest do
   alias DuckFeeder.DuckDB.Connection, as: DuckDBConnection
   alias DuckFeeder.DuckDB.Init, as: DuckDBInit
   alias DuckFeeder.Sink.DuckDB
-  alias DuckFeeder.TestSupport.ProcessHelpers
 
   defmodule FakeMeta do
     def upsert_checkpoint(conn, checkpoint_key, lsn) do
@@ -36,13 +35,14 @@ defmodule DuckFeeder.Sink.DuckDBTest do
   end
 
   setup do
-    {:ok, server} = DuckDBConnection.start_link(name: nil)
+    server =
+      start_supervised!(%{
+        id: {:sink_duckdb_connection, System.unique_integer([:positive])},
+        start: {DuckDBConnection, :start_link, [[name: nil]]}
+      })
+
     conn = DuckDBConnection.get_conn(server)
     :ok = DuckDBInit.initialize(%{server: server, conn: conn})
-
-    on_exit(fn ->
-      ProcessHelpers.safe_stop(server)
-    end)
 
     {:ok, conn: conn}
   end

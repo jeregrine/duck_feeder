@@ -7,7 +7,6 @@ defmodule DuckFeeder.ServiceTest do
   alias DuckFeeder.Service
   alias DuckFeeder.TestSupport.DuckDBHelpers
   alias DuckFeeder.TestSupport.FakeMeta
-  alias DuckFeeder.TestSupport.ProcessHelpers
 
   test "runs end-to-end from CDC event to committed DuckDB batch" do
     path = DuckDBHelpers.temp_duckdb_path("service_end_to_end")
@@ -22,18 +21,18 @@ defmodule DuckFeeder.ServiceTest do
       }
     ]
 
-    {:ok, service} =
-      Service.start_link(
-        designated_tables: designated_tables,
-        meta_conn: self(),
-        meta_module: FakeMeta,
-        duckdb: %{path: path},
-        pipeline_opts: %{max_rows: 1, max_bytes: 10_000, flush_interval_ms: 60_000},
-        observer_pid: self()
+    service =
+      start_supervised!(
+        {Service,
+         designated_tables: designated_tables,
+         meta_conn: self(),
+         meta_module: FakeMeta,
+         duckdb: %{path: path},
+         pipeline_opts: %{max_rows: 1, max_bytes: 10_000, flush_interval_ms: 60_000},
+         observer_pid: self()}
       )
 
     on_exit(fn ->
-      ProcessHelpers.safe_stop(service)
       _ = File.rm(path)
     end)
 
@@ -74,32 +73,32 @@ defmodule DuckFeeder.ServiceTest do
     path = DuckDBHelpers.temp_duckdb_path("service_startup_setup")
     caller = self()
 
-    {:ok, service} =
-      Service.start_link(
-        designated_tables: [
-          %{
-            id: 1,
-            source_schema: "public",
-            source_table: "users",
-            target_schema: "raw",
-            target_table: "users"
-          }
-        ],
-        meta_conn: self(),
-        meta_module: FakeMeta,
-        duckdb: %{
-          path: path,
-          setup_sql: ["CREATE SCHEMA IF NOT EXISTS raw"],
-          setup_fun: fn _conn ->
-            send(caller, :service_duckdb_setup_ran)
-            :ok
-          end
-        },
-        observer_pid: self()
+    _service =
+      start_supervised!(
+        {Service,
+         designated_tables: [
+           %{
+             id: 1,
+             source_schema: "public",
+             source_table: "users",
+             target_schema: "raw",
+             target_table: "users"
+           }
+         ],
+         meta_conn: self(),
+         meta_module: FakeMeta,
+         duckdb: %{
+           path: path,
+           setup_sql: ["CREATE SCHEMA IF NOT EXISTS raw"],
+           setup_fun: fn _conn ->
+             send(caller, :service_duckdb_setup_ran)
+             :ok
+           end
+         },
+         observer_pid: self()}
       )
 
     on_exit(fn ->
-      ProcessHelpers.safe_stop(service)
       _ = File.rm(path)
     end)
 
@@ -146,18 +145,18 @@ defmodule DuckFeeder.ServiceTest do
       }
     ]
 
-    {:ok, service} =
-      Service.start_link(
-        designated_tables: designated_tables,
-        meta_conn: self(),
-        meta_module: FakeMeta,
-        duckdb: %{path: path},
-        pipeline_opts: %{max_rows: 1, max_bytes: 10_000, flush_interval_ms: 60_000},
-        observer_pid: self()
+    service =
+      start_supervised!(
+        {Service,
+         designated_tables: designated_tables,
+         meta_conn: self(),
+         meta_module: FakeMeta,
+         duckdb: %{path: path},
+         pipeline_opts: %{max_rows: 1, max_bytes: 10_000, flush_interval_ms: 60_000},
+         observer_pid: self()}
       )
 
     on_exit(fn ->
-      ProcessHelpers.safe_stop(service)
       _ = File.rm(path)
     end)
 
@@ -191,18 +190,18 @@ defmodule DuckFeeder.ServiceTest do
       target_table: "users"
     }
 
-    {:ok, service} =
-      Service.start_link(
-        designated_tables: [designated_table],
-        meta_conn: self(),
-        meta_module: FakeMeta,
-        duckdb: %{path: path},
-        pipeline_opts: %{max_rows: 1, max_bytes: 10_000, flush_interval_ms: 60_000},
-        observer_pid: self()
+    service =
+      start_supervised!(
+        {Service,
+         designated_tables: [designated_table],
+         meta_conn: self(),
+         meta_module: FakeMeta,
+         duckdb: %{path: path},
+         pipeline_opts: %{max_rows: 1, max_bytes: 10_000, flush_interval_ms: 60_000},
+         observer_pid: self()}
       )
 
     on_exit(fn ->
-      ProcessHelpers.safe_stop(service)
       _ = File.rm(path)
     end)
 
@@ -247,18 +246,18 @@ defmodule DuckFeeder.ServiceTest do
       "target_table" => "users"
     }
 
-    {:ok, service} =
-      Service.start_link(
-        designated_tables: [start_table],
-        meta_conn: self(),
-        meta_module: FakeMeta,
-        duckdb: %{path: path},
-        pipeline_opts: %{max_rows: 1, max_bytes: 10_000, flush_interval_ms: 60_000},
-        observer_pid: self()
+    service =
+      start_supervised!(
+        {Service,
+         designated_tables: [start_table],
+         meta_conn: self(),
+         meta_module: FakeMeta,
+         duckdb: %{path: path},
+         pipeline_opts: %{max_rows: 1, max_bytes: 10_000, flush_interval_ms: 60_000},
+         observer_pid: self()}
       )
 
     on_exit(fn ->
-      ProcessHelpers.safe_stop(service)
       _ = File.rm(path)
     end)
 
@@ -293,16 +292,8 @@ defmodule DuckFeeder.ServiceTest do
   end
 
   test "returns CDC validation errors" do
-    {:ok, service} =
-      Service.start_link(
-        designated_tables: [],
-        meta_conn: self(),
-        observer_pid: self()
-      )
-
-    on_exit(fn ->
-      ProcessHelpers.safe_stop(service)
-    end)
+    service =
+      start_supervised!({Service, designated_tables: [], meta_conn: self(), observer_pid: self()})
 
     assert :buffering =
              Service.push_event(service, %Event.Relation{id: 1, schema: "public", table: "users"})

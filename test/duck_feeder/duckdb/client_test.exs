@@ -5,12 +5,13 @@ defmodule DuckFeeder.DuckDB.ClientTest do
   alias DuckFeeder.DuckDB.Connection, as: DuckDBConnection
 
   setup do
-    {:ok, server} = DuckDBConnection.start_link(name: nil)
-    conn = DuckDBConnection.get_conn(server)
+    server =
+      start_supervised!(%{
+        id: {:duckdb_connection, System.unique_integer([:positive])},
+        start: {DuckDBConnection, :start_link, [[name: nil]]}
+      })
 
-    on_exit(fn ->
-      safe_stop(server)
-    end)
+    conn = DuckDBConnection.get_conn(server)
 
     {:ok, conn: conn}
   end
@@ -27,12 +28,5 @@ defmodule DuckFeeder.DuckDB.ClientTest do
   test "returns a helpful error for invalid connections" do
     assert {:error, {:invalid_duckdb_conn, nil}} = Client.execute(nil, "SELECT 1")
     assert {:error, {:invalid_duckdb_conn, nil}} = Client.query_map(nil, "SELECT 1")
-  end
-
-  defp safe_stop(pid) when is_pid(pid) do
-    _ = GenServer.stop(pid)
-    :ok
-  catch
-    :exit, _reason -> :ok
   end
 end
