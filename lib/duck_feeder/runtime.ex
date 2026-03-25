@@ -91,7 +91,7 @@ defmodule DuckFeeder.Runtime do
              runtime_opts <- put_default_runtime_opt(runtime_opts, :snapshot_before_stream?, true),
              runtime_opts <-
                put_default_runtime_opt(runtime_opts, :resume_incomplete_snapshot?, true),
-             source_name = normalize_source_name(Map.get(cfg, :source_name, "default")),
+             {:ok, source_name} <- normalize_source_name(Map.get(cfg, :source_name, :default)),
              {:ok, runtime_config} <- runtime_config(cfg, source_name),
              {:ok, validated} <- Config.validate(runtime_config) do
           designated_tables =
@@ -353,8 +353,9 @@ defmodule DuckFeeder.Runtime do
     end
   end
 
-  defp normalize_source_name(name) when is_binary(name) and name != "", do: name
-  defp normalize_source_name(_name), do: "default"
+  defp normalize_source_name(:default), do: {:ok, "default"}
+  defp normalize_source_name(name) when is_binary(name) and name != "", do: {:ok, name}
+  defp normalize_source_name(name), do: {:error, {:invalid_option, :source_name, name}}
 
   defp normalize_options_map(value, _key) when is_map(value), do: {:ok, value}
 

@@ -139,6 +139,18 @@ defmodule DuckFeeder.Runtime.EmbeddedConfigTest do
              "postgres://meta_user:meta_pass@meta.local:5432/meta_db?sslmode=require"
   end
 
+  test "rejects invalid source_name types" do
+    config = %{
+      enabled: true,
+      repo: FakeRepo,
+      schemas: [Tenant],
+      duckdb: %{path: "/tmp/defaults.duckdb"},
+      source_name: 123
+    }
+
+    assert {:error, {:invalid_option, :source_name, 123}} = Runtime.resolve_app_config(config)
+  end
+
   test "use DuckFeeder.Runtime with disabled config starts in no-op mode" do
     Application.put_env(:duck_feeder, DisabledRuntime, enabled: false)
 
