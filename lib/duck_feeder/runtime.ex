@@ -464,17 +464,9 @@ defmodule DuckFeeder.Runtime do
          {:ok, _source} <- resolve_runtime_source(source_name, opts),
          {:ok, designated_tables} <- resolve_runtime_designated_tables(source_name, opts) do
       {:ok,
-       [
-         name: Keyword.get(opts, :name),
-         designated_tables: designated_tables,
-         meta_conn: meta_conn,
-         duckdb: duckdb,
-         pipeline_opts: Keyword.get(opts, :pipeline_opts, %{}),
-         max_tx_changes: Keyword.get(opts, :max_tx_changes),
-         observer_pid: Keyword.get(opts, :observer_pid),
-         meta_module: meta_module
-       ]
-       |> Enum.reject(fn {_key, value} -> is_nil(value) end)}
+       service_start_opts(meta_conn, designated_tables, duckdb, meta_module, opts,
+         name_key: :name
+       )}
     end
   end
 
@@ -659,8 +651,17 @@ defmodule DuckFeeder.Runtime do
          meta_module,
          opts
        ) do
+    service_start_opts(meta_conn, designated_tables, duckdb, meta_module, opts,
+      name_key: :service_name
+    )
+  end
+
+  defp service_start_opts(meta_conn, designated_tables, duckdb, meta_module, opts, extra_opts)
+       when is_list(designated_tables) and is_list(opts) and is_list(extra_opts) do
+    name_key = Keyword.get(extra_opts, :name_key, :name)
+
     [
-      name: Keyword.get(opts, :service_name),
+      name: Keyword.get(opts, name_key),
       designated_tables: designated_tables,
       meta_conn: meta_conn,
       duckdb: duckdb,

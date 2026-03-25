@@ -317,13 +317,19 @@ defmodule DuckFeeder.RuntimeTest do
                meta_module: FakeMeta,
                source: runtime_source("source-a"),
                designated_tables: runtime_tables("source-a"),
-               observer_pid: self()
+               observer_pid: self(),
+               snapshot_lsn_start: "0/10",
+               max_inflight_batches: 3,
+               max_pending_batches: 7
              )
 
     assert opts[:designated_tables] != []
     refute Keyword.has_key?(opts, :storage)
     assert opts[:duckdb] == duckdb
     assert opts[:meta_module] == FakeMeta
+    assert opts[:snapshot_lsn_start] == "0/10"
+    assert opts[:max_inflight_batches] == 3
+    assert opts[:max_pending_batches] == 7
   end
 
   test "starts service from explicit runtime config" do
