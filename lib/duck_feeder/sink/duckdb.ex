@@ -38,34 +38,47 @@ defmodule DuckFeeder.Sink.DuckDB do
 
     with {:ok, conn} <- duckdb_conn(context),
          {:ok, designated_table} <- designated_table(context, table),
-         {:ok, batch_lsn} <- batch_lsn_end_int(batch),
+         checkpoint_key = DesignatedTable.checkpoint_key(designated_table),
+         {:ok, rows} <- batch_rows(batch),
+         {:ok, batch_lsn_end} <- batch_lsn_end(batch),
+         {:ok, batch_lsn} <- Lsn.parse(batch_lsn_end),
          {:ok, result} <-
            apply_batch(
              conn,
              designated_table,
              table,
              batch,
-             DesignatedTable.checkpoint_key(designated_table),
+             rows,
+             checkpoint_key,
              batch_lsn,
+             batch_lsn_end,
              catalog
            ),
          {:ok, checkpoint_lsn} <-
            meta_module.upsert_checkpoint(
              Map.fetch!(context, :meta_conn),
-             DesignatedTable.checkpoint_key(designated_table),
-             batch_lsn_end(batch)
+             checkpoint_key,
+             batch_lsn_end
            ) do
       {:ok,
        result
        |> Map.put(:status, :committed)
-       |> Map.put(:checkpoint_key, DesignatedTable.checkpoint_key(designated_table))
+       |> Map.put(:checkpoint_key, checkpoint_key)
        |> Map.put(:checkpoint_lsn, checkpoint_lsn)}
     end
   end
 
-  defp apply_batch(conn, designated_table, table, batch, checkpoint_key, batch_lsn, catalog) do
-    rows = Map.get(batch, :rows, [])
-
+  defp apply_batch(
+         conn,
+         designated_table,
+         table,
+         batch,
+         rows,
+         checkpoint_key,
+         batch_lsn,
+         batch_lsn_end,
+         catalog
+       ) do
     with_transaction(conn, fn ->
       with {:ok, already_applied?} <-
              batch_already_applied?(conn, checkpoint_key, batch_lsn, catalog) do
@@ -75,20 +88,13 @@ defmodule DuckFeeder.Sink.DuckDB do
              deduped?: true,
              row_count: length(rows),
              lsn_start: Map.get(batch, :lsn_start),
-             lsn_end: batch_lsn_end(batch),
+             lsn_end: batch_lsn_end,
              table: table
            }}
         else
           with {:ok, result} <-
-                 apply_batch_rows(conn, designated_table, table, batch, rows, catalog),
-               :ok <-
-                 record_applied_batch(
-                   conn,
-                   checkpoint_key,
-                   batch_lsn,
-                   batch_lsn_end(batch),
-                   catalog
-                 ) do
+                 apply_batch_rows(conn, designated_table, table, batch, rows, batch_lsn_end, catalog),
+               :ok <- record_applied_batch(conn, checkpoint_key, batch_lsn, batch_lsn_end, catalog) do
             {:ok, Map.put(result, :deduped?, false)}
           end
         end
@@ -96,20 +102,20 @@ defmodule DuckFeeder.Sink.DuckDB do
     end)
   end
 
-  defp apply_batch_rows(conn, designated_table, table, batch, rows, catalog) do
+  defp apply_batch_rows(conn, designated_table, table, batch, rows, batch_lsn_end, catalog) do
     cond do
       rows == [] ->
         {:ok, %{row_count: 0, table: table}}
 
       cdc_batch?(rows) ->
-        apply_cdc_batch(conn, designated_table, table, batch, rows, catalog)
+        apply_cdc_batch(conn, designated_table, table, batch, rows, batch_lsn_end, catalog)
 
       true ->
-        apply_append_batch(conn, table, batch, rows, catalog)
+        apply_append_batch(conn, table, batch, rows, batch_lsn_end, catalog)
     end
   end
 
-  defp apply_append_batch(conn, table, batch, rows, catalog) do
+  defp apply_append_batch(conn, table, batch, rows, batch_lsn_end, catalog) do
     normalized_rows = Enum.map(rows, &normalize_row_map/1)
 
     with :ok <- ensure_target_schema(conn, table, catalog),
@@ -125,13 +131,13 @@ defmodule DuckFeeder.Sink.DuckDB do
        %{
          row_count: length(normalized_rows),
          lsn_start: Map.get(batch, :lsn_start),
-         lsn_end: batch_lsn_end(batch),
+         lsn_end: batch_lsn_end,
          table: table
        }}
     end
   end
 
-  defp apply_cdc_batch(conn, designated_table, table, batch, rows, catalog) do
+  defp apply_cdc_batch(conn, designated_table, table, batch, rows, batch_lsn_end, catalog) do
     primary_keys = normalize_primary_keys(Map.get(designated_table, :primary_keys, []))
     truncate? = Enum.any?(rows, &(op_code(&1) == "T"))
     {delete_rows, upsert_rows} = cdc_stage_rows(rows, primary_keys)
@@ -161,7 +167,7 @@ defmodule DuckFeeder.Sink.DuckDB do
          %{
            row_count: length(rows),
            lsn_start: Map.get(batch, :lsn_start),
-           lsn_end: batch_lsn_end(batch),
+           lsn_end: batch_lsn_end,
            table: table,
            operation_counts: %{
              truncate: if(truncate?, do: 1, else: 0),
@@ -736,15 +742,17 @@ defmodule DuckFeeder.Sink.DuckDB do
     |> to_string()
   end
 
-  defp batch_lsn_end(batch) do
-    Map.get(batch, :lsn_end) || Map.get(batch, "lsn_end") || "0/0"
-  end
+  defp batch_rows(%{rows: rows}) when is_list(rows), do: {:ok, rows}
+  defp batch_rows(%{rows: rows}), do: {:error, {:invalid_batch, {:invalid_rows, rows}}}
+  defp batch_rows(_batch), do: {:error, {:invalid_batch, :missing_rows}}
 
-  defp batch_lsn_end_int(batch) do
-    batch
-    |> batch_lsn_end()
-    |> Lsn.parse()
-  end
+  defp batch_lsn_end(%{lsn_end: lsn_end}) when is_binary(lsn_end) and lsn_end != "",
+    do: {:ok, lsn_end}
+
+  defp batch_lsn_end(%{lsn_end: lsn_end}),
+    do: {:error, {:invalid_batch, {:invalid_lsn_end, lsn_end}}}
+
+  defp batch_lsn_end(_batch), do: {:error, {:invalid_batch, :missing_lsn_end}}
 
   defp qualified_relation({schema, table}, nil), do: Enum.map_join([schema, table], ".", &qi/1)
 

@@ -315,6 +315,34 @@ defmodule DuckFeeder.Sink.DuckDBTest do
              DuckDB.process_batch(context, {"raw", "events"}, batch)
   end
 
+  test "rejects batches without rows", %{conn: conn} do
+    context =
+      sink_context(conn, [
+        %{
+          checkpoint_key: "source-a:raw.events",
+          target_schema: "raw",
+          target_table: "events"
+        }
+      ])
+
+    assert {:error, {:invalid_batch, :missing_rows}} =
+             DuckDB.process_batch(context, {"raw", "events"}, %{lsn_end: "0/31"})
+  end
+
+  test "rejects batches without lsn_end", %{conn: conn} do
+    context =
+      sink_context(conn, [
+        %{
+          checkpoint_key: "source-a:raw.events",
+          target_schema: "raw",
+          target_table: "events"
+        }
+      ])
+
+    assert {:error, {:invalid_batch, :missing_lsn_end}} =
+             DuckDB.process_batch(context, {"raw", "events"}, %{rows: [%{"id" => 1}]})
+  end
+
   test "fails closed on CDC updates without primary keys", %{conn: conn} do
     context =
       sink_context(conn, [
