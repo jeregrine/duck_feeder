@@ -246,11 +246,6 @@ If you do not want the repo/schema wrapper, DuckFeeder also supports the explici
   },
   metadata: %{
     postgres_url: "postgres://..."
-  },
-  ingest: %{
-    max_rows: 10_000,
-    max_bytes: 134_217_728,
-    flush_interval_ms: 5_000
   }
 }
 ```
@@ -263,6 +258,8 @@ Useful DuckDB options:
 - `setup_fun` - one-arg callback receiving the DuckDB connection pid
 
 Setup hooks are memoized per connection and re-run automatically if the connection process restarts.
+
+Batch sizing and queue limits are startup options, not part of the validated config map. Pass them directly to `DuckFeeder.start_stream/4`, `DuckFeeder.start_service/4`, or `DuckFeeder.start_append_stream/1` via `pipeline_opts`, `max_inflight_batches`, and `max_pending_batches`.
 
 ## Deployment note: DuckLake metadata backend
 
@@ -288,7 +285,9 @@ Main entrypoints:
 - `DuckFeeder.start_service/4`
 - `DuckFeeder.start_append_stream/1`
 - `DuckFeeder.append_event/4`
+- `DuckFeeder.flush_append_table/2`
 - `DuckFeeder.start_telemetry_forwarder/1`
+- `DuckFeeder.flush_telemetry_forwarder/1`
 
 ## More docs
 

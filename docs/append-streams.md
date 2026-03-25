@@ -68,6 +68,7 @@ Using a fixed `object_prefix` makes the checkpoint key predictable:
 object_prefix = "my_app_events"
 checkpoint_key = "#{object_prefix}:raw.app_events"
 
+# returns "0/0" if no checkpoint has been recorded yet
 {:ok, start_lsn} = DuckFeeder.Meta.fetch_checkpoint(meta_conn, checkpoint_key)
 
 {:ok, stream} =
@@ -129,6 +130,12 @@ You can append using either:
 - an explicit `{schema, table}` tuple
 
 Trying to append to an undeclared target table returns an error.
+
+You can also force a flush when needed:
+
+```elixir
+{:ok, batch} = DuckFeeder.flush_append_table(stream, "app_events")
+```
 
 ## Telemetry forwarding
 

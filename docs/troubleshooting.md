@@ -119,5 +119,5 @@ Useful queries:
 SHOW SCHEMAS;
 SHOW TABLES;
 SELECT * FROM raw.users LIMIT 10;
-SELECT * FROM raw.app_events ORDER BY at DESC LIMIT 20;
+SELECT * FROM raw.app_events LIMIT 20;
 ```

@@ -72,11 +72,16 @@ config :my_app, MyApp.DuckFeeder,
   schemas: [MyApp.Users],
   duckdb: %{path: "/var/lib/my_app/analytics.duckdb"},
   runtime_opts: [
+    pipeline_opts: %{max_rows: 5_000, max_bytes: 64 * 1_024 * 1_024, flush_interval_ms: 2_000},
+    max_inflight_batches: 2,
+    max_pending_batches: 500,
     snapshot_on_restart?: true,
     reconnect_backoff: 1_000,
     max_lag_bytes: 50_000_000
   ]
 ```
+
+Batch sizing goes through `pipeline_opts`. Batch queue limits go through `max_inflight_batches` and `max_pending_batches`.
 
 ## Separate metadata Postgres
 
@@ -124,6 +129,8 @@ config = %{
 ```
 
 This path keeps startup decisions explicit.
+
+Startup-only tuning is passed separately to `DuckFeeder.start_service/4` or `DuckFeeder.start_stream/4` through options like `pipeline_opts`, `max_inflight_batches`, and `max_pending_batches`.
 
 Notably, `DuckFeeder.start_stream/4` does not assume you want an initial snapshot unless you pass runtime options like `snapshot_before_stream?: true`.
 
