@@ -147,20 +147,10 @@ defmodule DuckFeeder.Sink.DuckDBTest do
     assert %{"n" => [1]} = query_map(conn, "SELECT count(*) AS n FROM raw.events")
   end
 
-  test "applies CDC batches as table operations", %{conn: conn} do
-    context =
-      sink_context(conn, [
-        %{
-          checkpoint_key: "source-a:raw.users",
-          source_schema: "public",
-          source_table: "users",
-          target_schema: "raw",
-          target_table: "users",
-          primary_keys: ["id"]
-        }
-      ])
+  test "applies CDC insert batches", %{conn: conn} do
+    context = users_cdc_context(conn)
 
-    initial_batch = %{
+    batch = %{
       rows: [
         cdc_row("I", %{"id" => 1, "name" => "alice"}),
         cdc_row("I", %{"id" => 2, "name" => "bob"})
@@ -169,13 +159,19 @@ defmodule DuckFeeder.Sink.DuckDBTest do
       lsn_end: "0/21"
     }
 
-    assert {:ok, initial_result} = DuckDB.process_batch(context, {"raw", "users"}, initial_batch)
-    assert initial_result.checkpoint_lsn == "0/21"
+    assert {:ok, result} = DuckDB.process_batch(context, {"raw", "users"}, batch)
+    assert result.checkpoint_lsn == "0/21"
+    assert result.operation_counts == %{truncate: 0, deletes: 0, upserts: 2}
 
     assert %{"id" => [1, 2], "name" => ["alice", "bob"]} =
              query_map(conn, "SELECT id, name FROM raw.users ORDER BY id")
+  end
 
-    update_batch = %{
+  test "applies CDC update and delete batches", %{conn: conn} do
+    context = users_cdc_context(conn)
+    seed_users_for_cdc(context)
+
+    batch = %{
       rows: [
         cdc_row("U", %{"id" => 1, "name" => "alice-2", "age" => 31}, %{
           "id" => 1,
@@ -188,23 +184,26 @@ defmodule DuckFeeder.Sink.DuckDBTest do
       lsn_end: "0/22"
     }
 
-    assert {:ok, update_result} = DuckDB.process_batch(context, {"raw", "users"}, update_batch)
-    assert update_result.operation_counts == %{truncate: 0, deletes: 1, upserts: 2}
-    assert update_result.checkpoint_lsn == "0/22"
+    assert {:ok, result} = DuckDB.process_batch(context, {"raw", "users"}, batch)
+    assert result.operation_counts == %{truncate: 0, deletes: 1, upserts: 2}
+    assert result.checkpoint_lsn == "0/22"
 
     assert %{"id" => [1, 3], "name" => ["alice-2", "carol"], "age" => [31, 28]} =
              query_map(conn, "SELECT id, name, age FROM raw.users ORDER BY id")
+  end
 
-    truncate_batch = %{
+  test "applies CDC truncate batches", %{conn: conn} do
+    context = users_cdc_context(conn)
+    seed_users_for_cdc(context)
+
+    batch = %{
       rows: [cdc_row("T", %{})],
       lsn_start: "0/22",
       lsn_end: "0/23"
     }
 
-    assert {:ok, truncate_result} =
-             DuckDB.process_batch(context, {"raw", "users"}, truncate_batch)
-
-    assert truncate_result.operation_counts == %{truncate: 1, deletes: 0, upserts: 0}
+    assert {:ok, result} = DuckDB.process_batch(context, {"raw", "users"}, batch)
+    assert result.operation_counts == %{truncate: 1, deletes: 0, upserts: 0}
     assert %{"n" => [0]} = query_map(conn, "SELECT count(*) AS n FROM raw.users")
   end
 
@@ -435,6 +434,32 @@ defmodule DuckFeeder.Sink.DuckDBTest do
       _record: record,
       _old_record: old_record
     }
+  end
+
+  defp users_cdc_context(conn) do
+    sink_context(conn, [
+      %{
+        checkpoint_key: "source-a:raw.users",
+        source_schema: "public",
+        source_table: "users",
+        target_schema: "raw",
+        target_table: "users",
+        primary_keys: ["id"]
+      }
+    ])
+  end
+
+  defp seed_users_for_cdc(context) do
+    batch = %{
+      rows: [
+        cdc_row("I", %{"id" => 1, "name" => "alice"}),
+        cdc_row("I", %{"id" => 2, "name" => "bob"})
+      ],
+      lsn_start: "0/20",
+      lsn_end: "0/21"
+    }
+
+    assert {:ok, _} = DuckDB.process_batch(context, {"raw", "users"}, batch)
   end
 
   defp sink_context(conn, designated_tables, opts \\ []) do
