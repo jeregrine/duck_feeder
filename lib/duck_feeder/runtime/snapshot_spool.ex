@@ -90,16 +90,28 @@ defmodule DuckFeeder.Runtime.SnapshotSpool do
         end
       end)
 
-    _ = safe_delete_snapshot_spool(path)
-    replay_result
+    case {replay_result, safe_delete_snapshot_spool(path)} do
+      {:ok, :ok} -> :ok
+      {{:error, _reason} = error, :ok} -> error
+      {:ok, {:error, reason}} -> {:error, {:snapshot_replay_failed, reason}}
+      {{:error, _reason} = error, {:error, _delete_reason}} -> error
+    end
   rescue
     exception ->
-      _ = safe_delete_snapshot_spool(path)
-      {:error, {:snapshot_replay_failed, {:snapshot_spool_exception, exception}}}
+      delete_result = safe_delete_snapshot_spool(path)
+
+      case delete_result do
+        :ok -> {:error, {:snapshot_replay_failed, {:snapshot_spool_exception, exception}}}
+        {:error, reason} -> {:error, {:snapshot_replay_failed, reason}}
+      end
   catch
     kind, reason ->
-      _ = safe_delete_snapshot_spool(path)
-      {:error, {:snapshot_replay_failed, {:snapshot_spool_throw, kind, reason}}}
+      delete_result = safe_delete_snapshot_spool(path)
+
+      case delete_result do
+        :ok -> {:error, {:snapshot_replay_failed, {:snapshot_spool_throw, kind, reason}}}
+        {:error, delete_reason} -> {:error, {:snapshot_replay_failed, delete_reason}}
+      end
   end
 
   defp open_snapshot_spool_file(remaining_attempts) when is_integer(remaining_attempts) do
