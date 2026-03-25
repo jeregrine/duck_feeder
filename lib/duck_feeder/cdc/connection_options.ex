@@ -185,7 +185,8 @@ defmodule DuckFeeder.CDC.ConnectionOptions do
     end
   end
 
-  defp normalize_overrides(_), do: {:ok, []}
+  defp normalize_overrides(overrides),
+    do: {:error, {:invalid_option, :connection_overrides, overrides}}
 
   defp normalize_override_key(key) when is_atom(key), do: {:ok, key}
 

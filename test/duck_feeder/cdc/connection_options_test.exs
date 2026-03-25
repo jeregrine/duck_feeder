@@ -87,6 +87,17 @@ defmodule DuckFeeder.CDC.ConnectionOptionsTest do
              ConnectionOptions.resolve(source, connection_overrides: %{"evil_key" => "x"})
   end
 
+  test "rejects invalid connection_overrides types" do
+    source = %{
+      connection_info: %{
+        "dsn" => "postgres://user:pass@localhost:5432/duck_feeder?sslmode=disable"
+      }
+    }
+
+    assert {:error, {:invalid_option, :connection_overrides, :bad}} =
+             ConnectionOptions.resolve(source, connection_overrides: :bad)
+  end
+
   test "returns errors for invalid info" do
     assert {:error, :invalid_scheme} = ConnectionOptions.parse_url("http://localhost/db")
     assert {:error, :missing_connection_info} = ConnectionOptions.resolve(%{connection_info: %{}})
