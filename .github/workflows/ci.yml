@@ -9,8 +9,8 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  ELIXIR_VERSION: "1.19.0"
-  OTP_VERSION: "28.0"
+  ELIXIR_VERSION: "1.19.5"
+  OTP_VERSION: "28.4.1"
 
 jobs:
   format:
