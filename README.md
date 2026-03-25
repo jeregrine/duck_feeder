@@ -250,8 +250,7 @@ If you do not want the repo/schema wrapper, DuckFeeder also supports the explici
   ingest: %{
     max_rows: 10_000,
     max_bytes: 134_217_728,
-    flush_interval_ms: 5_000,
-    table_worker_concurrency: 4
+    flush_interval_ms: 5_000
   }
 }
 ```

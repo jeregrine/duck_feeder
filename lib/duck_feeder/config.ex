@@ -35,8 +35,7 @@ defmodule DuckFeeder.Config do
   @ingest_schema [
     max_rows: [type: :pos_integer, default: 10_000],
     max_bytes: [type: :pos_integer, default: 128 * 1_024 * 1_024],
-    flush_interval_ms: [type: :pos_integer, default: 5_000],
-    table_worker_concurrency: [type: :pos_integer, default: 4]
+    flush_interval_ms: [type: :pos_integer, default: 5_000]
   ]
 
   @schema NimbleOptions.new!(
@@ -67,8 +66,7 @@ defmodule DuckFeeder.Config do
     "setup_fun" => :setup_fun,
     "max_rows" => :max_rows,
     "max_bytes" => :max_bytes,
-    "flush_interval_ms" => :flush_interval_ms,
-    "table_worker_concurrency" => :table_worker_concurrency
+    "flush_interval_ms" => :flush_interval_ms
   }
 
   @type t :: %{

@@ -155,4 +155,23 @@ defmodule DuckFeeder.ConfigTest do
     assert message =~ "mode"
     assert message =~ "cdc_changelog"
   end
+
+  test "rejects unused ingest table_worker_concurrency option" do
+    config = %{
+      source: %{
+        postgres_url: "postgres://source",
+        slot_name: "slot",
+        publication_name: "pub",
+        designated_tables: []
+      },
+      duckdb: %{
+        path: "/tmp/duck_feeder.duckdb"
+      },
+      metadata: %{postgres_url: "postgres://meta"},
+      ingest: %{table_worker_concurrency: 4}
+    }
+
+    assert {:error, error} = Config.validate(config)
+    assert Exception.message(error) =~ "table_worker_concurrency"
+  end
 end
