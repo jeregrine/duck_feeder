@@ -265,6 +265,19 @@ Useful DuckDB options:
 
 Setup hooks are memoized per connection and re-run automatically if the connection process restarts.
 
+## Deployment note: DuckLake metadata backend
+
+If you are using DuckLake, the metadata backend choice affects how you should deploy writers:
+
+- **DuckLake metadata in DuckDB**: treat this as a **single-writer** setup. In practice, you usually want one machine / one DuckFeeder runtime owning the writes.
+- **Postgres CDC**: for a given source, you generally want **one machine** owning the replication slot, checkpoint progression, and WAL ACK loop.
+- **DuckLake metadata in Postgres**: this is the better fit if you want **multi-writer analytics** against the same catalog. Multiple analytics writers can share the catalog more safely there.
+
+A good rule of thumb is:
+
+- keep **CDC ingestion single-writer per Postgres source**
+- use **Postgres-backed DuckLake metadata** when you want shared analytics writers
+
 ## Public API highlights
 
 Main entrypoints:
