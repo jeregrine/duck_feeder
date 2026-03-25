@@ -3,7 +3,10 @@ defmodule DuckFeeder.DuckDB.Client do
 
   def execute(conn, sql) when is_binary(sql) do
     with :ok <- validate_conn(conn) do
-      {:ok, Dux.Backend.execute(conn, sql)}
+      case Dux.Backend.execute(conn, sql) do
+        :ok -> :ok
+        other -> {:error, {:duckdb_query_failed, sql, {:unexpected_execute_result, other}}}
+      end
     end
   rescue
     exception in [ArgumentError] -> {:error, {:duckdb_query_failed, sql, exception}}
@@ -23,9 +26,7 @@ defmodule DuckFeeder.DuckDB.Client do
     exception in [ArgumentError] -> {:error, {:duckdb_query_failed, sql, exception}}
   end
 
-  defp validate_conn(conn) when is_pid(conn) do
-    if Process.alive?(conn), do: :ok, else: {:error, {:invalid_duckdb_conn, conn}}
-  end
+  defp validate_conn(conn) when is_pid(conn), do: :ok
 
   defp validate_conn(other), do: {:error, {:invalid_duckdb_conn, other}}
 end

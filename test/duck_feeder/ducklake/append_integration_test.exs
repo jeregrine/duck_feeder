@@ -23,7 +23,7 @@ defmodule DuckFeeder.DuckLake.AppendIntegrationTest do
 
   test "append stream writes into DuckLake with DuckDB metadata", %{meta_conn: meta_conn} do
     root = temp_dir!("ducklake_duckdb_append")
-    duckdb = ducklake_duckdb_config(root)
+    duckdb = ducklake_duckdb(root)
     object_prefix = unique_name("ducklake_duckdb_append")
     checkpoint_key = "#{object_prefix}:raw.events"
 

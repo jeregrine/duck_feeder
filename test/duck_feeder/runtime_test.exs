@@ -15,62 +15,64 @@ defmodule DuckFeeder.RuntimeTest do
       end
     end
 
-    def fetch_snapshot_handoff(_conn, source_id) do
+    def fetch_snapshot_handoff(_conn, source_name) do
       ensure_state_table()
 
-      case :ets.lookup(@state_table, {self(), source_id}) do
-        [{{_pid, ^source_id}, handoff}] -> {:ok, handoff}
+      case :ets.lookup(@state_table, {self(), source_name}) do
+        [{{_pid, ^source_name}, handoff}] -> {:ok, handoff}
         [] -> {:ok, nil}
       end
     end
 
-    def fail_mark_snapshot_handoff_pending(source_id, attempts)
-        when is_integer(source_id) and source_id > 0 and is_integer(attempts) and attempts >= 0 do
+    def fail_mark_snapshot_handoff_pending(source_name, attempts)
+        when is_binary(source_name) and source_name != "" and is_integer(attempts) and
+               attempts >= 0 do
       ensure_state_table()
-      true = :ets.insert(@state_table, {{self(), {:fail_pending, source_id}}, attempts})
+      true = :ets.insert(@state_table, {{self(), {:fail_pending, source_name}}, attempts})
       :ok
     end
 
-    def fail_mark_snapshot_handoff_complete(source_id, attempts)
-        when is_integer(source_id) and source_id > 0 and is_integer(attempts) and attempts >= 0 do
+    def fail_mark_snapshot_handoff_complete(source_name, attempts)
+        when is_binary(source_name) and source_name != "" and is_integer(attempts) and
+               attempts >= 0 do
       ensure_state_table()
-      true = :ets.insert(@state_table, {{self(), {:fail_complete, source_id}}, attempts})
+      true = :ets.insert(@state_table, {{self(), {:fail_complete, source_name}}, attempts})
       :ok
     end
 
-    def mark_snapshot_handoff_pending(_conn, source_id, boundary_lsn) do
+    def mark_snapshot_handoff_pending(_conn, source_name, boundary_lsn) do
       ensure_state_table()
 
-      case consume_fail_attempt({:fail_pending, source_id}) do
+      case consume_fail_attempt({:fail_pending, source_name}) do
         true ->
           {:error, :forced_mark_pending_failure}
 
         false ->
-          handoff = %{source_id: source_id, state: :pending, boundary_lsn: boundary_lsn}
-          true = :ets.insert(@state_table, {{self(), source_id}, handoff})
+          handoff = %{source_name: source_name, state: :pending, boundary_lsn: boundary_lsn}
+          true = :ets.insert(@state_table, {{self(), source_name}, handoff})
           {:ok, boundary_lsn}
       end
     end
 
-    def mark_snapshot_handoff_complete(_conn, source_id, boundary_lsn) do
+    def mark_snapshot_handoff_complete(_conn, source_name, boundary_lsn) do
       ensure_state_table()
 
-      case consume_fail_attempt({:fail_complete, source_id}) do
+      case consume_fail_attempt({:fail_complete, source_name}) do
         true ->
           {:error, :forced_mark_complete_failure}
 
         false ->
-          handoff = %{source_id: source_id, state: :complete, boundary_lsn: boundary_lsn}
-          true = :ets.insert(@state_table, {{self(), source_id}, handoff})
+          handoff = %{source_name: source_name, state: :complete, boundary_lsn: boundary_lsn}
+          true = :ets.insert(@state_table, {{self(), source_name}, handoff})
           {:ok, boundary_lsn}
       end
     end
 
-    def clear_snapshot_handoff(_conn, source_id) do
+    def clear_snapshot_handoff(_conn, source_name) do
       ensure_state_table()
-      _ = :ets.delete(@state_table, {self(), source_id})
-      _ = :ets.delete(@state_table, {self(), {:fail_pending, source_id}})
-      _ = :ets.delete(@state_table, {self(), {:fail_complete, source_id}})
+      _ = :ets.delete(@state_table, {self(), source_name})
+      _ = :ets.delete(@state_table, {self(), {:fail_pending, source_name}})
+      _ = :ets.delete(@state_table, {self(), {:fail_complete, source_name}})
       :ok
     end
 
@@ -285,18 +287,18 @@ defmodule DuckFeeder.RuntimeTest do
         :ok
     end
 
-    _ = :ets.delete(table, {self(), 10})
-    _ = :ets.delete(table, {self(), 11})
-    _ = :ets.delete(table, {self(), 12})
-    _ = :ets.delete(table, {self(), 13})
-    _ = :ets.delete(table, {self(), {:fail_pending, 10}})
-    _ = :ets.delete(table, {self(), {:fail_pending, 11}})
-    _ = :ets.delete(table, {self(), {:fail_pending, 12}})
-    _ = :ets.delete(table, {self(), {:fail_pending, 13}})
-    _ = :ets.delete(table, {self(), {:fail_complete, 10}})
-    _ = :ets.delete(table, {self(), {:fail_complete, 11}})
-    _ = :ets.delete(table, {self(), {:fail_complete, 12}})
-    _ = :ets.delete(table, {self(), {:fail_complete, 13}})
+    _ = :ets.delete(table, {self(), "source-a"})
+    _ = :ets.delete(table, {self(), "source-missing-slot"})
+    _ = :ets.delete(table, {self(), "source-resume"})
+    _ = :ets.delete(table, {self(), "source-partial"})
+    _ = :ets.delete(table, {self(), {:fail_pending, "source-a"}})
+    _ = :ets.delete(table, {self(), {:fail_pending, "source-missing-slot"}})
+    _ = :ets.delete(table, {self(), {:fail_pending, "source-resume"}})
+    _ = :ets.delete(table, {self(), {:fail_pending, "source-partial"}})
+    _ = :ets.delete(table, {self(), {:fail_complete, "source-a"}})
+    _ = :ets.delete(table, {self(), {:fail_complete, "source-missing-slot"}})
+    _ = :ets.delete(table, {self(), {:fail_complete, "source-resume"}})
+    _ = :ets.delete(table, {self(), {:fail_complete, "source-partial"}})
 
     :ok
   end
@@ -311,19 +313,15 @@ defmodule DuckFeeder.RuntimeTest do
     }
 
     assert {:ok, opts} =
-             Runtime.service_options(:meta_conn, "source-a", nil,
+             Runtime.service_options(:meta_conn, "source-a", duckdb,
                meta_module: FakeMeta,
                source: runtime_source("source-a"),
                designated_tables: runtime_tables("source-a"),
-               observer_pid: self(),
-               object_prefix: "prefix",
-               duckdb: duckdb
+               observer_pid: self()
              )
 
     assert opts[:designated_tables] != []
     refute Keyword.has_key?(opts, :storage)
-    assert opts[:object_prefix] == "prefix"
-    assert opts[:sink_module] == DuckFeeder.Sink.DuckDB
     assert opts[:duckdb] == duckdb
     assert opts[:meta_module] == FakeMeta
   end
@@ -338,17 +336,15 @@ defmodule DuckFeeder.RuntimeTest do
     }
 
     assert {:ok, opts} =
-             Runtime.service_options(:meta_conn, "source-a", nil,
+             Runtime.service_options(:meta_conn, "source-a", duckdb,
                meta_module: FakeMeta,
                source: runtime_source("source-a"),
                designated_tables: runtime_tables("source-a"),
-               observer_pid: self(),
-               duckdb: duckdb
+               observer_pid: self()
              )
 
     refute Keyword.has_key?(opts, :storage)
     assert opts[:duckdb] == duckdb
-    assert opts[:sink_module] == DuckFeeder.Sink.DuckDB
   end
 
   test "starts service from explicit runtime config" do
@@ -419,7 +415,7 @@ defmodule DuckFeeder.RuntimeTest do
     }
 
     assert {:ok, %{service_pid: service_pid, cdc_pid: cdc_pid, start_lsn: "0/20"}} =
-             Runtime.start_stream(:meta_conn, "source-a", nil,
+             Runtime.start_stream(:meta_conn, "source-a", duckdb,
                meta_module: FakeMeta,
                source: runtime_source("source-a"),
                designated_tables: runtime_tables("source-a"),
@@ -427,7 +423,6 @@ defmodule DuckFeeder.RuntimeTest do
                cdc_module: FakeCDC,
                connection_options_module: FakeConnectionOptions,
                bootstrap_replication?: false,
-               duckdb: duckdb,
                observer_pid: self(),
                service_name: nil,
                cdc_name: nil
@@ -439,35 +434,9 @@ defmodule DuckFeeder.RuntimeTest do
     assert_receive {:fake_service_start, service_opts}
     refute Keyword.has_key?(service_opts, :storage)
     assert service_opts[:duckdb] == duckdb
-    assert service_opts[:sink_module] == DuckFeeder.Sink.DuckDB
 
     assert_receive {:fake_cdc_start, cdc_opts}
     assert cdc_opts[:start_lsn] == "0/20"
-
-    GenServer.stop(service_pid)
-    Process.exit(cdc_pid, :normal)
-  end
-
-  test "start_stream supports call-mode event sink" do
-    duckdb = %{}
-
-    assert {:ok, %{service_pid: service_pid, cdc_pid: cdc_pid, start_lsn: "0/20"}} =
-             Runtime.start_stream(:meta_conn, "source-a", duckdb,
-               meta_module: FakeMeta,
-               source: runtime_source("source-a"),
-               designated_tables: runtime_tables("source-a"),
-               service_module: FakeService,
-               cdc_module: FakeCDC,
-               connection_options_module: FakeConnectionOptions,
-               bootstrap_replication?: false,
-               event_sink_mode: :call,
-               observer_pid: self(),
-               service_name: nil,
-               cdc_name: nil
-             )
-
-    assert_receive {:fake_cdc_start, cdc_opts}
-    assert is_function(cdc_opts[:event_sink], 1)
 
     GenServer.stop(service_pid)
     Process.exit(cdc_pid, :normal)
@@ -845,9 +814,9 @@ defmodule DuckFeeder.RuntimeTest do
              )
 
     assert {:ok, %{state: :pending, boundary_lsn: "0/35"}} =
-             FakeMeta.fetch_snapshot_handoff(:meta_conn, 10)
+             FakeMeta.fetch_snapshot_handoff(:meta_conn, "source-a")
 
-    assert {:error, {:snapshot_handoff_incomplete, %{source_id: 10, state: :pending}}} =
+    assert {:error, {:snapshot_handoff_incomplete, %{source_name: "source-a", state: :pending}}} =
              Runtime.start_stream(:meta_conn, "source-a", duckdb,
                meta_module: FakeMeta,
                source: runtime_source("source-a"),
@@ -882,7 +851,7 @@ defmodule DuckFeeder.RuntimeTest do
              )
 
     assert {:ok, %{state: :complete, boundary_lsn: "0/35"}} =
-             FakeMeta.fetch_snapshot_handoff(:meta_conn, 10)
+             FakeMeta.fetch_snapshot_handoff(:meta_conn, "source-a")
 
     GenServer.stop(service_pid)
     Process.exit(cdc_pid, :normal)
@@ -911,16 +880,17 @@ defmodule DuckFeeder.RuntimeTest do
              )
 
     assert {:ok, %{state: :pending, boundary_lsn: "0/35"}} =
-             FakeMeta.fetch_snapshot_handoff(:meta_conn, 10)
+             FakeMeta.fetch_snapshot_handoff(:meta_conn, "source-a")
   end
 
   test "pending handoff resume requires snapshot_before_stream when checkpoint is behind boundary" do
     duckdb = %{}
 
-    assert {:ok, "0/35"} = FakeMeta.mark_snapshot_handoff_pending(:meta_conn, 10, "0/35")
+    assert {:ok, "0/35"} = FakeMeta.mark_snapshot_handoff_pending(:meta_conn, "source-a", "0/35")
 
     assert {:error,
-            {:snapshot_resume_requires_snapshot_before_stream, %{source_id: 10, state: :pending}}} =
+            {:snapshot_resume_requires_snapshot_before_stream,
+             %{source_name: "source-a", state: :pending}}} =
              Runtime.start_stream(:meta_conn, "source-a", duckdb,
                meta_module: FakeMeta,
                source: runtime_source("source-a"),
@@ -938,7 +908,7 @@ defmodule DuckFeeder.RuntimeTest do
 
   test "retries mark_snapshot_handoff_pending before failing startup" do
     duckdb = %{}
-    :ok = FakeMeta.fail_mark_snapshot_handoff_pending(10, 1)
+    :ok = FakeMeta.fail_mark_snapshot_handoff_pending("source-a", 1)
 
     assert {:error, :failed_to_start_cdc} =
              Runtime.start_stream(:meta_conn, "source-a", duckdb,
@@ -960,12 +930,12 @@ defmodule DuckFeeder.RuntimeTest do
                cdc_name: nil
              )
 
-    assert {:ok, %{state: :pending}} = FakeMeta.fetch_snapshot_handoff(:meta_conn, 10)
+    assert {:ok, %{state: :pending}} = FakeMeta.fetch_snapshot_handoff(:meta_conn, "source-a")
   end
 
   test "returns error when mark_snapshot_handoff_pending retries are exhausted" do
     duckdb = %{}
-    :ok = FakeMeta.fail_mark_snapshot_handoff_pending(10, 3)
+    :ok = FakeMeta.fail_mark_snapshot_handoff_pending("source-a", 3)
 
     assert {:error, :forced_mark_pending_failure} =
              Runtime.start_stream(:meta_conn, "source-a", duckdb,
@@ -990,7 +960,7 @@ defmodule DuckFeeder.RuntimeTest do
 
   test "retries mark_snapshot_handoff_complete before succeeding startup" do
     duckdb = %{}
-    :ok = FakeMeta.fail_mark_snapshot_handoff_complete(10, 1)
+    :ok = FakeMeta.fail_mark_snapshot_handoff_complete("source-a", 1)
 
     assert {:ok, %{service_pid: service_pid, cdc_pid: cdc_pid}} =
              Runtime.start_stream(:meta_conn, "source-a", duckdb,
@@ -1012,7 +982,7 @@ defmodule DuckFeeder.RuntimeTest do
                cdc_name: nil
              )
 
-    assert {:ok, %{state: :complete}} = FakeMeta.fetch_snapshot_handoff(:meta_conn, 10)
+    assert {:ok, %{state: :complete}} = FakeMeta.fetch_snapshot_handoff(:meta_conn, "source-a")
 
     GenServer.stop(service_pid)
     Process.exit(cdc_pid, :normal)
@@ -1020,7 +990,7 @@ defmodule DuckFeeder.RuntimeTest do
 
   test "returns error when mark_snapshot_handoff_complete retries are exhausted" do
     duckdb = %{}
-    :ok = FakeMeta.fail_mark_snapshot_handoff_complete(10, 3)
+    :ok = FakeMeta.fail_mark_snapshot_handoff_complete("source-a", 3)
 
     assert {:error, {:snapshot_handoff_mark_complete_failed, :forced_mark_complete_failure}} =
              Runtime.start_stream(:meta_conn, "source-a", duckdb,
@@ -1046,9 +1016,11 @@ defmodule DuckFeeder.RuntimeTest do
   test "returns error when snapshot handoff is pending and resume is disabled" do
     duckdb = %{}
 
-    assert {:ok, "0/35"} = FakeMeta.mark_snapshot_handoff_pending(:meta_conn, 12, "0/35")
+    assert {:ok, "0/35"} =
+             FakeMeta.mark_snapshot_handoff_pending(:meta_conn, "source-resume", "0/35")
 
-    assert {:error, {:snapshot_handoff_incomplete, %{source_id: 12, state: :pending}}} =
+    assert {:error,
+            {:snapshot_handoff_incomplete, %{source_name: "source-resume", state: :pending}}} =
              Runtime.start_stream(:meta_conn, "source-resume", duckdb,
                meta_module: FakeMeta,
                source: runtime_source("source-resume"),
@@ -1067,7 +1039,8 @@ defmodule DuckFeeder.RuntimeTest do
   test "pending handoff can complete without rerunning snapshot when checkpoint is at/after boundary" do
     duckdb = %{}
 
-    assert {:ok, "0/35"} = FakeMeta.mark_snapshot_handoff_pending(:meta_conn, 12, "0/35")
+    assert {:ok, "0/35"} =
+             FakeMeta.mark_snapshot_handoff_pending(:meta_conn, "source-resume", "0/35")
 
     assert {:ok, %{service_pid: service_pid, cdc_pid: cdc_pid, start_lsn: "0/40"}} =
              Runtime.start_stream(:meta_conn, "source-resume", duckdb,
@@ -1089,7 +1062,9 @@ defmodule DuckFeeder.RuntimeTest do
              )
 
     refute_receive {:fake_snapshot_runner, _}, 100
-    assert {:ok, %{state: :complete}} = FakeMeta.fetch_snapshot_handoff(:meta_conn, 12)
+
+    assert {:ok, %{state: :complete}} =
+             FakeMeta.fetch_snapshot_handoff(:meta_conn, "source-resume")
 
     GenServer.stop(service_pid)
     Process.exit(cdc_pid, :normal)
@@ -1179,8 +1154,6 @@ defmodule DuckFeeder.RuntimeTest do
 
   defp runtime_source("source-a") do
     %{
-      id: 10,
-      name: "source-a",
       connection_info: %{"dsn" => "postgres://user:pass@localhost:5432/source_a"},
       slot_name: "slot-a",
       publication_name: "pub-a"
@@ -1189,8 +1162,6 @@ defmodule DuckFeeder.RuntimeTest do
 
   defp runtime_source("source-missing-slot") do
     %{
-      id: 11,
-      name: "source-missing-slot",
       connection_info: %{"dsn" => "postgres://user:pass@localhost:5432/source_b"},
       slot_name: nil,
       publication_name: "pub-b"
@@ -1199,8 +1170,6 @@ defmodule DuckFeeder.RuntimeTest do
 
   defp runtime_source("source-resume") do
     %{
-      id: 12,
-      name: "source-resume",
       connection_info: %{"dsn" => "postgres://user:pass@localhost:5432/source_c"},
       slot_name: "slot-resume",
       publication_name: "pub-resume"
@@ -1209,8 +1178,6 @@ defmodule DuckFeeder.RuntimeTest do
 
   defp runtime_source("source-partial") do
     %{
-      id: 13,
-      name: "source-partial",
       connection_info: %{"dsn" => "postgres://user:pass@localhost:5432/source_d"},
       slot_name: "slot-partial",
       publication_name: "pub-partial"

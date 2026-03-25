@@ -12,26 +12,9 @@ defmodule DuckFeeder.ServiceTest do
     def upsert_checkpoint(_conn, _checkpoint_key, lsn), do: {:ok, lsn}
   end
 
-  defmodule FakeSink do
-    @behaviour DuckFeeder.Sink
+  test "runs end-to-end from CDC event to committed DuckDB batch" do
+    path = temp_duckdb_path("service_end_to_end")
 
-    @impl true
-    def process_batch(context, table, batch) do
-      if is_pid(context.meta_conn) do
-        send(context.meta_conn, {:fake_sink_batch, context, table, batch})
-      end
-
-      {:ok,
-       %{
-         status: :committed,
-         batch_id: "sink-service",
-         checkpoint_key: Map.fetch!(context.designated_table_by_target, table),
-         checkpoint_lsn: batch.lsn_end
-       }}
-    end
-  end
-
-  test "runs end-to-end from CDC event to processed batch" do
     designated_tables = [
       %{
         id: 1,
@@ -39,63 +22,6 @@ defmodule DuckFeeder.ServiceTest do
         source_table: "users",
         target_schema: "raw",
         target_table: "users"
-      }
-    ]
-
-    {:ok, service} =
-      Service.start_link(
-        designated_tables: designated_tables,
-        meta_conn: self(),
-        sink_module: FakeSink,
-        pipeline_opts: %{max_rows: 1, max_bytes: 10_000, flush_interval_ms: 60_000},
-        observer_pid: self()
-      )
-
-    assert :ok = Service.attach_cdc(service, self())
-
-    assert :buffering =
-             Service.push_event(service, %Event.Relation{id: 1, schema: "public", table: "users"})
-
-    assert :buffering =
-             Service.push_event(service, %Event.Begin{xid: 700, final_lsn: "0/100"})
-
-    assert :buffering =
-             Service.push_event(service, %Event.Insert{relation_id: 1, record: %{"id" => "1"}})
-
-    assert {:committed, %{xid: 700}} =
-             Service.push_event(service, %Event.Commit{xid: 700, end_lsn: "0/120"})
-
-    assert_receive {:fake_sink_batch, _context, {"raw", "users"}, batch}, 1_000
-    assert_receive {:duck_feeder_batch_processed, {"raw", "users"}, {:ok, result}, ^batch}, 1_000
-
-    assert_receive {:duck_feeder_ack_lsn, "0/120"}, 1_000
-
-    assert result.status == :committed
-    assert result.batch_id == "sink-service"
-    assert batch.row_count == 1
-
-    refute Service.in_transaction?(service)
-  end
-
-  test "auto-selects DuckDB sink and starts an internal DuckDB connection" do
-    path =
-      Path.join(
-        System.tmp_dir!(),
-        "duck_feeder_service_#{System.unique_integer([:positive])}.duckdb"
-      )
-
-    on_exit(fn ->
-      _ = File.rm(path)
-    end)
-
-    designated_tables = [
-      %{
-        id: 1,
-        source_schema: "public",
-        source_table: "users",
-        target_schema: "raw",
-        target_table: "users",
-        primary_keys: ["id"]
       }
     ]
 
@@ -109,38 +35,64 @@ defmodule DuckFeeder.ServiceTest do
         observer_pid: self()
       )
 
+    on_exit(fn ->
+      safe_stop(service)
+      _ = File.rm(path)
+    end)
+
     assert :ok = Service.attach_cdc(service, self())
 
     assert :buffering =
              Service.push_event(service, %Event.Relation{id: 1, schema: "public", table: "users"})
 
     assert :buffering =
-             Service.push_event(service, %Event.Begin{xid: 702, final_lsn: "0/100"})
+             Service.push_event(service, %Event.Begin{xid: 700, final_lsn: "0/100"})
 
     assert :buffering =
              Service.push_event(service, %Event.Insert{
                relation_id: 1,
-               record: %{"id" => 3, "name" => "duck"}
+               record: %{"id" => 1, "name" => "duck"}
              })
 
-    assert {:committed, %{xid: 702}} =
-             Service.push_event(service, %Event.Commit{xid: 702, end_lsn: "0/120"})
+    assert {:committed, %{xid: 700}} =
+             Service.push_event(service, %Event.Commit{xid: 700, end_lsn: "0/120"})
 
-    assert_receive {:duck_feeder_batch_processed, {"raw", "users"}, {:ok, result}, _batch},
+    assert_receive {:duck_feeder_batch_processed, {"raw", "users"}, {:ok, result}, batch},
                    1_000
 
     assert_receive {:duck_feeder_ack_lsn, "0/120"}, 1_000
-    assert result.status == :committed
-    assert result.checkpoint_lsn == "0/120"
 
-    assert %{"id" => [3], "name" => ["duck"]} =
+    assert result.status == :committed
+    assert result.checkpoint_key == "raw.users"
+    assert result.checkpoint_lsn == "0/120"
+    assert batch.row_count == 1
+
+    assert %{"id" => [1], "name" => ["duck"]} =
              query_duckdb_file(path, "SELECT id, name FROM raw.users ORDER BY id")
+
+    refute Service.in_transaction?(service)
   end
 
-  test "supports custom sink modules without default DuckDB config" do
+  test "starts an internal DuckDB connection by default" do
+    {:ok, service} =
+      Service.start_link(
+        designated_tables: [],
+        meta_conn: self()
+      )
+
+    on_exit(fn ->
+      safe_stop(service)
+    end)
+
+    state = :sys.get_state(service)
+
+    assert is_pid(state.context.duckdb.conn)
+    assert is_pid(state.context.duckdb.server)
+  end
+
+  test "context stores designated table mappings" do
     designated_tables = [
       %{
-        id: 1,
         source_schema: "public",
         source_table: "users",
         target_schema: "raw",
@@ -151,41 +103,23 @@ defmodule DuckFeeder.ServiceTest do
     {:ok, service} =
       Service.start_link(
         designated_tables: designated_tables,
-        meta_conn: self(),
-        sink_module: FakeSink,
-        pipeline_opts: %{max_rows: 1, max_bytes: 10_000, flush_interval_ms: 60_000},
-        observer_pid: self()
+        meta_conn: self()
       )
 
-    assert :ok = Service.attach_cdc(service, self())
+    on_exit(fn ->
+      safe_stop(service)
+    end)
 
-    assert :buffering =
-             Service.push_event(service, %Event.Relation{id: 1, schema: "public", table: "users"})
+    context = :sys.get_state(service).context
 
-    assert :buffering =
-             Service.push_event(service, %Event.Begin{xid: 702, final_lsn: "0/100"})
-
-    assert :buffering =
-             Service.push_event(service, %Event.Insert{relation_id: 1, record: %{"id" => "3"}})
-
-    assert {:committed, %{xid: 702}} =
-             Service.push_event(service, %Event.Commit{xid: 702, end_lsn: "0/120"})
-
-    assert_receive {:fake_sink_batch, context, {"raw", "users"}, batch}, 1_000
-    refute Map.has_key?(context, :storage)
-    assert context.sink_module == FakeSink
-    assert batch.row_count == 1
-
-    assert_receive {:duck_feeder_batch_processed, {"raw", "users"}, {:ok, result}, _batch},
-                   1_000
-
-    assert_receive {:duck_feeder_ack_lsn, "0/120"}, 1_000
-
-    assert result.status == :committed
-    assert result.batch_id == "sink-service"
+    assert context.meta_conn == self()
+    assert context.designated_tables_by_target[{"raw", "users"}].checkpoint_key == "raw.users"
+    assert context.designated_tables_by_target[{"raw", "users"}].target_table == "users"
   end
 
   test "attach_cdc emits latest checkpoint ack after prior commits" do
+    path = temp_duckdb_path("service_attach_cdc")
+
     designated_tables = [
       %{
         id: 1,
@@ -200,10 +134,16 @@ defmodule DuckFeeder.ServiceTest do
       Service.start_link(
         designated_tables: designated_tables,
         meta_conn: self(),
-        sink_module: FakeSink,
+        meta_module: FakeMeta,
+        duckdb: %{path: path},
         pipeline_opts: %{max_rows: 1, max_bytes: 10_000, flush_interval_ms: 60_000},
         observer_pid: self()
       )
+
+    on_exit(fn ->
+      safe_stop(service)
+      _ = File.rm(path)
+    end)
 
     assert :buffering =
              Service.push_event(service, %Event.Relation{id: 1, schema: "public", table: "users"})
@@ -212,18 +152,21 @@ defmodule DuckFeeder.ServiceTest do
              Service.push_event(service, %Event.Begin{xid: 701, final_lsn: "0/100"})
 
     assert :buffering =
-             Service.push_event(service, %Event.Insert{relation_id: 1, record: %{"id" => "2"}})
+             Service.push_event(service, %Event.Insert{relation_id: 1, record: %{"id" => 2}})
 
     assert {:committed, %{xid: 701}} =
              Service.push_event(service, %Event.Commit{xid: 701, end_lsn: "0/120"})
 
-    assert_receive {:duck_feeder_batch_processed, {"raw", "users"}, {:ok, _result}, _batch}, 1_000
+    assert_receive {:duck_feeder_batch_processed, {"raw", "users"}, {:ok, _result}, _batch},
+                   1_000
 
     assert :ok = Service.attach_cdc(service, self())
     assert_receive {:duck_feeder_ack_lsn, "0/120"}, 1_000
   end
 
   test "ingests pre-tagged snapshot rows without re-wrapping metadata into _record" do
+    path = temp_duckdb_path("service_snapshot_tagged")
+
     designated_table = %{
       id: 1,
       source_schema: "public",
@@ -236,10 +179,16 @@ defmodule DuckFeeder.ServiceTest do
       Service.start_link(
         designated_tables: [designated_table],
         meta_conn: self(),
-        sink_module: FakeSink,
+        meta_module: FakeMeta,
+        duckdb: %{path: path},
         pipeline_opts: %{max_rows: 1, max_bytes: 10_000, flush_interval_ms: 60_000},
         observer_pid: self()
       )
+
+    on_exit(fn ->
+      safe_stop(service)
+      _ = File.rm(path)
+    end)
 
     tagged_row = %{
       "id" => 1,
@@ -255,7 +204,8 @@ defmodule DuckFeeder.ServiceTest do
 
     assert :ok = Service.ingest_snapshot_row(service, designated_table, tagged_row)
 
-    assert_receive {:duck_feeder_batch_processed, {"raw", "users"}, {:ok, _result}, batch}, 1_000
+    assert_receive {:duck_feeder_batch_processed, {"raw", "users"}, {:ok, _result}, batch},
+                   1_000
 
     [row] = batch.rows
     assert row._op == "R"
@@ -265,6 +215,8 @@ defmodule DuckFeeder.ServiceTest do
   end
 
   test "ingests snapshot rows when designated table uses string keys" do
+    path = temp_duckdb_path("service_snapshot_string_keys")
+
     start_table = %{
       source_schema: "public",
       source_table: "users",
@@ -283,10 +235,16 @@ defmodule DuckFeeder.ServiceTest do
       Service.start_link(
         designated_tables: [start_table],
         meta_conn: self(),
-        sink_module: FakeSink,
+        meta_module: FakeMeta,
+        duckdb: %{path: path},
         pipeline_opts: %{max_rows: 1, max_bytes: 10_000, flush_interval_ms: 60_000},
         observer_pid: self()
       )
+
+    on_exit(fn ->
+      safe_stop(service)
+      _ = File.rm(path)
+    end)
 
     assert :ok = Service.ingest_snapshot_row(service, snapshot_table, %{"id" => 1})
 
@@ -323,15 +281,29 @@ defmodule DuckFeeder.ServiceTest do
       Service.start_link(
         designated_tables: [],
         meta_conn: self(),
-        sink_module: FakeSink,
         observer_pid: self()
       )
+
+    on_exit(fn ->
+      safe_stop(service)
+    end)
 
     assert :buffering =
              Service.push_event(service, %Event.Relation{id: 1, schema: "public", table: "users"})
 
     assert {:error, :change_outside_transaction} =
              Service.push_event(service, %Event.Insert{relation_id: 1, record: %{}})
+  end
+
+  defp temp_duckdb_path(prefix) do
+    path =
+      Path.join(
+        System.tmp_dir!(),
+        "#{prefix}_#{System.unique_integer([:positive])}.duckdb"
+      )
+
+    _ = File.rm(path)
+    path
   end
 
   defp query_duckdb_file(path, sql) do

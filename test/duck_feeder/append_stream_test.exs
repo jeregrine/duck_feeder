@@ -11,136 +11,91 @@ defmodule DuckFeeder.AppendStreamTest do
     def upsert_checkpoint(_conn, _checkpoint_key, lsn), do: {:ok, lsn}
   end
 
-  defmodule SlowSink do
-    @behaviour DuckFeeder.Sink
-
-    @impl true
-    def process_batch(context, table, batch) do
-      Process.sleep(250)
-
-      {:ok,
-       %{
-         status: :committed,
-         batch_id: "append-slow-sink-batch",
-         checkpoint_key: Map.fetch!(context.designated_table_by_target, table),
-         checkpoint_lsn: batch.lsn_end
-       }}
-    end
-  end
-
-  defmodule FakeSink do
-    @behaviour DuckFeeder.Sink
-
-    @impl true
-    def process_batch(context, table, batch) do
-      if is_pid(context.meta_conn) do
-        send(context.meta_conn, {:fake_sink_batch, context, table, batch})
-      end
-
-      {:ok,
-       %{
-         status: :committed,
-         batch_id: "append-sink-batch",
-         checkpoint_key: Map.fetch!(context.designated_table_by_target, table),
-         checkpoint_lsn: batch.lsn_end
-       }}
-    end
-  end
-
   test "appends event rows and processes batch" do
-    designated_tables = [
-      %{id: 1, target_schema: "raw", target_table: "events"}
-    ]
-
-    {:ok, stream} =
-      AppendStream.start_link(
-        designated_tables: designated_tables,
-        meta_conn: self(),
-        sink_module: FakeSink,
-        pipeline_opts: %{max_rows: 1, max_bytes: 10_000, flush_interval_ms: 60_000},
-        observer_pid: self()
-      )
-
-    assert :ok = AppendStream.append(stream, "events", %{"kind" => "telemetry", "value" => 1})
-
-    assert_receive {:fake_sink_batch, _context, {"raw", "events"}, batch}, 1_000
-
-    assert_receive {:duck_feeder_append_batch_processed, {"raw", "events"}, {:ok, result},
-                    ^batch},
-                   1_000
-
-    assert result.status == :committed
-    assert batch.row_count == 1
-  end
-
-  test "supports custom sink modules without default DuckDB config" do
-    designated_tables = [
-      %{id: 1, target_schema: "raw", target_table: "events"}
-    ]
-
-    {:ok, stream} =
-      AppendStream.start_link(
-        designated_tables: designated_tables,
-        meta_conn: self(),
-        sink_module: FakeSink,
-        pipeline_opts: %{max_rows: 1, max_bytes: 10_000, flush_interval_ms: 60_000},
-        observer_pid: self()
-      )
-
-    assert :ok = AppendStream.append(stream, "events", %{"kind" => "telemetry", "value" => 2})
-
-    assert_receive {:fake_sink_batch, context, {"raw", "events"}, batch}, 1_000
-    refute Map.has_key?(context, :storage)
-    assert context.sink_module == FakeSink
-    assert batch.row_count == 1
-
-    assert_receive {:duck_feeder_append_batch_processed, {"raw", "events"}, {:ok, result}, _},
-                   1_000
-
-    assert result.status == :committed
-    assert result.batch_id == "append-sink-batch"
-  end
-
-  test "auto-selects DuckDB sink and starts an internal DuckDB connection" do
-    path =
-      Path.join(
-        System.tmp_dir!(),
-        "duck_feeder_append_#{System.unique_integer([:positive])}.duckdb"
-      )
-
-    on_exit(fn ->
-      _ = File.rm(path)
-    end)
+    path = temp_duckdb_path("append_stream")
 
     {:ok, stream} =
       AppendStream.start_link(
         designated_tables: [%{id: 1, target_schema: "raw", target_table: "events"}],
         meta_module: FakeMeta,
-        meta_conn: :fake_conn,
+        meta_conn: self(),
         duckdb: %{path: path},
         pipeline_opts: %{max_rows: 1, max_bytes: 10_000, flush_interval_ms: 60_000},
         observer_pid: self()
       )
 
+    on_exit(fn ->
+      safe_stop(stream)
+      _ = File.rm(path)
+    end)
+
     assert :ok = AppendStream.append(stream, "events", %{"id" => 1, "kind" => "telemetry"})
 
-    assert_receive {:duck_feeder_append_batch_processed, {"raw", "events"}, {:ok, result}, _},
+    assert_receive {:duck_feeder_append_batch_processed, {"raw", "events"}, {:ok, result}, batch},
                    1_000
 
     assert result.status == :committed
+    assert result.checkpoint_key == "duck_feeder_append:raw.events"
     assert result.checkpoint_lsn == "0/1"
+    assert batch.row_count == 1
 
     assert %{"id" => [1], "kind" => ["telemetry"]} =
              query_duckdb_file(path, "SELECT id, kind FROM raw.events ORDER BY id")
+  end
+
+  test "starts an internal DuckDB connection by default" do
+    {:ok, stream} =
+      AppendStream.start_link(
+        designated_tables: [%{id: 1, target_schema: "raw", target_table: "events"}],
+        meta_module: FakeMeta,
+        meta_conn: self()
+      )
+
+    on_exit(fn ->
+      safe_stop(stream)
+    end)
+
+    state = :sys.get_state(stream)
+
+    assert is_pid(state.context.duckdb.conn)
+    assert is_pid(state.context.duckdb.server)
+  end
+
+  test "context stores prefixed checkpoint keys" do
+    {:ok, stream} =
+      AppendStream.start_link(
+        designated_tables: [%{id: 1, target_schema: "raw", target_table: "events"}],
+        meta_module: FakeMeta,
+        meta_conn: self(),
+        object_prefix: "events_prefix"
+      )
+
+    on_exit(fn ->
+      safe_stop(stream)
+    end)
+
+    state = :sys.get_state(stream)
+    context = state.context
+
+    assert context.meta_conn == self()
+
+    assert context.designated_tables_by_target[{"raw", "events"}].checkpoint_key ==
+             "events_prefix:raw.events"
+
+    assert context.designated_tables_by_target[{"raw", "events"}].target_table == "events"
   end
 
   test "returns error for unknown target table" do
     {:ok, stream} =
       AppendStream.start_link(
         designated_tables: [%{id: 1, target_schema: "raw", target_table: "events"}],
-        meta_conn: self(),
-        sink_module: FakeSink
+        meta_module: FakeMeta,
+        meta_conn: self()
       )
+
+    on_exit(fn ->
+      safe_stop(stream)
+    end)
 
     assert {:error, {:unknown_target_table, {"raw", "missing"}}} =
              AppendStream.append(stream, "missing", %{"kind" => "log"})
@@ -150,9 +105,13 @@ defmodule DuckFeeder.AppendStreamTest do
     {:ok, stream} =
       AppendStream.start_link(
         designated_tables: [%{id: 1, target_schema: "raw", target_table: "events"}],
-        meta_conn: self(),
-        sink_module: FakeSink
+        meta_module: FakeMeta,
+        meta_conn: self()
       )
+
+    on_exit(fn ->
+      safe_stop(stream)
+    end)
 
     assert {:error, {:invalid_lsn, {:invalid_lsn, "bad"}}} =
              AppendStream.append(stream, "events", %{"kind" => "log"}, lsn: "bad")
@@ -161,14 +120,22 @@ defmodule DuckFeeder.AppendStreamTest do
   end
 
   test "supports explicit flush for append stream table" do
+    path = temp_duckdb_path("append_stream_flush")
+
     {:ok, stream} =
       AppendStream.start_link(
         designated_tables: [%{id: 1, target_schema: "raw", target_table: "events"}],
+        meta_module: FakeMeta,
         meta_conn: self(),
-        sink_module: FakeSink,
+        duckdb: %{path: path},
         pipeline_opts: %{max_rows: 100, max_bytes: 10_000, flush_interval_ms: 60_000},
         observer_pid: self()
       )
+
+    on_exit(fn ->
+      safe_stop(stream)
+      _ = File.rm(path)
+    end)
 
     assert :ok = AppendStream.append(stream, "events", %{"kind" => "error", "message" => "boom"})
     assert {:ok, batch} = AppendStream.flush_table(stream, "events")
@@ -186,15 +153,17 @@ defmodule DuckFeeder.AppendStreamTest do
       Process.flag(:trap_exit, previous)
     end)
 
-    designated_tables = [
-      %{id: 1, target_schema: "raw", target_table: "events"}
-    ]
-
     {:ok, stream} =
       AppendStream.start_link(
-        designated_tables: designated_tables,
+        designated_tables: [%{id: 1, target_schema: "raw", target_table: "events"}],
+        meta_module: FakeMeta,
         meta_conn: self(),
-        sink_module: SlowSink,
+        duckdb: %{
+          setup_fun: fn _conn ->
+            Process.sleep(250)
+            :ok
+          end
+        },
         observer_pid: self(),
         max_inflight_batches: 1,
         max_pending_batches: 1
@@ -235,15 +204,17 @@ defmodule DuckFeeder.AppendStreamTest do
       Process.flag(:trap_exit, previous)
     end)
 
-    designated_tables = [
-      %{id: 1, target_schema: "raw", target_table: "events"}
-    ]
-
     {:ok, stream} =
       AppendStream.start_link(
-        designated_tables: designated_tables,
+        designated_tables: [%{id: 1, target_schema: "raw", target_table: "events"}],
+        meta_module: FakeMeta,
         meta_conn: self(),
-        sink_module: SlowSink,
+        duckdb: %{
+          setup_fun: fn _conn ->
+            Process.sleep(250)
+            :ok
+          end
+        },
         observer_pid: self(),
         max_inflight_batches: 1,
         max_pending_batches: 1,
@@ -281,6 +252,8 @@ defmodule DuckFeeder.AppendStreamTest do
 
     assert last_batch.lsn_end == "0/3"
     refute_received {:EXIT, ^stream, _}
+
+    safe_stop(stream)
   end
 
   test "validates append stream queue options" do
@@ -288,8 +261,8 @@ defmodule DuckFeeder.AppendStreamTest do
              GenServer.start(
                AppendStream,
                designated_tables: [%{id: 1, target_schema: "raw", target_table: "events"}],
+               meta_module: FakeMeta,
                meta_conn: self(),
-               sink_module: FakeSink,
                max_inflight_batches: 0
              )
 
@@ -297,8 +270,8 @@ defmodule DuckFeeder.AppendStreamTest do
              GenServer.start(
                AppendStream,
                designated_tables: [%{id: 1, target_schema: "raw", target_table: "events"}],
+               meta_module: FakeMeta,
                meta_conn: self(),
-               sink_module: FakeSink,
                max_pending_batches: -1
              )
 
@@ -306,10 +279,21 @@ defmodule DuckFeeder.AppendStreamTest do
              GenServer.start(
                AppendStream,
                designated_tables: [%{id: 1, target_schema: "raw", target_table: "events"}],
+               meta_module: FakeMeta,
                meta_conn: self(),
-               sink_module: FakeSink,
                overflow_strategy: :drop_latest
              )
+  end
+
+  defp temp_duckdb_path(prefix) do
+    path =
+      Path.join(
+        System.tmp_dir!(),
+        "#{prefix}_#{System.unique_integer([:positive])}.duckdb"
+      )
+
+    _ = File.rm(path)
+    path
   end
 
   defp query_duckdb_file(path, sql) do

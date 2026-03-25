@@ -42,8 +42,6 @@ defmodule DuckFeeder.ConfigTest do
     assert duckdb.catalog == "lake"
     assert duckdb.setup_sql == ["INSTALL ducklake", "LOAD ducklake"]
     assert duckdb.setup_fun == setup_fun
-
-    assert Config.duckdb_config(validated) == duckdb
   end
 
   test "preserves duckdb.setup_sql lists" do

@@ -35,6 +35,15 @@ defmodule DuckFeeder.DesignatedTable do
     Enum.map(designated_tables, &put_checkpoint_key(&1, prefix))
   end
 
+  @spec by_target([t()], String.t() | nil) :: %{optional({String.t(), String.t()}) => t()}
+  def by_target(designated_tables, prefix \\ nil) when is_list(designated_tables) do
+    Enum.reduce(designated_tables, %{}, fn designated_table, acc ->
+      normalized_table = put_checkpoint_key(designated_table, prefix)
+      target = target_relation(normalized_table)
+      Map.put(acc, target, normalized_table)
+    end)
+  end
+
   @spec put_checkpoint_key(t(), String.t() | nil) :: t()
   def put_checkpoint_key(designated_table, prefix \\ nil) when is_map(designated_table) do
     designated_table

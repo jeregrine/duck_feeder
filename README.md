@@ -37,7 +37,7 @@ If a checkpoint write to Postgres fails after a DuckDB commit, the batch is trac
 
 Mirrored tables are normal DuckDB tables. Append tables are normal DuckDB tables too.
 
-The old custom Parquet/object-storage/DuckLake runtime path has been removed. DuckFeeder should rely on DuckDB/DuckLake directly rather than carrying its own warehouse layer.
+DuckFeeder relies on DuckDB and DuckLake directly rather than carrying its own warehouse layer.
 
 ## Quick start
 

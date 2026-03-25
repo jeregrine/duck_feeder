@@ -54,8 +54,6 @@ defmodule DuckFeeder do
   defdelegate runtime_child_spec_from_config(meta_conn, config, opts \\ []),
     to: DuckFeeder.Integration
 
-  defdelegate process_batch(context, table, batch), to: DuckFeeder.Sink
-
   defdelegate service_options(meta_conn, source_name, duckdb, opts \\ []),
     to: DuckFeeder.Runtime
 

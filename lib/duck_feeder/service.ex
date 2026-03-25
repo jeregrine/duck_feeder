@@ -37,7 +37,7 @@ defmodule DuckFeeder.Service do
 
   use GenServer
 
-  alias DuckFeeder.{DesignatedTable, Ingest, StreamSupport, TablePipeline}
+  alias DuckFeeder.{DesignatedTable, Ingest, RuntimeSupport, TablePipeline}
   alias DuckFeeder.CDC.{Lsn, Pipeline}
 
   defmodule State do
@@ -93,17 +93,13 @@ defmodule DuckFeeder.Service do
           | {:designated_tables, [map()]}
           | {:meta_conn, term()}
           | {:duckdb, map()}
-          | {:sink_module, module()}
           | {:meta_module, module()}
-          | {:object_prefix, String.t()}
           | {:pipeline_opts, map()}
           | {:max_tx_changes, pos_integer()}
           | {:observer_pid, pid()}
           | {:snapshot_lsn_start, String.t()}
           | {:max_inflight_batches, pos_integer()}
           | {:max_pending_batches, pos_integer()}
-          | {:poison_row_mode, :fail | :drop}
-          | {:poison_row_sink, pid() | (map() -> term()) | {module(), atom(), [term()]}}
 
   @spec start_link([option()]) :: GenServer.on_start()
   def start_link(opts) do
@@ -148,44 +144,17 @@ defmodule DuckFeeder.Service do
 
     {:ok, batch_task_supervisor} = Task.Supervisor.start_link(strategy: :one_for_one)
 
-    observer_pid = Keyword.get(opts, :observer_pid, self())
-
-    with {:ok, sink_module} <- StreamSupport.resolve_sink_module_option(opts),
-         {:ok, duckdb} <- StreamSupport.resolve_duckdb(opts, sink_module),
-         {:ok, snapshot_lsn_counter} <- snapshot_lsn_counter(opts),
-         {:ok, max_inflight_batches} <-
-           StreamSupport.normalize_positive_integer(
-             Keyword.get(opts, :max_inflight_batches, 1),
-             :max_inflight_batches
-           ),
-         {:ok, max_pending_batches} <-
-           StreamSupport.normalize_positive_integer(
-             Keyword.get(opts, :max_pending_batches, 1_000),
-             :max_pending_batches
-           ) do
-      context =
-        %{
-          meta_conn: Keyword.fetch!(opts, :meta_conn),
-          designated_table_by_target: StreamSupport.designated_table_mapping(designated_tables),
-          designated_table_config_by_target:
-            StreamSupport.designated_table_config_mapping(designated_tables),
-          object_prefix: Keyword.get(opts, :object_prefix, "duck_feeder"),
-          sink_module: sink_module
-        }
-        |> StreamSupport.maybe_put_optional(:duckdb, duckdb)
-        |> StreamSupport.maybe_put_optional(:meta_module, Keyword.get(opts, :meta_module))
-        |> StreamSupport.maybe_put_optional(:poison_row_mode, Keyword.get(opts, :poison_row_mode))
-        |> StreamSupport.maybe_put_optional(:poison_row_sink, Keyword.get(opts, :poison_row_sink))
-
+    with {:ok, common} <- RuntimeSupport.resolve_common_init(designated_tables, opts),
+         {:ok, snapshot_lsn_counter} <- snapshot_lsn_counter(opts) do
       {:ok,
        %State{
          cdc_pipeline_pid: cdc_pipeline_pid,
          ingest_pid: ingest_pid,
-         context: context,
-         observer_pid: observer_pid,
+         context: common.context,
+         observer_pid: common.observer_pid,
          batch_task_supervisor: batch_task_supervisor,
-         max_inflight_batches: max_inflight_batches,
-         max_pending_batches: max_pending_batches,
+         max_inflight_batches: common.max_inflight_batches,
+         max_pending_batches: common.max_pending_batches,
          snapshot_lsn_counter: snapshot_lsn_counter
        }}
     else
@@ -237,9 +206,7 @@ defmodule DuckFeeder.Service do
       ) do
     result = Pipeline.push_event(cdc_pipeline_pid, event)
 
-    if is_pid(state.observer_pid) do
-      send(state.observer_pid, {:duck_feeder_cdc_event_processed, result, event})
-    end
+    send(state.observer_pid, {:duck_feeder_cdc_event_processed, result, event})
 
     case result do
       {:error, reason} ->
@@ -288,12 +255,10 @@ defmodule DuckFeeder.Service do
         reason: reason
       })
 
-    if is_pid(overflow_state.observer_pid) do
-      send(
-        overflow_state.observer_pid,
-        {:duck_feeder_batch_queue_overflow, table, batch, reason}
-      )
-    end
+    send(
+      overflow_state.observer_pid,
+      {:duck_feeder_batch_queue_overflow, table, batch, reason}
+    )
 
     overflow_state
   end
@@ -309,14 +274,12 @@ defmodule DuckFeeder.Service do
 
     emit_batch_queue_telemetry(state, :completed, %{
       table: table,
-      result: StreamSupport.batch_result_status(result)
+      result: DuckFeeder.Telemetry.batch_result_status(result)
     })
   end
 
   defp handle_batch_task_crashed(%State{} = state, table, batch, reason, error) do
-    if is_pid(state.observer_pid) do
-      send(state.observer_pid, {:duck_feeder_batch_processed, table, {:error, error}, batch})
-    end
+    send(state.observer_pid, {:duck_feeder_batch_processed, table, {:error, error}, batch})
 
     emit_batch_queue_telemetry(state, :task_crashed, %{
       table: table,
@@ -325,10 +288,7 @@ defmodule DuckFeeder.Service do
   end
 
   defp notify_batch_result(%State{observer_pid: observer_pid} = state, table, result, batch) do
-    if is_pid(observer_pid) do
-      send(observer_pid, {:duck_feeder_batch_processed, table, result, batch})
-    end
-
+    send(observer_pid, {:duck_feeder_batch_processed, table, result, batch})
     state
   end
 
@@ -379,10 +339,10 @@ defmodule DuckFeeder.Service do
     metadata =
       metadata
       |> Map.put(:status, status)
-      |> StreamSupport.maybe_put_table_metadata()
+      |> DuckFeeder.Telemetry.put_table_metadata()
 
     DuckFeeder.Telemetry.service_batch_queue(
-      StreamSupport.batch_queue_measurements(state),
+      DuckFeeder.Telemetry.batch_queue_measurements(state),
       metadata
     )
 
@@ -439,18 +399,22 @@ defmodule DuckFeeder.Service do
   defp parse_optional_lsn(_other), do: {:error, :invalid_ack_lsn}
 
   defp snapshot_target_relation(designated_table) when is_map(designated_table) do
-    with {:ok, target_schema} <- fetch_map_string(designated_table, :target_schema),
-         {:ok, target_table} <- fetch_map_string(designated_table, :target_table) do
+    designated_table = DesignatedTable.normalize(designated_table)
+
+    with {:ok, target_schema} <- fetch_designated_table_string(designated_table, :target_schema),
+         {:ok, target_table} <- fetch_designated_table_string(designated_table, :target_table) do
       {:ok, {target_schema, target_table}}
     end
   end
 
   defp build_snapshot_row(designated_table, row, lsn)
        when is_map(designated_table) and is_map(row) and is_binary(lsn) do
-    with {:ok, source_schema} <- fetch_map_string(designated_table, :source_schema),
-         {:ok, source_table} <- fetch_map_string(designated_table, :source_table),
-         {:ok, target_schema} <- fetch_map_string(designated_table, :target_schema),
-         {:ok, target_table} <- fetch_map_string(designated_table, :target_table) do
+    designated_table = DesignatedTable.normalize(designated_table)
+
+    with {:ok, source_schema} <- fetch_designated_table_string(designated_table, :source_schema),
+         {:ok, source_table} <- fetch_designated_table_string(designated_table, :source_table),
+         {:ok, target_schema} <- fetch_designated_table_string(designated_table, :target_schema),
+         {:ok, target_table} <- fetch_designated_table_string(designated_table, :target_table) do
       snapshot_payload = snapshot_payload(row, lsn, source_schema, source_table)
 
       {:ok,
@@ -462,17 +426,19 @@ defmodule DuckFeeder.Service do
   end
 
   defp snapshot_payload(row, lsn, source_schema, source_table) when is_map(row) do
-    if pre_tagged_snapshot_row?(row) do
+    row = normalize_tagged_snapshot_row(row)
+
+    if tagged_snapshot_row?(row) do
       %{
-        _op: fetch_map_value_or_default(row, :_op, "R") |> to_string(),
-        _commit_lsn: fetch_map_value_or_default(row, :_commit_lsn, lsn),
-        _xid: fetch_map_value_or_default(row, :_xid, nil),
-        _source_ts: fetch_map_value_or_default(row, :_source_ts, nil),
-        _ingest_ts: fetch_map_value_or_default(row, :_ingest_ts, DateTime.utc_now()),
-        _relation_schema: fetch_map_value_or_default(row, :_relation_schema, source_schema),
-        _relation_table: fetch_map_value_or_default(row, :_relation_table, source_table),
+        _op: Map.get(row, :_op, "R") |> to_string(),
+        _commit_lsn: Map.get(row, :_commit_lsn, lsn),
+        _xid: Map.get(row, :_xid),
+        _source_ts: Map.get(row, :_source_ts),
+        _ingest_ts: Map.get(row, :_ingest_ts, DateTime.utc_now()),
+        _relation_schema: Map.get(row, :_relation_schema, source_schema),
+        _relation_table: Map.get(row, :_relation_table, source_table),
         _record: snapshot_record_from_tagged_row(row),
-        _old_record: fetch_map_value_or_default(row, :_old_record, %{}) |> normalize_row_map()
+        _old_record: Map.get(row, :_old_record, %{}) |> normalize_row_map()
       }
     else
       %{
@@ -489,13 +455,12 @@ defmodule DuckFeeder.Service do
     end
   end
 
-  defp pre_tagged_snapshot_row?(row) when is_map(row) do
-    has_metadata_key?(row, :_op) or has_metadata_key?(row, :_record) or
-      has_metadata_key?(row, :_commit_lsn)
+  defp tagged_snapshot_row?(row) when is_map(row) do
+    Map.has_key?(row, :_op) or Map.has_key?(row, :_record) or Map.has_key?(row, :_commit_lsn)
   end
 
   defp snapshot_record_from_tagged_row(row) when is_map(row) do
-    case fetch_map_value_or_default(row, :_record, nil) do
+    case Map.get(row, :_record) do
       record when is_map(record) ->
         stringify_keys(record)
 
@@ -509,10 +474,6 @@ defmodule DuckFeeder.Service do
 
   defp normalize_row_map(map) when is_map(map), do: stringify_keys(map)
   defp normalize_row_map(_other), do: %{}
-
-  defp has_metadata_key?(map, key) when is_map(map) and is_atom(key) do
-    Map.has_key?(map, key) or Map.has_key?(map, Atom.to_string(key))
-  end
 
   defp snapshot_metadata_key?(key) when is_atom(key),
     do: snapshot_metadata_key?(Atom.to_string(key))
@@ -553,14 +514,37 @@ defmodule DuckFeeder.Service do
     |> Map.new()
   end
 
-  defp fetch_map_string(map, key) when is_map(map) and is_atom(key) do
-    case fetch_map_value_or_default(map, key, nil) do
+  defp normalize_tagged_snapshot_row(row) when is_map(row) do
+    Enum.reduce(row, %{}, fn
+      {key, value}, acc when is_atom(key) ->
+        Map.put(acc, key, value)
+
+      {key, value}, acc when is_binary(key) ->
+        case tagged_snapshot_metadata_key(key) do
+          nil -> Map.put(acc, key, value)
+          metadata_key -> Map.put(acc, metadata_key, value)
+        end
+
+      {key, value}, acc ->
+        Map.put(acc, key, value)
+    end)
+  end
+
+  defp fetch_designated_table_string(map, key) when is_map(map) and is_atom(key) do
+    case Map.get(map, key) do
       value when is_binary(value) and value != "" -> {:ok, value}
       _ -> {:error, {:invalid_designated_table_field, key}}
     end
   end
 
-  defp fetch_map_value_or_default(map, key, default) when is_map(map) and is_atom(key) do
-    Map.get(map, key, Map.get(map, Atom.to_string(key), default))
-  end
+  defp tagged_snapshot_metadata_key("_op"), do: :_op
+  defp tagged_snapshot_metadata_key("_commit_lsn"), do: :_commit_lsn
+  defp tagged_snapshot_metadata_key("_xid"), do: :_xid
+  defp tagged_snapshot_metadata_key("_source_ts"), do: :_source_ts
+  defp tagged_snapshot_metadata_key("_ingest_ts"), do: :_ingest_ts
+  defp tagged_snapshot_metadata_key("_relation_schema"), do: :_relation_schema
+  defp tagged_snapshot_metadata_key("_relation_table"), do: :_relation_table
+  defp tagged_snapshot_metadata_key("_record"), do: :_record
+  defp tagged_snapshot_metadata_key("_old_record"), do: :_old_record
+  defp tagged_snapshot_metadata_key(_key), do: nil
 end

@@ -2,8 +2,7 @@ defmodule DuckFeeder.Sink.DuckDB do
   @moduledoc """
   DuckDB-backed sink for applying batches into real tables.
 
-  This sink moves DuckFeeder toward the target architecture where DuckDB owns
-  table writes and DuckFeeder owns replication correctness:
+  DuckDB owns table writes and DuckFeeder owns replication correctness:
 
   - append batches are inserted directly into target tables
   - CDC batches are applied as table operations (`MERGE`, `DELETE`, `TRUNCATE`)
@@ -24,51 +23,57 @@ defmodule DuckFeeder.Sink.DuckDB do
   connection process restarts.
   """
 
-  @behaviour DuckFeeder.Sink
-
-  alias DuckFeeder.Meta
+  alias DuckFeeder.{DesignatedTable, Meta}
   alias DuckFeeder.CDC.Lsn
   alias DuckFeeder.DuckDB.Client, as: DuckDBClient
 
   @setup_registry __MODULE__.SetupRegistry
   @setup_conn_registry __MODULE__.SetupConnRegistry
+  @applied_batch_registry __MODULE__.AppliedBatchRegistry
+  @applied_batch_conn_registry __MODULE__.AppliedBatchConnRegistry
   @rows_source_chunk_size 500
   @applied_batch_schema "duck_feeder_internal"
   @applied_batch_table "applied_batches"
 
-  @impl true
   def process_batch(context, table, batch)
       when is_map(context) and is_tuple(table) and is_map(batch) do
     meta_module = Map.get(context, :meta_module, Meta)
+    catalog = context_catalog(context)
 
     with {:ok, conn} <- duckdb_conn(context),
          :ok <- ensure_setup(conn, context),
+         :ok <- ensure_applied_batch_table(conn, catalog),
          {:ok, designated_table} <- designated_table(context, table),
-         {:ok, checkpoint_key} <- checkpoint_key(context, table, designated_table),
          {:ok, batch_lsn} <- batch_lsn_end_int(batch),
          {:ok, result} <-
-           apply_batch(conn, context, designated_table, table, batch, checkpoint_key, batch_lsn),
+           apply_batch(
+             conn,
+             designated_table,
+             table,
+             batch,
+             DesignatedTable.checkpoint_key(designated_table),
+             batch_lsn,
+             catalog
+           ),
          {:ok, checkpoint_lsn} <-
            meta_module.upsert_checkpoint(
              Map.fetch!(context, :meta_conn),
-             checkpoint_key,
+             DesignatedTable.checkpoint_key(designated_table),
              batch_lsn_end(batch)
            ) do
       {:ok,
        result
        |> Map.put(:status, :committed)
-       |> Map.put(:checkpoint_key, checkpoint_key)
+       |> Map.put(:checkpoint_key, DesignatedTable.checkpoint_key(designated_table))
        |> Map.put(:checkpoint_lsn, checkpoint_lsn)}
     end
   end
 
-  defp apply_batch(conn, context, designated_table, table, batch, checkpoint_key, batch_lsn) do
+  defp apply_batch(conn, designated_table, table, batch, checkpoint_key, batch_lsn, catalog) do
     rows = Map.get(batch, :rows, [])
-    catalog = context_catalog(context)
 
     with_transaction(conn, fn ->
-      with :ok <- ensure_applied_batch_table(conn, catalog),
-           {:ok, already_applied?} <-
+      with {:ok, already_applied?} <-
              batch_already_applied?(conn, checkpoint_key, batch_lsn, catalog) do
         if already_applied? do
           {:ok,
@@ -393,11 +398,11 @@ defmodule DuckFeeder.Sink.DuckDB do
     Enum.reduce(rows, {[], []}, fn row, {delete_acc, upsert_acc} ->
       case op_code(row) do
         op when op in ["I", "R"] ->
-          {delete_acc, [normalize_cdc_row_map(fetch_map_value(row, :_record, %{})) | upsert_acc]}
+          {delete_acc, [normalize_row_map(Map.get(row, :_record, %{})) | upsert_acc]}
 
         "U" ->
-          record = normalize_cdc_row_map(fetch_map_value(row, :_record, %{}))
-          old_record = normalize_cdc_row_map(fetch_map_value(row, :_old_record, %{}))
+          record = normalize_row_map(Map.get(row, :_record, %{}))
+          old_record = normalize_row_map(Map.get(row, :_old_record, %{}))
 
           delete_acc =
             if primary_key_changed?(record, old_record, primary_keys) do
@@ -409,7 +414,7 @@ defmodule DuckFeeder.Sink.DuckDB do
           {delete_acc, [record | upsert_acc]}
 
         "D" ->
-          old_record = normalize_cdc_row_map(fetch_map_value(row, :_old_record, %{}))
+          old_record = normalize_row_map(Map.get(row, :_old_record, %{}))
           {[slice_keys(old_record, primary_keys) | delete_acc], upsert_acc}
 
         "T" ->
@@ -756,28 +761,132 @@ defmodule DuckFeeder.Sink.DuckDB do
     end
   end
 
+  defp applied_batch_table_ready?(key) do
+    registry = ensure_applied_batch_registry()
+    match?([{^key, true}], :ets.lookup(registry, key))
+  end
+
+  defp remember_applied_batch_table(key) do
+    registry = ensure_applied_batch_registry()
+    true = :ets.insert(registry, {key, true})
+    :ok
+  end
+
+  defp ensure_applied_batch_conn_monitor(conn) when is_pid(conn) do
+    registry = ensure_applied_batch_conn_registry()
+
+    case :ets.lookup(registry, conn) do
+      [{^conn, watcher}] when is_pid(watcher) ->
+        if Process.alive?(watcher) do
+          :ok
+        else
+          watcher = spawn(fn -> monitor_applied_batch_conn(conn) end)
+          true = :ets.insert(registry, {conn, watcher})
+          :ok
+        end
+
+      _ ->
+        watcher = spawn(fn -> monitor_applied_batch_conn(conn) end)
+        true = :ets.insert(registry, {conn, watcher})
+        :ok
+    end
+  end
+
+  defp monitor_applied_batch_conn(conn) do
+    ref = Process.monitor(conn)
+
+    receive do
+      {:DOWN, ^ref, :process, ^conn, _reason} ->
+        clear_applied_batch_entries(conn)
+        clear_applied_batch_conn_monitor(conn)
+    end
+  end
+
+  defp clear_applied_batch_entries(conn) when is_pid(conn) do
+    case :ets.whereis(@applied_batch_registry) do
+      :undefined ->
+        :ok
+
+      registry ->
+        true = :ets.match_delete(registry, {{conn, :_}, :_})
+        :ok
+    end
+  end
+
+  defp clear_applied_batch_conn_monitor(conn) when is_pid(conn) do
+    case :ets.whereis(@applied_batch_conn_registry) do
+      :undefined ->
+        :ok
+
+      registry ->
+        true = :ets.delete(registry, conn)
+        :ok
+    end
+  end
+
+  defp ensure_applied_batch_registry do
+    case :ets.whereis(@applied_batch_registry) do
+      :undefined ->
+        try do
+          :ets.new(@applied_batch_registry, [:named_table, :public, :set, read_concurrency: true])
+        catch
+          :error, :badarg -> @applied_batch_registry
+        end
+
+      registry ->
+        registry
+    end
+  end
+
+  defp ensure_applied_batch_conn_registry do
+    case :ets.whereis(@applied_batch_conn_registry) do
+      :undefined ->
+        try do
+          :ets.new(@applied_batch_conn_registry, [
+            :named_table,
+            :public,
+            :set,
+            read_concurrency: true
+          ])
+        catch
+          :error, :badarg -> @applied_batch_conn_registry
+        end
+
+      registry ->
+        registry
+    end
+  end
+
   defp ensure_applied_batch_table(conn, catalog) do
-    with :ok <-
-           execute(
-             conn,
-             "CREATE SCHEMA IF NOT EXISTS #{qualified_schema(@applied_batch_schema, catalog)}"
-           ),
-         :ok <-
-           execute(
-             conn,
-             "CREATE TABLE IF NOT EXISTS #{applied_batch_relation(catalog)} (" <>
-               "checkpoint_key VARCHAR NOT NULL, " <>
-               "last_applied_lsn HUGEINT NOT NULL, " <>
-               "last_applied_lsn_text VARCHAR NOT NULL)"
-           ) do
+    key = {conn, catalog}
+
+    :ok = ensure_applied_batch_conn_monitor(conn)
+
+    if applied_batch_table_ready?(key) do
       :ok
+    else
+      with :ok <-
+             execute(
+               conn,
+               "CREATE SCHEMA IF NOT EXISTS #{qualified_schema(@applied_batch_schema, catalog)}"
+             ),
+           :ok <-
+             execute(
+               conn,
+               "CREATE TABLE IF NOT EXISTS #{applied_batch_relation(catalog)} (" <>
+                 "checkpoint_key VARCHAR PRIMARY KEY, " <>
+                 "last_applied_lsn HUGEINT NOT NULL, " <>
+                 "last_applied_lsn_text VARCHAR NOT NULL)"
+             ) do
+        remember_applied_batch_table(key)
+      end
     end
   end
 
   defp batch_already_applied?(conn, checkpoint_key, batch_lsn, catalog)
        when is_binary(checkpoint_key) and is_integer(batch_lsn) do
     sql =
-      "SELECT last_applied_lsn FROM #{applied_batch_relation(catalog)} " <>
+      "SELECT max(last_applied_lsn) AS last_applied_lsn FROM #{applied_batch_relation(catalog)} " <>
         "WHERE checkpoint_key = #{quote_string(checkpoint_key)}"
 
     with {:ok, result} <- query_map(conn, sql) do
@@ -796,42 +905,30 @@ defmodule DuckFeeder.Sink.DuckDB do
 
   defp record_applied_batch(conn, checkpoint_key, batch_lsn, batch_lsn_text, catalog)
        when is_binary(checkpoint_key) and is_integer(batch_lsn) and is_binary(batch_lsn_text) do
-    with :ok <-
-           execute(
-             conn,
-             "DELETE FROM #{applied_batch_relation(catalog)} WHERE checkpoint_key = #{quote_string(checkpoint_key)}"
-           ) do
-      execute(
-        conn,
-        "INSERT INTO #{applied_batch_relation(catalog)} (checkpoint_key, last_applied_lsn, last_applied_lsn_text) VALUES (" <>
-          "#{quote_string(checkpoint_key)}, " <>
-          "#{batch_lsn}::HUGEINT, " <>
-          "#{quote_string(batch_lsn_text)})"
-      )
-    end
+    execute(
+      conn,
+      "MERGE INTO #{applied_batch_relation(catalog)} AS target USING (" <>
+        "SELECT " <>
+        "#{quote_string(checkpoint_key)} AS checkpoint_key, " <>
+        "#{batch_lsn}::HUGEINT AS last_applied_lsn, " <>
+        "#{quote_string(batch_lsn_text)} AS last_applied_lsn_text" <>
+        ") AS source ON target.checkpoint_key = source.checkpoint_key " <>
+        "WHEN MATCHED THEN UPDATE SET " <>
+        "last_applied_lsn = source.last_applied_lsn, " <>
+        "last_applied_lsn_text = source.last_applied_lsn_text " <>
+        "WHEN NOT MATCHED THEN INSERT (checkpoint_key, last_applied_lsn, last_applied_lsn_text) VALUES (" <>
+        "source.checkpoint_key, source.last_applied_lsn, source.last_applied_lsn_text)"
+    )
   end
 
   defp applied_batch_relation(catalog),
     do: qualified_relation({@applied_batch_schema, @applied_batch_table}, catalog)
 
   defp designated_table(context, table) do
-    case Map.get(context, :designated_table_config_by_target, %{}) |> Map.get(table) do
-      nil -> {:ok, %{}}
+    case Map.get(context, :designated_tables_by_target, %{}) |> Map.get(table) do
+      nil -> {:error, {:unknown_target_table, table}}
       designated_table when is_map(designated_table) -> {:ok, designated_table}
-      other -> {:error, {:invalid_designated_table_config, table, other}}
-    end
-  end
-
-  defp checkpoint_key(context, table, designated_table) do
-    checkpoint_key =
-      case fetch_map_value(designated_table, :checkpoint_key, nil) do
-        value when is_binary(value) and value != "" -> value
-        _ -> Map.get(context, :designated_table_by_target, %{}) |> Map.get(table)
-      end
-
-    case checkpoint_key do
-      value when is_binary(value) and value != "" -> {:ok, value}
-      _ -> {:error, {:unknown_target_table, table}}
+      other -> {:error, {:invalid_designated_table, table, other}}
     end
   end
 
@@ -844,8 +941,9 @@ defmodule DuckFeeder.Sink.DuckDB do
 
   defp execute(conn, sql) when is_binary(sql) do
     case DuckDBClient.execute(conn, sql) do
-      {:ok, _result} -> :ok
+      :ok -> :ok
       {:error, _reason} = error -> error
+      _other -> :ok
     end
   end
 
@@ -894,31 +992,11 @@ defmodule DuckFeeder.Sink.DuckDB do
 
   defp normalize_row_map(_other), do: %{}
 
-  defp normalize_cdc_row_map(map) when is_map(map) do
-    map
-    |> Enum.map(fn {key, value} -> {to_string(key), value} end)
-    |> Map.new()
-  end
-
-  defp normalize_cdc_row_map(_other), do: %{}
-
-  defp fetch_row_value(map, key) when is_map(map) and is_binary(key) do
-    cond do
-      Map.has_key?(map, key) ->
-        Map.get(map, key)
-
-      true ->
-        Enum.find_value(map, fn {map_key, value} -> if to_string(map_key) == key, do: value end)
-    end
-  end
-
-  defp fetch_map_value(map, key, default) when is_map(map) and is_atom(key) do
-    Map.get(map, key, Map.get(map, Atom.to_string(key), default))
-  end
+  defp fetch_row_value(map, key) when is_map(map) and is_binary(key), do: Map.get(map, key)
 
   defp op_code(row) do
     row
-    |> fetch_map_value(:_op, "")
+    |> Map.get(:_op, "")
     |> to_string()
   end
 
@@ -971,11 +1049,5 @@ defmodule DuckFeeder.Sink.DuckDB do
 
   defp rollback(conn), do: execute(conn, "ROLLBACK")
 
-  defp encode_json!(value) do
-    JSON.encode!(value)
-  rescue
-    exception in [UndefinedFunctionError] ->
-      raise ArgumentError,
-            "JSON encoding requires Elixir 1.19+'s JSON module, got: #{inspect(exception)}"
-  end
+  defp encode_json!(value), do: JSON.encode!(value)
 end

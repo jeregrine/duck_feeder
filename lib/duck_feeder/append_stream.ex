@@ -29,7 +29,7 @@ defmodule DuckFeeder.AppendStream do
 
   use GenServer
 
-  alias DuckFeeder.{StreamSupport, TablePipeline}
+  alias DuckFeeder.{RuntimeSupport, TablePipeline}
   alias DuckFeeder.CDC.Lsn
 
   defmodule State do
@@ -37,7 +37,6 @@ defmodule DuckFeeder.AppendStream do
       :pipeline_supervisor,
       :pipeline_opts,
       :context,
-      :designated_table_by_target,
       :default_target_schema,
       :observer_pid,
       :lsn_counter,
@@ -50,7 +49,6 @@ defmodule DuckFeeder.AppendStream do
       :pipeline_supervisor,
       :pipeline_opts,
       :context,
-      :designated_table_by_target,
       :default_target_schema,
       :observer_pid,
       :lsn_counter,
@@ -70,7 +68,6 @@ defmodule DuckFeeder.AppendStream do
             pipeline_supervisor: pid(),
             pipeline_opts: map(),
             context: map(),
-            designated_table_by_target: %{optional({String.t(), String.t()}) => String.t()},
             default_target_schema: String.t(),
             observer_pid: pid(),
             lsn_counter: non_neg_integer(),
@@ -90,7 +87,6 @@ defmodule DuckFeeder.AppendStream do
           | {:designated_tables, [map()]}
           | {:meta_conn, term()}
           | {:duckdb, map()}
-          | {:sink_module, module()}
           | {:meta_module, module()}
           | {:object_prefix, String.t()}
           | {:pipeline_opts, map()}
@@ -100,8 +96,6 @@ defmodule DuckFeeder.AppendStream do
           | {:max_inflight_batches, pos_integer()}
           | {:max_pending_batches, pos_integer()}
           | {:overflow_strategy, :fail | :drop_oldest}
-          | {:poison_row_mode, :fail | :drop}
-          | {:poison_row_sink, pid() | (map() -> term()) | {module(), atom(), [term()]}}
 
   @spec start_link([option()]) :: GenServer.on_start()
   def start_link(opts) do
@@ -126,54 +120,28 @@ defmodule DuckFeeder.AppendStream do
     designated_tables = Keyword.fetch!(opts, :designated_tables)
     start_lsn = Keyword.get(opts, :start_lsn, "0/0")
 
-    with {:ok, sink_module} <- StreamSupport.resolve_sink_module_option(opts),
-         {:ok, duckdb} <- StreamSupport.resolve_duckdb(opts, sink_module),
+    with {:ok, common} <-
+           RuntimeSupport.resolve_common_init(
+             designated_tables,
+             opts,
+             checkpoint_prefix: Keyword.get(opts, :object_prefix, "duck_feeder_append")
+           ),
          {:ok, lsn_counter} <- Lsn.parse(start_lsn),
-         {:ok, max_inflight_batches} <-
-           StreamSupport.normalize_positive_integer(
-             Keyword.get(opts, :max_inflight_batches, 1),
-             :max_inflight_batches
-           ),
-         {:ok, max_pending_batches} <-
-           StreamSupport.normalize_positive_integer(
-             Keyword.get(opts, :max_pending_batches, 1_000),
-             :max_pending_batches
-           ),
          {:ok, overflow_strategy} <-
            normalize_overflow_strategy(Keyword.get(opts, :overflow_strategy, :fail)),
          {:ok, pipeline_supervisor} <- DynamicSupervisor.start_link(strategy: :one_for_one),
          {:ok, batch_task_supervisor} <- Task.Supervisor.start_link(strategy: :one_for_one) do
-      object_prefix = Keyword.get(opts, :object_prefix, "duck_feeder_append")
-
-      designated_table_by_target =
-        StreamSupport.designated_table_mapping(designated_tables, object_prefix)
-
-      context =
-        %{
-          meta_conn: Keyword.fetch!(opts, :meta_conn),
-          designated_table_by_target: designated_table_by_target,
-          designated_table_config_by_target:
-            StreamSupport.designated_table_config_mapping(designated_tables),
-          object_prefix: object_prefix,
-          sink_module: sink_module
-        }
-        |> StreamSupport.maybe_put_optional(:duckdb, duckdb)
-        |> StreamSupport.maybe_put_optional(:meta_module, Keyword.get(opts, :meta_module))
-        |> StreamSupport.maybe_put_optional(:poison_row_mode, Keyword.get(opts, :poison_row_mode))
-        |> StreamSupport.maybe_put_optional(:poison_row_sink, Keyword.get(opts, :poison_row_sink))
-
       {:ok,
        %State{
          pipeline_supervisor: pipeline_supervisor,
          pipeline_opts: Keyword.get(opts, :pipeline_opts, %{}) |> Map.new(),
-         context: context,
-         designated_table_by_target: designated_table_by_target,
+         context: common.context,
          default_target_schema: Keyword.get(opts, :default_target_schema, "raw"),
-         observer_pid: Keyword.get(opts, :observer_pid, self()),
+         observer_pid: common.observer_pid,
          lsn_counter: lsn_counter,
          batch_task_supervisor: batch_task_supervisor,
-         max_inflight_batches: max_inflight_batches,
-         max_pending_batches: max_pending_batches,
+         max_inflight_batches: common.max_inflight_batches,
+         max_pending_batches: common.max_pending_batches,
          overflow_strategy: overflow_strategy
        }}
     else
@@ -185,7 +153,7 @@ defmodule DuckFeeder.AppendStream do
   @impl true
   def handle_call({:append, table_ref, row, opts}, _from, %State{} = state) do
     with {:ok, table} <- normalize_table(table_ref, state.default_target_schema),
-         :ok <- ensure_known_table(state.designated_table_by_target, table),
+         :ok <- ensure_known_table(state.context, table),
          {:ok, pipeline, next_state} <- ensure_pipeline(state, table),
          {:ok, lsn, next_state} <- resolve_lsn(next_state, opts) do
       :ok = TablePipeline.append(pipeline, row, lsn)
@@ -280,17 +248,15 @@ defmodule DuckFeeder.AppendStream do
         reason: reason
       })
 
-    if is_pid(overflow_state.observer_pid) do
-      send(
-        overflow_state.observer_pid,
-        {:duck_feeder_append_batch_queue_overflow, table, batch, reason}
-      )
+    send(
+      overflow_state.observer_pid,
+      {:duck_feeder_append_batch_queue_overflow, table, batch, reason}
+    )
 
-      send(
-        overflow_state.observer_pid,
-        {:duck_feeder_batch_queue_overflow, table, batch, reason}
-      )
-    end
+    send(
+      overflow_state.observer_pid,
+      {:duck_feeder_batch_queue_overflow, table, batch, reason}
+    )
 
     overflow_state
   end
@@ -300,19 +266,17 @@ defmodule DuckFeeder.AppendStream do
 
     emit_batch_queue_telemetry(state, :completed, %{
       table: table,
-      result: StreamSupport.batch_result_status(result)
+      result: DuckFeeder.Telemetry.batch_result_status(result)
     })
   end
 
   defp handle_batch_task_crashed(%State{} = state, table, batch, reason, error) do
-    if is_pid(state.observer_pid) do
-      send(
-        state.observer_pid,
-        {:duck_feeder_append_batch_processed, table, {:error, error}, batch}
-      )
+    send(
+      state.observer_pid,
+      {:duck_feeder_append_batch_processed, table, {:error, error}, batch}
+    )
 
-      send(state.observer_pid, {:duck_feeder_batch_processed, table, {:error, error}, batch})
-    end
+    send(state.observer_pid, {:duck_feeder_batch_processed, table, {:error, error}, batch})
 
     emit_batch_queue_telemetry(state, :task_crashed, %{
       table: table,
@@ -321,11 +285,8 @@ defmodule DuckFeeder.AppendStream do
   end
 
   defp notify_batch_result(%State{observer_pid: observer_pid} = state, table, result, batch) do
-    if is_pid(observer_pid) do
-      send(observer_pid, {:duck_feeder_append_batch_processed, table, result, batch})
-      send(observer_pid, {:duck_feeder_batch_processed, table, result, batch})
-    end
-
+    send(observer_pid, {:duck_feeder_append_batch_processed, table, result, batch})
+    send(observer_pid, {:duck_feeder_batch_processed, table, result, batch})
     state
   end
 
@@ -340,14 +301,12 @@ defmodule DuckFeeder.AppendStream do
       %{table: dropped_table, reason: reason}
     )
 
-    if is_pid(observer_pid) do
-      send(
-        observer_pid,
-        {:duck_feeder_append_batch_dropped, dropped_table, dropped_batch, reason}
-      )
+    send(
+      observer_pid,
+      {:duck_feeder_append_batch_dropped, dropped_table, dropped_batch, reason}
+    )
 
-      send(observer_pid, {:duck_feeder_batch_dropped, dropped_table, dropped_batch, reason})
-    end
+    send(observer_pid, {:duck_feeder_batch_dropped, dropped_table, dropped_batch, reason})
 
     state
   end
@@ -357,10 +316,10 @@ defmodule DuckFeeder.AppendStream do
     metadata =
       metadata
       |> Map.put(:status, status)
-      |> StreamSupport.maybe_put_table_metadata()
+      |> DuckFeeder.Telemetry.put_table_metadata()
 
     DuckFeeder.Telemetry.append_stream_batch_queue(
-      StreamSupport.batch_queue_measurements(state),
+      DuckFeeder.Telemetry.batch_queue_measurements(state),
       metadata
     )
 
@@ -387,8 +346,8 @@ defmodule DuckFeeder.AppendStream do
     end
   end
 
-  defp ensure_known_table(mapping, table) do
-    if Map.has_key?(mapping, table) do
+  defp ensure_known_table(context, table) when is_map(context) and is_tuple(table) do
+    if Map.get(context, :designated_tables_by_target, %{}) |> Map.has_key?(table) do
       :ok
     else
       {:error, {:unknown_target_table, table}}

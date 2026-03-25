@@ -69,6 +69,34 @@ defmodule DuckFeeder.Telemetry do
     )
   end
 
+  @spec batch_result_status(term()) :: :ok | :error | :unknown
+  def batch_result_status({:ok, _result}), do: :ok
+  def batch_result_status({:error, _reason}), do: :error
+  def batch_result_status(_result), do: :unknown
+
+  @spec batch_queue_measurements(map()) :: map()
+  def batch_queue_measurements(state) when is_map(state) do
+    %{
+      pending_batch_count: Map.fetch!(state, :pending_batch_count),
+      inflight_batch_count: map_size(Map.fetch!(state, :inflight_batch_tasks)),
+      max_pending_batches: Map.fetch!(state, :max_pending_batches),
+      max_inflight_batches: Map.fetch!(state, :max_inflight_batches)
+    }
+  end
+
+  @spec put_table_metadata(map()) :: map()
+  def put_table_metadata(metadata) when is_map(metadata) do
+    case Map.get(metadata, :table) do
+      {schema, table} when is_binary(schema) and is_binary(table) ->
+        metadata
+        |> Map.put(:table_schema, schema)
+        |> Map.put(:table_name, table)
+
+      _ ->
+        metadata
+    end
+  end
+
   @spec service_batch_queue(map(), map()) :: :ok
   def service_batch_queue(measurements, metadata \\ %{})
       when is_map(measurements) and is_map(metadata) do

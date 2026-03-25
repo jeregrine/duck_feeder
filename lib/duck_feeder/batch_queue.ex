@@ -85,7 +85,7 @@ defmodule DuckFeeder.BatchQueue do
   defp start_batch_task(state, table, batch, source, event_callback) when is_atom(source) do
     task =
       Task.Supervisor.async_nolink(state.batch_task_supervisor, fn ->
-        DuckFeeder.Sink.process_batch(state.context, table, batch)
+        DuckFeeder.Sink.DuckDB.process_batch(state.context, table, batch)
       end)
 
     next_state =

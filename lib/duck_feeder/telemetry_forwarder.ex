@@ -21,7 +21,6 @@ defmodule DuckFeeder.TelemetryForwarder do
     [:duck_feeder, :cdc, :backpressure],
     [:duck_feeder, :batch, :flushed],
     [:duck_feeder, :batch, :processed],
-    [:duck_feeder, :batch, :poison_row],
     [:duck_feeder, :service, :batch_queue],
     [:duck_feeder, :append_stream, :batch_queue],
     [:duck_feeder, :append_stream, :batch_dropped],
@@ -40,7 +39,9 @@ defmodule DuckFeeder.TelemetryForwarder do
       :summarize_duck_feeder?,
       :summary_debounce_ms,
       :summary_max_window_ms,
-      :summary_suppress_own_events_ms
+      :summary_suppress_own_events_ms,
+      :normalize_term_max_depth,
+      :normalize_term_max_items
     ]
 
     defstruct [
@@ -55,6 +56,8 @@ defmodule DuckFeeder.TelemetryForwarder do
       :summary_debounce_ms,
       :summary_max_window_ms,
       :summary_suppress_own_events_ms,
+      :normalize_term_max_depth,
+      :normalize_term_max_items,
       :summary_window_started_at_ms,
       :summary_window_started_at_iso,
       :summary_timer_ref,
@@ -75,6 +78,8 @@ defmodule DuckFeeder.TelemetryForwarder do
           | {:summary_debounce_ms, pos_integer()}
           | {:summary_max_window_ms, pos_integer()}
           | {:summary_suppress_own_events_ms, non_neg_integer()}
+          | {:normalize_term_max_depth, pos_integer()}
+          | {:normalize_term_max_items, pos_integer()}
           | {:append_fun,
              (GenServer.server(), String.t(), map(), keyword() -> :ok | {:error, term()})}
 
@@ -133,6 +138,16 @@ defmodule DuckFeeder.TelemetryForwarder do
              Keyword.get(opts, :summary_suppress_own_events_ms, 1_000),
              :summary_suppress_own_events_ms
            ),
+         {:ok, normalize_term_max_depth} <-
+           normalize_pos_integer(
+             Keyword.get(opts, :normalize_term_max_depth, 4),
+             :normalize_term_max_depth
+           ),
+         {:ok, normalize_term_max_items} <-
+           normalize_pos_integer(
+             Keyword.get(opts, :normalize_term_max_items, 100),
+             :normalize_term_max_items
+           ),
          :ok <- attach_handler(handler_id, events) do
       {:ok,
        %State{
@@ -146,7 +161,9 @@ defmodule DuckFeeder.TelemetryForwarder do
          summarize_duck_feeder?: summarize_duck_feeder?,
          summary_debounce_ms: summary_debounce_ms,
          summary_max_window_ms: summary_max_window_ms,
-         summary_suppress_own_events_ms: summary_suppress_own_events_ms
+         summary_suppress_own_events_ms: summary_suppress_own_events_ms,
+         normalize_term_max_depth: normalize_term_max_depth,
+         normalize_term_max_items: normalize_term_max_items
        }}
     else
       {:error, reason} -> {:stop, reason}
@@ -293,7 +310,7 @@ defmodule DuckFeeder.TelemetryForwarder do
     {append_errors, _count} =
       state.summary_groups
       |> Map.values()
-      |> Enum.map(&summary_row(&1, started_iso, now_iso, reason))
+      |> Enum.map(&summary_row(&1, started_iso, now_iso, reason, state))
       |> Enum.reduce({[], 0}, fn row, {errors, count} ->
         case safe_append(state, row) do
           :ok -> {errors, count + 1}
@@ -327,8 +344,8 @@ defmodule DuckFeeder.TelemetryForwarder do
     row = %{
       "type" => "telemetry_event",
       "event" => event_name(event),
-      "measurements" => normalize_term(measurements),
-      "metadata" => normalize_term(metadata),
+      "measurements" => normalize_term(measurements, state),
+      "metadata" => normalize_term(metadata, state),
       "at" => DateTime.utc_now() |> DateTime.to_iso8601()
     }
 
@@ -360,14 +377,14 @@ defmodule DuckFeeder.TelemetryForwarder do
     end
   end
 
-  defp summary_row(summary, started_iso, ended_iso, reason) do
+  defp summary_row(summary, started_iso, ended_iso, reason, %State{} = state) do
     %{
       "type" => "duck_feeder_summary",
       "event" => summary.metadata.event,
-      "status" => normalize_term(summary.metadata.status),
-      "source" => normalize_term(summary.metadata.source),
-      "table_schema" => normalize_term(summary.metadata.table_schema),
-      "table_name" => normalize_term(summary.metadata.table_name),
+      "status" => normalize_term(summary.metadata.status, state),
+      "source" => normalize_term(summary.metadata.source, state),
+      "table_schema" => normalize_term(summary.metadata.table_schema, state),
+      "table_name" => normalize_term(summary.metadata.table_name, state),
       "count" => summary.count,
       "window_started_at" => started_iso,
       "window_ended_at" => ended_iso,
@@ -461,39 +478,64 @@ defmodule DuckFeeder.TelemetryForwarder do
   defp notify_observer(pid, message) when is_pid(pid), do: send(pid, message)
   defp notify_observer(_pid, _message), do: :ok
 
-  defp normalize_term(value), do: normalize_term(value, 4)
+  defp normalize_term(value, %State{} = state),
+    do: normalize_term(value, state.normalize_term_max_depth, state.normalize_term_max_items)
 
-  defp normalize_term(_value, depth) when depth <= 0, do: "..."
-  defp normalize_term(value, _depth) when is_nil(value), do: nil
-  defp normalize_term(value, _depth) when is_boolean(value), do: value
-  defp normalize_term(value, _depth) when is_number(value), do: value
-  defp normalize_term(value, _depth) when is_binary(value), do: value
-  defp normalize_term(value, _depth) when is_atom(value), do: Atom.to_string(value)
+  defp normalize_term(_value, depth, _max_items) when depth <= 0, do: "..."
+  defp normalize_term(value, _depth, _max_items) when is_nil(value), do: nil
+  defp normalize_term(value, _depth, _max_items) when is_boolean(value), do: value
+  defp normalize_term(value, _depth, _max_items) when is_number(value), do: value
+  defp normalize_term(value, _depth, _max_items) when is_binary(value), do: value
+  defp normalize_term(value, _depth, _max_items) when is_atom(value), do: Atom.to_string(value)
 
-  defp normalize_term(%DateTime{} = value, _depth), do: DateTime.to_iso8601(value)
-  defp normalize_term(%NaiveDateTime{} = value, _depth), do: NaiveDateTime.to_iso8601(value)
-  defp normalize_term(%Date{} = value, _depth), do: Date.to_iso8601(value)
-  defp normalize_term(%Time{} = value, _depth), do: Time.to_iso8601(value)
+  defp normalize_term(%DateTime{} = value, _depth, _max_items), do: DateTime.to_iso8601(value)
 
-  defp normalize_term(value, depth) when is_list(value) do
-    value
-    |> Enum.take(100)
-    |> Enum.map(&normalize_term(&1, depth - 1))
+  defp normalize_term(%NaiveDateTime{} = value, _depth, _max_items),
+    do: NaiveDateTime.to_iso8601(value)
+
+  defp normalize_term(%Date{} = value, _depth, _max_items), do: Date.to_iso8601(value)
+  defp normalize_term(%Time{} = value, _depth, _max_items), do: Time.to_iso8601(value)
+
+  defp normalize_term(value, depth, max_items) when is_list(value) do
+    total_count = length(value)
+    items = value |> Enum.take(max_items) |> Enum.map(&normalize_term(&1, depth - 1, max_items))
+
+    if total_count > max_items do
+      %{
+        "__duck_feeder_type__" => "list",
+        "__duck_feeder_items__" => items,
+        "__duck_feeder_truncated__" => true,
+        "__duck_feeder_original_count__" => total_count
+      }
+    else
+      items
+    end
   end
 
-  defp normalize_term(value, depth) when is_tuple(value) do
+  defp normalize_term(value, depth, max_items) when is_tuple(value) do
     value
     |> Tuple.to_list()
-    |> normalize_term(depth - 1)
+    |> normalize_term(depth - 1, max_items)
   end
 
-  defp normalize_term(value, depth) when is_map(value) do
-    value
-    |> Enum.take(100)
-    |> Enum.into(%{}, fn {key, nested_value} ->
-      {to_string(key), normalize_term(nested_value, depth - 1)}
-    end)
+  defp normalize_term(value, depth, max_items) when is_map(value) do
+    total_count = map_size(value)
+
+    normalized =
+      value
+      |> Enum.take(max_items)
+      |> Enum.into(%{}, fn {key, nested_value} ->
+        {to_string(key), normalize_term(nested_value, depth - 1, max_items)}
+      end)
+
+    if total_count > max_items do
+      normalized
+      |> Map.put("__duck_feeder_truncated__", true)
+      |> Map.put("__duck_feeder_original_count__", total_count)
+    else
+      normalized
+    end
   end
 
-  defp normalize_term(value, _depth), do: inspect(value)
+  defp normalize_term(value, _depth, _max_items), do: inspect(value)
 end

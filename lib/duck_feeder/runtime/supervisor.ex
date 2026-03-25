@@ -5,14 +5,11 @@ defmodule DuckFeeder.Runtime.Supervisor do
 
   use Supervisor
 
-  alias DuckFeeder.Runtime.Shared
-
   @type option ::
           {:name, Supervisor.name()}
           | {:meta_conn, term()}
           | {:source_name, String.t()}
           | {:duckdb, map() | nil}
-          | {:duckdb_config, map() | nil}
           | {:runtime_opts, keyword()}
           | {:runtime_module, module()}
           | {:stream_worker_module, module()}
@@ -29,7 +26,7 @@ defmodule DuckFeeder.Runtime.Supervisor do
   def init(opts) do
     meta_conn = Keyword.fetch!(opts, :meta_conn)
     source_name = Keyword.fetch!(opts, :source_name)
-    duckdb = Shared.fetch_duckdb!(opts)
+    duckdb = Keyword.fetch!(opts, :duckdb)
 
     stream_worker_module =
       Keyword.get(opts, :stream_worker_module, DuckFeeder.Runtime.StreamWorker)
@@ -43,21 +40,13 @@ defmodule DuckFeeder.Runtime.Supervisor do
         runtime_module: Keyword.get(opts, :runtime_module),
         observer_pid: Keyword.get(opts, :observer_pid)
       ]
+      |> Keyword.put(:duckdb, duckdb)
       |> Enum.reject(fn {_key, value} -> is_nil(value) end)
-      |> maybe_put_duckdb_opt(opts, duckdb)
 
     children = [
       {stream_worker_module, child_opts}
     ]
 
     Supervisor.init(children, strategy: :one_for_one)
-  end
-
-  defp maybe_put_duckdb_opt(child_opts, parent_opts, duckdb) do
-    if Keyword.has_key?(parent_opts, :duckdb) or Keyword.has_key?(parent_opts, :duckdb_config) do
-      Keyword.put(child_opts, :duckdb, duckdb)
-    else
-      child_opts
-    end
   end
 end

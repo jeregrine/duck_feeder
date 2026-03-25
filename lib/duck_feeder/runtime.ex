@@ -35,9 +35,8 @@ defmodule DuckFeeder.Runtime do
   and manage stream startup as a supervised child.
   """
 
-  alias DuckFeeder.{Config, DesignatedTable, Meta, Service, Sink}
+  alias DuckFeeder.{Config, DesignatedTable, Meta, RuntimeSupport, Service}
   alias DuckFeeder.CDC.{Bootstrap, Connection, ConnectionOptions, Lsn}
-  alias DuckFeeder.Runtime.Shared
 
   @default_reconnect_backoff 1_000
 
@@ -80,48 +79,44 @@ defmodule DuckFeeder.Runtime do
   Supports two styles:
   - explicit engine config via `config: %{source: ..., duckdb: ..., metadata: ...}`
   - simplified repo/schemas config via `repo`, `schemas`, and `duckdb`
-
-  The resolved map uses `:duckdb` as the preferred key and keeps
-  `:duckdb_config` as a backward-compatible alias.
   """
   @spec resolve_app_config(map() | keyword()) :: {:ok, map()} | {:error, term()}
   def resolve_app_config(config) when is_map(config) or is_list(config) do
-    cfg = Shared.mapify(config)
+    with {:ok, cfg} <- normalize_options_map(config, :config) do
+      enabled? = truthy?(Map.get(cfg, :enabled, true))
 
-    enabled? = truthy?(Map.get(cfg, :enabled, true))
+      if enabled? do
+        runtime_opts =
+          cfg
+          |> Map.get(:runtime_opts, [])
+          |> List.wrap()
+          |> put_default_runtime_opt(:snapshot_before_stream?, true)
+          |> put_default_runtime_opt(:resume_incomplete_snapshot?, true)
 
-    if enabled? do
-      runtime_opts =
-        cfg
-        |> map_get(:runtime_opts, [])
-        |> List.wrap()
-        |> put_default_runtime_opt(:snapshot_before_stream?, true)
-        |> put_default_runtime_opt(:resume_incomplete_snapshot?, true)
+        source_name = normalize_source_name(Map.get(cfg, :source_name, "default"))
 
-      source_name = normalize_source_name(map_get(cfg, :source_name, "default"))
+        with {:ok, runtime_config} <- runtime_config(cfg, source_name),
+             {:ok, validated} <- Config.validate(runtime_config) do
+          designated_tables =
+            put_runtime_checkpoint_keys(source_name, validated.source.designated_tables)
 
-      with {:ok, runtime_config} <- runtime_config(cfg, source_name),
-           {:ok, validated} <- Config.validate(runtime_config) do
-        designated_tables =
-          put_runtime_checkpoint_keys(source_name, validated.source.designated_tables)
+          source = build_runtime_source(source_name, validated.source)
+          duckdb = Config.duckdb(validated)
 
-        source = build_runtime_source(source_name, validated.source)
-        duckdb = Config.duckdb(validated)
-
-        {:ok,
-         %{
-           enabled?: true,
-           source_name: source_name,
-           source: source,
-           designated_tables: designated_tables,
-           validated_config: validated,
-           duckdb: duckdb,
-           duckdb_config: duckdb,
-           runtime_opts: runtime_opts
-         }}
+          {:ok,
+           %{
+             enabled?: true,
+             source_name: source_name,
+             source: source,
+             designated_tables: designated_tables,
+             validated_config: validated,
+             duckdb: duckdb,
+             runtime_opts: runtime_opts
+           }}
+        end
+      else
+        {:ok, %{enabled?: false}}
       end
-    else
-      {:ok, %{enabled?: false}}
     end
   end
 
@@ -133,7 +128,6 @@ defmodule DuckFeeder.Runtime do
     source
     |> Map.put(:name, source_name)
     |> Map.put(:postgres_url, postgres_url)
-    |> Map.put(:snapshot_handoff_source_key, source_name)
     |> maybe_put_runtime_connection_info(postgres_url)
     |> Enum.reject(fn {_key, value} -> is_nil(value) end)
     |> Map.new()
@@ -156,25 +150,21 @@ defmodule DuckFeeder.Runtime do
   @spec repo_postgres_url(module()) :: {:ok, String.t()} | {:error, term()}
   def repo_postgres_url(repo) when is_atom(repo) do
     if function_exported?(repo, :config, 0) do
-      repo
-      |> apply(:config, [])
-      |> Shared.mapify()
-      |> repo_config_to_url()
+      with {:ok, repo_config} <- normalize_options_map(apply(repo, :config, []), :repo_config) do
+        repo_config_to_url(repo_config)
+      end
     else
       {:error, {:invalid_repo, repo}}
     end
   end
 
   defp runtime_config(cfg, source_name) do
-    case map_get(cfg, :config) do
-      explicit when is_map(explicit) or is_list(explicit) ->
-        {:ok, Shared.mapify(explicit)}
-
+    case Map.get(cfg, :config) do
       nil ->
         simplified_runtime_config(cfg, source_name)
 
-      other ->
-        {:error, {:invalid_option, :config, other}}
+      explicit ->
+        normalize_options_map(explicit, :config)
     end
   end
 
@@ -182,13 +172,14 @@ defmodule DuckFeeder.Runtime do
     with {:ok, repo} <- fetch_repo(cfg),
          {:ok, schemas} <- fetch_schemas(cfg),
          {:ok, duckdb} <- fetch_duckdb(cfg),
+         {:ok, ingest} <- normalize_optional_options_map(Map.get(cfg, :ingest), :ingest),
          {:ok, source_postgres_url} <-
            fetch_or_repo_url(cfg, :source_postgres_url, repo),
          {:ok, metadata_postgres_url} <-
-           fetch_or_repo_url(cfg, :metadata_postgres_url, map_get(cfg, :metadata_repo, repo)),
+           fetch_or_repo_url(cfg, :metadata_postgres_url, Map.get(cfg, :metadata_repo, repo)),
          {:ok, designated_tables} <- infer_designated_tables(schemas, cfg) do
-      slot_name = map_get(cfg, :slot_name, "duck_feeder_#{source_name}_slot")
-      publication_name = map_get(cfg, :publication_name, "duck_feeder_#{source_name}_pub")
+      slot_name = Map.get(cfg, :slot_name, "duck_feeder_#{source_name}_slot")
+      publication_name = Map.get(cfg, :publication_name, "duck_feeder_#{source_name}_pub")
 
       {:ok,
        %{
@@ -198,36 +189,36 @@ defmodule DuckFeeder.Runtime do
            publication_name: publication_name,
            designated_tables: designated_tables
          },
-         duckdb: Shared.mapify(duckdb),
+         duckdb: duckdb,
          metadata: %{postgres_url: metadata_postgres_url},
-         ingest: map_get(cfg, :ingest, %{}) |> Shared.mapify()
+         ingest: ingest
        }}
     end
   end
 
   defp fetch_repo(cfg) do
-    case map_get(cfg, :repo) do
+    case Map.get(cfg, :repo) do
       repo when is_atom(repo) -> {:ok, repo}
       other -> {:error, {:missing_or_invalid_option, :repo, other}}
     end
   end
 
   defp fetch_schemas(cfg) do
-    case map_get(cfg, :schemas) do
+    case Map.get(cfg, :schemas) do
       schemas when is_list(schemas) and schemas != [] -> {:ok, schemas}
       other -> {:error, {:missing_or_invalid_option, :schemas, other}}
     end
   end
 
   defp fetch_duckdb(cfg) do
-    case map_get(cfg, :duckdb) do
-      duckdb when is_map(duckdb) or is_list(duckdb) -> {:ok, duckdb}
-      other -> {:error, {:missing_or_invalid_option, :duckdb, other}}
+    case Map.fetch(cfg, :duckdb) do
+      {:ok, duckdb} -> normalize_options_map(duckdb, :duckdb)
+      :error -> {:error, {:missing_or_invalid_option, :duckdb, nil}}
     end
   end
 
   defp fetch_or_repo_url(cfg, key, repo) do
-    case map_get(cfg, key) do
+    case Map.get(cfg, key) do
       value when is_binary(value) and value != "" -> {:ok, normalize_repo_url(value)}
       nil -> repo_postgres_url(repo)
       other -> {:error, {:invalid_option, key, other}}
@@ -235,7 +226,7 @@ defmodule DuckFeeder.Runtime do
   end
 
   defp infer_designated_tables(schema_entries, cfg) when is_list(schema_entries) do
-    default_target_schema = map_get(cfg, :target_schema, "raw")
+    default_target_schema = Map.get(cfg, :target_schema, "raw")
 
     schema_entries
     |> Enum.reduce_while({:ok, []}, fn entry, {:ok, acc} ->
@@ -252,11 +243,13 @@ defmodule DuckFeeder.Runtime do
   end
 
   defp normalize_schema_entry({schema_module, opts}, default_target_schema)
-       when is_atom(schema_module) and is_list(opts) do
-    if truthy?(Keyword.get(opts, :enabled?, true)) do
-      build_designated_table(schema_module, Shared.mapify(opts), default_target_schema)
-    else
-      {:ok, nil}
+       when is_atom(schema_module) and (is_map(opts) or is_list(opts)) do
+    with {:ok, overrides} <- normalize_options_map(opts, :schema_options) do
+      if truthy?(Map.get(overrides, :enabled?, true)) do
+        build_designated_table(schema_module, overrides, default_target_schema)
+      else
+        {:ok, nil}
+      end
     end
   end
 
@@ -271,18 +264,18 @@ defmodule DuckFeeder.Runtime do
        when is_atom(schema_module) and is_map(overrides) do
     if function_exported?(schema_module, :__schema__, 1) do
       source_table =
-        map_get(overrides, :source_table, schema_module.__schema__(:source) |> to_string())
+        Map.get(overrides, :source_table, schema_module.__schema__(:source) |> to_string())
 
       if is_binary(source_table) and source_table != "" do
         source_schema =
-          map_get(overrides, :source_schema, schema_module.__schema__(:prefix) || "public")
+          Map.get(overrides, :source_schema, schema_module.__schema__(:prefix) || "public")
 
-        target_schema = map_get(overrides, :target_schema, default_target_schema)
-        target_table = map_get(overrides, :target_table, source_table)
-        mode = map_get(overrides, :mode, "cdc_changelog") |> to_string()
+        target_schema = Map.get(overrides, :target_schema, default_target_schema)
+        target_table = Map.get(overrides, :target_table, source_table)
+        mode = Map.get(overrides, :mode, "cdc_changelog") |> to_string()
 
         primary_keys =
-          map_get(
+          Map.get(
             overrides,
             :primary_keys,
             schema_module.__schema__(:primary_key) |> List.wrap() |> Enum.map(&to_string/1)
@@ -308,7 +301,7 @@ defmodule DuckFeeder.Runtime do
   end
 
   defp repo_config_to_url(repo_cfg) when is_map(repo_cfg) do
-    case map_get(repo_cfg, :url) do
+    case Map.get(repo_cfg, :url) do
       url when is_binary(url) and url != "" ->
         {:ok, normalize_repo_url(url)}
 
@@ -318,14 +311,14 @@ defmodule DuckFeeder.Runtime do
   end
 
   defp build_repo_url(repo_cfg) do
-    database = map_get(repo_cfg, :database)
+    database = Map.get(repo_cfg, :database)
 
     if is_binary(database) and database != "" do
-      host = map_get(repo_cfg, :hostname, map_get(repo_cfg, :host, "localhost"))
-      port = map_get(repo_cfg, :port, 5432)
-      username = map_get(repo_cfg, :username, map_get(repo_cfg, :user))
-      password = map_get(repo_cfg, :password)
-      ssl? = truthy?(map_get(repo_cfg, :ssl, false))
+      host = Map.get(repo_cfg, :hostname, Map.get(repo_cfg, :host, "localhost"))
+      port = Map.get(repo_cfg, :port, 5432)
+      username = Map.get(repo_cfg, :username, Map.get(repo_cfg, :user))
+      password = Map.get(repo_cfg, :password)
+      ssl? = truthy?(Map.get(repo_cfg, :ssl, false))
 
       query = if ssl?, do: URI.encode_query(%{"sslmode" => "require"}), else: nil
 
@@ -366,9 +359,20 @@ defmodule DuckFeeder.Runtime do
   defp normalize_source_name(name) when is_binary(name) and name != "", do: name
   defp normalize_source_name(_name), do: "default"
 
-  defp map_get(map, key, default \\ nil) when is_map(map) do
-    Map.get(map, key, Map.get(map, Atom.to_string(key), default))
+  defp normalize_options_map(value, _key) when is_map(value), do: {:ok, value}
+
+  defp normalize_options_map(value, key) when is_list(value) do
+    if Keyword.keyword?(value) do
+      {:ok, Map.new(value)}
+    else
+      {:error, {:invalid_option, key, value}}
+    end
   end
+
+  defp normalize_options_map(value, key), do: {:error, {:invalid_option, key, value}}
+
+  defp normalize_optional_options_map(nil, _key), do: {:ok, %{}}
+  defp normalize_optional_options_map(value, key), do: normalize_options_map(value, key)
 
   defp truthy?(value), do: value in [true, 1, "1", "true"]
 
@@ -380,44 +384,16 @@ defmodule DuckFeeder.Runtime do
     end
   end
 
-  defp resolve_sink_module_option(opts) when is_list(opts) do
-    sink_module =
-      Keyword.get(opts, :sink_module) ||
-        implied_sink_module_from_duckdb(Keyword.get(opts, :duckdb))
-
-    Sink.normalize_module(sink_module)
-  end
-
-  defp normalize_duckdb(duckdb) do
-    cond do
-      is_map(duckdb) ->
-        {:ok, duckdb}
-
-      is_list(duckdb) and Keyword.keyword?(duckdb) ->
-        {:ok, Map.new(duckdb)}
-
-      is_nil(duckdb) ->
-        {:ok, nil}
-
-      true ->
-        {:error, {:invalid_option, :duckdb, duckdb}}
-    end
-  end
-
-  defp implied_sink_module_from_duckdb(nil), do: nil
-  defp implied_sink_module_from_duckdb(_duckdb), do: DuckFeeder.Sink.DuckDB
-
   defp resolve_runtime_source(source_name, opts)
        when is_binary(source_name) and is_list(opts) do
     case Keyword.get(opts, :source) do
-      source when is_map(source) ->
-        {:ok, normalize_runtime_source(source_name, source)}
-
       nil ->
         {:error, {:missing_runtime_source, source_name}}
 
-      other ->
-        {:error, {:invalid_option, :source, other}}
+      source ->
+        with {:ok, source_map} <- normalize_options_map(source, :source) do
+          {:ok, normalize_runtime_source(source_name, source_map)}
+        end
     end
   end
 
@@ -449,14 +425,8 @@ defmodule DuckFeeder.Runtime do
 
   defp normalize_runtime_source(source_name, source)
        when is_binary(source_name) and is_map(source) do
-    source = Map.new(source)
-
     source
     |> Map.put_new(:name, source_name)
-    |> Map.put_new(
-      :snapshot_handoff_source_key,
-      Map.get(source, :id) || Map.get(source, "id") || source_name
-    )
     |> maybe_put_connection_info()
   end
 
@@ -476,15 +446,14 @@ defmodule DuckFeeder.Runtime do
     end
   end
 
-  @spec service_options(pid(), String.t(), map() | keyword() | nil, keyword()) ::
+  @spec service_options(pid(), String.t(), map() | nil, keyword()) ::
           {:ok, keyword()} | {:error, term()}
   def service_options(meta_conn, source_name, duckdb, opts \\ [])
       when is_binary(source_name) do
     meta_module = Keyword.get(opts, :meta_module, Meta)
 
-    with {:ok, sink_module} <- resolve_sink_module_option(opts),
-         {:ok, duckdb} <- normalize_duckdb(duckdb || Keyword.get(opts, :duckdb)),
-         {:ok, source} <- resolve_runtime_source(source_name, opts),
+    with {:ok, duckdb} <- RuntimeSupport.normalize_optional_duckdb(duckdb),
+         {:ok, _source} <- resolve_runtime_source(source_name, opts),
          {:ok, designated_tables} <- resolve_runtime_designated_tables(source_name, opts) do
       {:ok,
        [
@@ -492,20 +461,16 @@ defmodule DuckFeeder.Runtime do
          designated_tables: designated_tables,
          meta_conn: meta_conn,
          duckdb: duckdb,
-         sink_module: sink_module,
-         object_prefix: Keyword.get(opts, :object_prefix, source.name),
          pipeline_opts: Keyword.get(opts, :pipeline_opts, %{}),
          max_tx_changes: Keyword.get(opts, :max_tx_changes),
          observer_pid: Keyword.get(opts, :observer_pid),
-         poison_row_mode: Keyword.get(opts, :poison_row_mode),
-         poison_row_sink: Keyword.get(opts, :poison_row_sink),
          meta_module: meta_module
        ]
        |> Enum.reject(fn {_key, value} -> is_nil(value) end)}
     end
   end
 
-  @spec start_service(pid(), String.t(), map() | keyword() | nil, keyword()) ::
+  @spec start_service(pid(), String.t(), map() | nil, keyword()) ::
           GenServer.on_start() | {:error, term()}
   def start_service(meta_conn, source_name, duckdb, opts \\ []) do
     with {:ok, service_opts} <- service_options(meta_conn, source_name, duckdb, opts) do
@@ -513,7 +478,7 @@ defmodule DuckFeeder.Runtime do
     end
   end
 
-  @spec start_stream(pid(), String.t(), map() | keyword() | nil, keyword()) ::
+  @spec start_stream(pid(), String.t(), map() | nil, keyword()) ::
           {:ok, %{service_pid: pid(), cdc_pid: pid(), start_lsn: String.t(), source: map()}}
           | {:error, term()}
   def start_stream(meta_conn, source_name, duckdb, opts \\ []) do
@@ -522,16 +487,14 @@ defmodule DuckFeeder.Runtime do
     cdc_module = Keyword.get(opts, :cdc_module, Connection)
     connection_options_module = Keyword.get(opts, :connection_options_module, ConnectionOptions)
 
-    with {:ok, sink_module} <- resolve_sink_module_option(opts),
-         {:ok, duckdb} <- normalize_duckdb(duckdb || Keyword.get(opts, :duckdb)),
+    with {:ok, duckdb} <- RuntimeSupport.normalize_optional_duckdb(duckdb),
          {:ok, source} <- resolve_runtime_source(source_name, opts),
          {:ok, designated_tables} <- resolve_runtime_designated_tables(source_name, opts),
          {:ok, slot_name} <- require_source_field(source, :slot_name),
          {:ok, publication_name} <- require_source_field(source, :publication_name),
          {:ok, meta_start_lsn} <-
            fetch_runtime_start_lsn(meta_module, meta_conn, designated_tables, opts),
-         {:ok, snapshot_handoff} <-
-           fetch_snapshot_handoff(meta_module, meta_conn, source_name, source),
+         {:ok, snapshot_handoff} <- fetch_snapshot_handoff(meta_module, meta_conn, source_name),
          {:ok, snapshot_plan} <- snapshot_plan(meta_start_lsn, snapshot_handoff, opts),
          {:ok, connection_opts} <- connection_options_module.resolve(source, opts),
          {:ok, bootstrap_start_lsn} <-
@@ -558,10 +521,8 @@ defmodule DuckFeeder.Runtime do
            service_module.start_link(
              build_service_opts(
                meta_conn,
-               source,
                designated_tables,
                duckdb,
-               sink_module,
                meta_module,
                with_snapshot_lsn_start(opts, snapshot_replay_plan.snapshot_lsn_start)
              )
@@ -571,7 +532,6 @@ defmodule DuckFeeder.Runtime do
                meta_module,
                meta_conn,
                source_name,
-               source,
                snapshot_plan,
                snapshot_result,
                opts
@@ -584,7 +544,6 @@ defmodule DuckFeeder.Runtime do
                  slot_name,
                  publication_name,
                  start_lsn,
-                 service_module,
                  service_pid,
                  opts
                )
@@ -596,7 +555,6 @@ defmodule DuckFeeder.Runtime do
                      meta_module,
                      meta_conn,
                      source_name,
-                     source,
                      snapshot_result,
                      opts
                    ) do
@@ -633,10 +591,8 @@ defmodule DuckFeeder.Runtime do
 
   defp build_service_opts(
          meta_conn,
-         source,
          designated_tables,
          duckdb,
-         sink_module,
          meta_module,
          opts
        ) do
@@ -645,16 +601,12 @@ defmodule DuckFeeder.Runtime do
       designated_tables: designated_tables,
       meta_conn: meta_conn,
       duckdb: duckdb,
-      sink_module: sink_module,
-      object_prefix: Keyword.get(opts, :object_prefix, source.name),
       pipeline_opts: Keyword.get(opts, :pipeline_opts, %{}),
       max_tx_changes: Keyword.get(opts, :max_tx_changes),
       observer_pid: Keyword.get(opts, :observer_pid),
       snapshot_lsn_start: Keyword.get(opts, :snapshot_lsn_start),
       max_inflight_batches: Keyword.get(opts, :max_inflight_batches),
       max_pending_batches: Keyword.get(opts, :max_pending_batches),
-      poison_row_mode: Keyword.get(opts, :poison_row_mode),
-      poison_row_sink: Keyword.get(opts, :poison_row_sink),
       meta_module: meta_module
     ]
     |> Enum.reject(fn {_key, value} -> is_nil(value) end)
@@ -665,26 +617,9 @@ defmodule DuckFeeder.Runtime do
          slot_name,
          publication_name,
          start_lsn,
-         service_module,
          service_pid,
          opts
        ) do
-    event_sink_mode = Keyword.get(opts, :event_sink_mode, :pid)
-
-    event_sink =
-      case event_sink_mode do
-        :pid ->
-          service_pid
-
-        :call ->
-          fn event ->
-            case service_module.push_event(service_pid, event) do
-              {:error, reason} -> {:error, reason}
-              _ -> :ok
-            end
-          end
-      end
-
     reconnect_backoff =
       case Keyword.fetch(opts, :reconnect_backoff) do
         {:ok, value} -> value
@@ -711,7 +646,7 @@ defmodule DuckFeeder.Runtime do
       backpressure_lag_bytes: Keyword.get(opts, :backpressure_lag_bytes),
       decoder_module: Keyword.get(opts, :decoder_module),
       converter_module: Keyword.get(opts, :converter_module),
-      event_sink: event_sink,
+      event_sink: service_pid,
       auto_reconnect: Keyword.get(opts, :auto_reconnect, true),
       reconnect_backoff: reconnect_backoff,
       sync_connect: Keyword.get(opts, :sync_connect, true)
@@ -926,13 +861,10 @@ defmodule DuckFeeder.Runtime do
     end
   end
 
-  defp fetch_snapshot_handoff(meta_module, meta_conn, source_name, source)
-       when is_atom(meta_module) and is_binary(source_name) and is_map(source) do
+  defp fetch_snapshot_handoff(meta_module, meta_conn, source_name)
+       when is_atom(meta_module) and is_binary(source_name) do
     if function_exported?(meta_module, :fetch_snapshot_handoff, 2) do
-      meta_module.fetch_snapshot_handoff(
-        meta_conn,
-        snapshot_handoff_source_key(source_name, source)
-      )
+      meta_module.fetch_snapshot_handoff(meta_conn, source_name)
     else
       {:ok, nil}
     end
@@ -942,7 +874,6 @@ defmodule DuckFeeder.Runtime do
          _meta_module,
          _meta_conn,
          _source_name,
-         _source,
          %{mark_pending?: false},
          _snapshot_result,
          _opts
@@ -953,19 +884,18 @@ defmodule DuckFeeder.Runtime do
          meta_module,
          meta_conn,
          source_name,
-         source,
          %{mark_pending?: true},
          %{boundary_lsn: boundary_lsn},
          opts
        )
-       when is_atom(meta_module) and is_binary(source_name) and is_map(source) do
+       when is_atom(meta_module) and is_binary(source_name) do
     cond do
       not is_binary(boundary_lsn) ->
         :ok
 
       function_exported?(meta_module, :mark_snapshot_handoff_pending, 3) ->
         retry_mark_snapshot_handoff(opts, fn ->
-          mark_snapshot_handoff_pending(meta_module, meta_conn, source_name, source, boundary_lsn)
+          mark_snapshot_handoff_pending(meta_module, meta_conn, source_name, boundary_lsn)
         end)
 
       true ->
@@ -977,11 +907,10 @@ defmodule DuckFeeder.Runtime do
          meta_module,
          meta_conn,
          source_name,
-         source,
          %{boundary_lsn: boundary_lsn},
          opts
        )
-       when is_atom(meta_module) and is_binary(source_name) and is_map(source) do
+       when is_atom(meta_module) and is_binary(source_name) do
     cond do
       not is_binary(boundary_lsn) ->
         :ok
@@ -992,7 +921,6 @@ defmodule DuckFeeder.Runtime do
             meta_module,
             meta_conn,
             source_name,
-            source,
             boundary_lsn
           )
         end)
@@ -1002,27 +930,17 @@ defmodule DuckFeeder.Runtime do
     end
   end
 
-  defp mark_snapshot_handoff_pending(meta_module, meta_conn, source_name, source, boundary_lsn)
-       when is_atom(meta_module) and is_binary(source_name) and is_map(source) and
-              is_binary(boundary_lsn) do
-    case meta_module.mark_snapshot_handoff_pending(
-           meta_conn,
-           snapshot_handoff_source_key(source_name, source),
-           boundary_lsn
-         ) do
+  defp mark_snapshot_handoff_pending(meta_module, meta_conn, source_name, boundary_lsn)
+       when is_atom(meta_module) and is_binary(source_name) and is_binary(boundary_lsn) do
+    case meta_module.mark_snapshot_handoff_pending(meta_conn, source_name, boundary_lsn) do
       {:ok, _} -> :ok
       {:error, _reason} = error -> error
     end
   end
 
-  defp mark_snapshot_handoff_complete(meta_module, meta_conn, source_name, source, boundary_lsn)
-       when is_atom(meta_module) and is_binary(source_name) and is_map(source) and
-              is_binary(boundary_lsn) do
-    case meta_module.mark_snapshot_handoff_complete(
-           meta_conn,
-           snapshot_handoff_source_key(source_name, source),
-           boundary_lsn
-         ) do
+  defp mark_snapshot_handoff_complete(meta_module, meta_conn, source_name, boundary_lsn)
+       when is_atom(meta_module) and is_binary(source_name) and is_binary(boundary_lsn) do
+    case meta_module.mark_snapshot_handoff_complete(meta_conn, source_name, boundary_lsn) do
       {:ok, _} -> :ok
       {:error, _reason} = error -> error
     end
@@ -1149,13 +1067,19 @@ defmodule DuckFeeder.Runtime do
       {:error, {:snapshot_collector_push_throw, kind, reason}}
   end
 
-  defp safe_close_snapshot_spool(io_device) when is_pid(io_device) do
-    File.close(io_device)
-    :ok
+  defp ignore_errors(fun) when is_function(fun, 0) do
+    fun.()
   rescue
     _ -> :ok
   catch
     _, _ -> :ok
+  end
+
+  defp safe_close_snapshot_spool(io_device) when is_pid(io_device) do
+    ignore_errors(fn ->
+      File.close(io_device)
+      :ok
+    end)
   end
 
   defp cleanup_snapshot_rows_source([]), do: :ok
@@ -1344,6 +1268,19 @@ defmodule DuckFeeder.Runtime do
       {:error, {:invalid_snapshot_spool_row, exception}}
   end
 
+  defp wrap_errors(label, fun) when is_atom(label) and is_function(fun, 0) do
+    fun.()
+  rescue
+    exception ->
+      {:error, {:"#{label}_exception", exception}}
+  catch
+    :exit, reason ->
+      {:error, {:"#{label}_exit", reason}}
+
+    kind, reason ->
+      {:error, {:"#{label}_throw", kind, reason}}
+  end
+
   defp safe_bootstrap(
          bootstrap_module,
          query_conn,
@@ -1351,17 +1288,13 @@ defmodule DuckFeeder.Runtime do
          slot_name,
          designated_tables
        ) do
-    bootstrap_module.bootstrap(query_conn, %{
-      publication_name: publication_name,
-      slot_name: slot_name,
-      designated_tables: designated_tables
-    })
-  rescue
-    exception ->
-      {:error, {:bootstrap_exception, exception}}
-  catch
-    kind, reason ->
-      {:error, {:bootstrap_throw, kind, reason}}
+    wrap_errors(:bootstrap, fn ->
+      bootstrap_module.bootstrap(query_conn, %{
+        publication_name: publication_name,
+        slot_name: slot_name,
+        designated_tables: designated_tables
+      })
+    end)
   end
 
   defp safe_snapshot_run(
@@ -1370,30 +1303,19 @@ defmodule DuckFeeder.Runtime do
          designated_tables,
          snapshot_runner_opts
        ) do
-    snapshot_runner_module.run(query_conn, designated_tables, snapshot_runner_opts)
-  rescue
-    exception ->
-      {:error, {:snapshot_runner_exception, exception}}
-  catch
-    kind, reason ->
-      {:error, {:snapshot_runner_throw, kind, reason}}
+    wrap_errors(:snapshot_runner, fn ->
+      snapshot_runner_module.run(query_conn, designated_tables, snapshot_runner_opts)
+    end)
   end
 
   defp safe_snapshot_ingest(service_module, service_pid, designated_table, row) do
-    case service_module.ingest_snapshot_row(service_pid, designated_table, row) do
-      :ok -> :ok
-      {:error, reason} -> {:error, reason}
-      other -> {:error, {:invalid_snapshot_ingest_result, other}}
-    end
-  rescue
-    exception ->
-      {:error, {:snapshot_ingest_exception, exception}}
-  catch
-    :exit, reason ->
-      {:error, {:snapshot_ingest_exit, reason}}
-
-    kind, reason ->
-      {:error, {:snapshot_ingest_throw, kind, reason}}
+    wrap_errors(:snapshot_ingest, fn ->
+      case service_module.ingest_snapshot_row(service_pid, designated_table, row) do
+        :ok -> :ok
+        {:error, reason} -> {:error, reason}
+        other -> {:error, {:invalid_snapshot_ingest_result, other}}
+      end
+    end)
   end
 
   defp resolve_start_lsn(meta_start_lsn, candidates) when is_list(candidates) do
@@ -1427,32 +1349,15 @@ defmodule DuckFeeder.Runtime do
   end
 
   defp safe_stop_service(service_pid) when is_pid(service_pid) do
-    if Process.alive?(service_pid) do
-      GenServer.stop(service_pid)
-    else
-      :ok
-    end
-  rescue
-    _ -> :ok
-  catch
-    _, _ -> :ok
+    ignore_errors(fn -> GenServer.stop(service_pid) end)
   end
 
   defp safe_stop_cdc(cdc_pid) when is_pid(cdc_pid) do
-    if Process.alive?(cdc_pid), do: Process.exit(cdc_pid, :shutdown)
-    :ok
-  rescue
-    _ -> :ok
-  catch
-    _, _ -> :ok
+    ignore_errors(fn -> Process.exit(cdc_pid, :shutdown) end)
   end
 
   defp safe_disconnect_query_conn(disconnect_fun, query_conn) do
-    disconnect_fun.(query_conn)
-  rescue
-    _ -> :ok
-  catch
-    _, _ -> :ok
+    ignore_errors(fn -> disconnect_fun.(query_conn) end)
   end
 
   defp normalize_reconnect_backoff(base_backoff, min_ms, max_ms, jitter_ms, jitter_fun)
@@ -1519,14 +1424,6 @@ defmodule DuckFeeder.Runtime do
     case Map.get(source, key) do
       value when is_binary(value) and value != "" -> {:ok, value}
       _ -> {:error, {:missing_source_field, key}}
-    end
-  end
-
-  defp snapshot_handoff_source_key(_source_name, source) when is_map(source) do
-    case Map.get(source, :snapshot_handoff_source_key) do
-      value when is_binary(value) and value != "" -> value
-      value when is_integer(value) -> value
-      _ -> raise ArgumentError, "missing snapshot_handoff_source_key in runtime source"
     end
   end
 end

@@ -15,12 +15,12 @@ defmodule DuckFeeder.DuckDB.ClientTest do
     {:ok, conn: conn}
   end
 
-  test "execute returns tagged success", %{conn: conn} do
-    assert {:ok, :ok} = Client.execute(conn, "CREATE TABLE client_test_users (id INTEGER)")
+  test "execute returns success", %{conn: conn} do
+    assert :ok = Client.execute(conn, "CREATE TABLE client_test_users (id INTEGER)")
   end
 
   test "query_map returns result maps", %{conn: conn} do
-    assert {:ok, :ok} = Client.execute(conn, "SELECT 1")
+    assert :ok = Client.execute(conn, "SELECT 1")
     assert {:ok, %{"n" => [1]}} = Client.query_map(conn, "SELECT 1 AS n")
   end
 

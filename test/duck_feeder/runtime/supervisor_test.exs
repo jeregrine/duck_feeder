@@ -68,22 +68,6 @@ defmodule DuckFeeder.Runtime.SupervisorTest do
     GenServer.stop(sup)
   end
 
-  test "accepts legacy duckdb_config option" do
-    assert {:ok, sup} =
-             Supervisor.start_link(
-               meta_conn: :meta,
-               source_name: "source-a",
-               duckdb_config: %{path: "/tmp/source-a.duckdb"},
-               stream_worker_module: FakeStreamWorker,
-               observer_pid: self()
-             )
-
-    assert_receive {:fake_stream_worker_start, stream_opts}
-    assert stream_opts[:duckdb][:path] == "/tmp/source-a.duckdb"
-
-    GenServer.stop(sup)
-  end
-
   test "restarts stream worker when managed cdc child dies" do
     assert {:ok, sup} =
              Supervisor.start_link(

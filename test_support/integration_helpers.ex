@@ -37,7 +37,7 @@ defmodule DuckFeeder.TestSupport.IntegrationHelpers do
     "#{prefix}_#{suffix}"
   end
 
-  def ducklake_duckdb_config(root, opts \\ []) when is_binary(root) and is_list(opts) do
+  def ducklake_duckdb(root, opts \\ []) when is_binary(root) and is_list(opts) do
     catalog = Keyword.get(opts, :catalog, "lake")
     path = Keyword.get(opts, :path, Path.join(root, "session.duckdb"))
     metadata_path = Path.join(root, "metadata.ducklake")

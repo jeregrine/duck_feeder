@@ -10,7 +10,6 @@ defmodule DuckFeeder.Runtime.StreamWorker do
   use GenServer
 
   alias DuckFeeder.Runtime
-  alias DuckFeeder.Runtime.Shared
 
   defmodule State do
     @enforce_keys [:service_pid, :cdc_pid, :start_lsn, :source]
@@ -22,7 +21,6 @@ defmodule DuckFeeder.Runtime.StreamWorker do
           | {:meta_conn, term()}
           | {:source_name, String.t()}
           | {:duckdb, map() | nil}
-          | {:duckdb_config, map() | nil}
           | {:runtime_opts, keyword()}
           | {:runtime_module, module()}
 
@@ -40,7 +38,7 @@ defmodule DuckFeeder.Runtime.StreamWorker do
     runtime_module = Keyword.get(opts, :runtime_module, Runtime)
     meta_conn = Keyword.fetch!(opts, :meta_conn)
     source_name = Keyword.fetch!(opts, :source_name)
-    duckdb = Shared.fetch_duckdb!(opts)
+    duckdb = Keyword.fetch!(opts, :duckdb)
     runtime_opts = Keyword.get(opts, :runtime_opts, [])
 
     case runtime_module.start_stream(meta_conn, source_name, duckdb, runtime_opts) do

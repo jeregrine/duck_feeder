@@ -121,6 +121,50 @@ defmodule DuckFeeder.TelemetryForwarderTest do
                    250
   end
 
+  test "marks large metadata payloads as truncated and supports configurable limits" do
+    caller = self()
+
+    append_fun = fn _stream, _table, row, _opts ->
+      send(caller, {:append_row, row})
+      :ok
+    end
+
+    handler_id = "duck-feeder-forwarder-truncation-#{System.unique_integer([:positive])}"
+
+    {:ok, forwarder} =
+      TelemetryForwarder.start_link(
+        stream: self(),
+        table: "app_events",
+        events: [[:acme, :custom, :event]],
+        include_duck_feeder_events?: false,
+        handler_id: handler_id,
+        append_fun: append_fun,
+        normalize_term_max_items: 2,
+        normalize_term_max_depth: 3
+      )
+
+    on_exit(fn ->
+      if Process.alive?(forwarder), do: GenServer.stop(forwarder)
+    end)
+
+    :telemetry.execute(
+      [:acme, :custom, :event],
+      %{durations: [1, 2, 3]},
+      %{values: [10, 20, 30], tags: %{a: 1, b: 2, c: 3}}
+    )
+
+    assert_receive {:append_row, row}, 500
+
+    assert row["measurements"]["durations"]["__duck_feeder_type__"] == "list"
+    assert row["measurements"]["durations"]["__duck_feeder_truncated__"] == true
+    assert row["measurements"]["durations"]["__duck_feeder_original_count__"] == 3
+    assert row["measurements"]["durations"]["__duck_feeder_items__"] == [1, 2]
+
+    assert row["metadata"]["values"]["__duck_feeder_truncated__"] == true
+    assert row["metadata"]["tags"]["__duck_feeder_truncated__"] == true
+    assert row["metadata"]["tags"]["__duck_feeder_original_count__"] == 3
+  end
+
   test "requires at least one telemetry event to attach" do
     handler_id = "duck-feeder-forwarder-empty-#{System.unique_integer([:positive])}"
 

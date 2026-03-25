@@ -1,26 +1,9 @@
-defmodule DuckFeeder.StreamSupportTest do
+defmodule DuckFeeder.DuckDB.ConnectionTest do
   use ExUnit.Case, async: true
 
-  alias DuckFeeder.StreamSupport
+  alias DuckFeeder.DuckDB.Connection
 
-  test "designated_table_config_mapping accepts string-key designated tables" do
-    designated_tables = [
-      %{
-        "source_schema" => "public",
-        "source_table" => "users",
-        "target_schema" => "raw",
-        "target_table" => "users"
-      }
-    ]
-
-    assert %{{"raw", "users"} => table} =
-             StreamSupport.designated_table_config_mapping(designated_tables)
-
-    assert table.target_schema == "raw"
-    assert table.target_table == "users"
-  end
-
-  test "resolve_duckdb explicitly stops owned duckdb connections when the caller exits normally" do
+  test "resolve_opts explicitly stops owned duckdb connections when the caller exits normally" do
     parent = self()
 
     _caller =
@@ -28,7 +11,7 @@ defmodule DuckFeeder.StreamSupportTest do
         Process.flag(:trap_exit, true)
 
         assert {:ok, %{conn: conn, server: server}} =
-                 StreamSupport.resolve_duckdb([duckdb: %{}], DuckFeeder.Sink.DuckDB)
+                 Connection.resolve_opts(duckdb: %{})
 
         send(parent, {:resolved_duckdb_conn, conn, server})
       end)

@@ -72,7 +72,6 @@ defmodule DuckFeeder.Runtime.EmbeddedConfigTest do
              "postgres://app_user:app_pass@localhost:5432/app_db"
 
     assert resolved.duckdb.path == "/tmp/primary.duckdb"
-    assert resolved.duckdb_config == resolved.duckdb
 
     assert Enum.any?(resolved.validated_config.source.designated_tables, fn table ->
              table.source_table == "tenants" and table.target_schema == "raw"

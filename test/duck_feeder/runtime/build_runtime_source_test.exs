@@ -17,7 +17,6 @@ defmodule DuckFeeder.Runtime.BuildRuntimeSourceTest do
     assert built.name == "source-a"
     assert built.postgres_url == "postgres://source"
     assert built.connection_info == %{postgres_url: "postgres://source"}
-    assert built.snapshot_handoff_source_key == "source-a"
     assert built.designated_tables == [%{target_schema: "raw", target_table: "users"}]
     assert built.custom == :keep_me
   end

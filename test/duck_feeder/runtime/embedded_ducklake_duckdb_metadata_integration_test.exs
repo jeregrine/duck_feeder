@@ -52,7 +52,7 @@ defmodule DuckFeeder.Runtime.EmbeddedDuckLakeDuckDBMetadataIntegrationTest do
     publication_name = "duck_feeder_#{source_name}_pub"
     slot_name = "duck_feeder_#{source_name}_slot"
     checkpoint_key = "#{source_name}:raw.#{@source_table}"
-    duckdb = ducklake_duckdb_config(root)
+    duckdb = ducklake_duckdb(root)
     runtime_duckdb = Map.take(duckdb, [:path, :catalog, :setup_sql, :setup_fun])
 
     Application.put_env(:duck_feeder, SourceRepo, url: source_postgres_url)

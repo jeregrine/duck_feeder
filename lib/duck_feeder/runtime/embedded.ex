@@ -22,7 +22,6 @@ defmodule DuckFeeder.Runtime.Embedded do
   use GenServer
 
   alias DuckFeeder.CDC.ConnectionOptions
-  alias DuckFeeder.Runtime.Shared
 
   defmodule State do
     @enforce_keys [:module, :otp_app, :config]
@@ -149,10 +148,19 @@ defmodule DuckFeeder.Runtime.Embedded do
     end
   end
 
-  defp merge_start_opts(config, start_opts) do
-    config
-    |> Shared.mapify()
-    |> Map.merge(Shared.mapify(start_opts))
+  defp merge_start_opts(config, start_opts) when is_list(start_opts) do
+    config_map = normalize_embedded_config!(config)
+    Map.merge(config_map, Map.new(start_opts))
+  end
+
+  defp normalize_embedded_config!(config) when is_map(config), do: config
+
+  defp normalize_embedded_config!(config) when is_list(config) do
+    if Keyword.keyword?(config) do
+      Map.new(config)
+    else
+      raise ArgumentError, "expected embedded runtime config to be a map or keyword list"
+    end
   end
 
   defp stop_if_alive(pid) when is_pid(pid) do

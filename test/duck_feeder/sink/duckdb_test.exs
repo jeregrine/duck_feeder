@@ -1,6 +1,7 @@
 defmodule DuckFeeder.Sink.DuckDBTest do
   use ExUnit.Case, async: false
 
+  alias DuckFeeder.DesignatedTable
   alias DuckFeeder.DuckDB.Client, as: DuckDBClient
   alias DuckFeeder.DuckDB.Connection, as: DuckDBConnection
   alias DuckFeeder.Sink.DuckDB
@@ -44,19 +45,14 @@ defmodule DuckFeeder.Sink.DuckDBTest do
   end
 
   test "appends rows directly into target table and persists checkpoint", %{conn: conn} do
-    context = %{
-      meta_conn: self(),
-      meta_module: FakeMeta,
-      designated_table_by_target: %{{"raw", "events"} => "source-a:raw.events"},
-      designated_table_config_by_target: %{
-        {"raw", "events"} => %{
+    context =
+      sink_context(conn, [
+        %{
           checkpoint_key: "source-a:raw.events",
           target_schema: "raw",
           target_table: "events"
         }
-      },
-      duckdb: %{conn: conn}
-    }
+      ])
 
     batch = %{
       rows: [
@@ -78,20 +74,15 @@ defmodule DuckFeeder.Sink.DuckDBTest do
              query_map(conn, "SELECT id, kind FROM raw.events ORDER BY id")
   end
 
-  test "falls back to context checkpoint mapping when designated table config omits checkpoint key",
-       %{conn: conn} do
-    context = %{
-      meta_conn: self(),
-      meta_module: FakeMeta,
-      designated_table_by_target: %{{"raw", "events"} => "append-stream:raw.events"},
-      designated_table_config_by_target: %{
-        {"raw", "events"} => %{
+  test "uses checkpoint keys from designated tables by target", %{conn: conn} do
+    context =
+      sink_context(conn, [
+        %{
+          checkpoint_key: "append-stream:raw.events",
           target_schema: "raw",
           target_table: "events"
         }
-      },
-      duckdb: %{conn: conn}
-    }
+      ])
 
     batch = %{
       rows: [%{"id" => 1, "kind" => "page_view"}],
@@ -105,19 +96,14 @@ defmodule DuckFeeder.Sink.DuckDBTest do
   end
 
   test "chunks large append batches into multiple source statements", %{conn: conn} do
-    context = %{
-      meta_conn: self(),
-      meta_module: FakeMeta,
-      designated_table_by_target: %{{"raw", "events"} => "source-a:raw.events"},
-      designated_table_config_by_target: %{
-        {"raw", "events"} => %{
+    context =
+      sink_context(conn, [
+        %{
           checkpoint_key: "source-a:raw.events",
           target_schema: "raw",
           target_table: "events"
         }
-      },
-      duckdb: %{conn: conn}
-    }
+      ])
 
     batch = %{
       rows: Enum.map(1..501, fn id -> %{"id" => id, "kind" => "page_view"} end),
@@ -131,19 +117,18 @@ defmodule DuckFeeder.Sink.DuckDBTest do
   end
 
   test "does not duplicate duckdb rows when checkpoint persistence fails once", %{conn: conn} do
-    context = %{
-      meta_conn: self(),
-      meta_module: FailOnceMeta,
-      designated_table_by_target: %{{"raw", "events"} => "source-a:raw.events"},
-      designated_table_config_by_target: %{
-        {"raw", "events"} => %{
-          checkpoint_key: "source-a:raw.events",
-          target_schema: "raw",
-          target_table: "events"
-        }
-      },
-      duckdb: %{conn: conn}
-    }
+    context =
+      sink_context(
+        conn,
+        [
+          %{
+            checkpoint_key: "source-a:raw.events",
+            target_schema: "raw",
+            target_table: "events"
+          }
+        ],
+        meta_module: FailOnceMeta
+      )
 
     batch = %{
       rows: [%{"id" => 1, "kind" => "page_view"}],
@@ -162,12 +147,9 @@ defmodule DuckFeeder.Sink.DuckDBTest do
   end
 
   test "applies CDC batches as table operations", %{conn: conn} do
-    context = %{
-      meta_conn: self(),
-      meta_module: FakeMeta,
-      designated_table_by_target: %{{"raw", "users"} => "source-a:raw.users"},
-      designated_table_config_by_target: %{
-        {"raw", "users"} => %{
+    context =
+      sink_context(conn, [
+        %{
           checkpoint_key: "source-a:raw.users",
           source_schema: "public",
           source_table: "users",
@@ -175,9 +157,7 @@ defmodule DuckFeeder.Sink.DuckDBTest do
           target_table: "users",
           primary_keys: ["id"]
         }
-      },
-      duckdb: %{conn: conn}
-    }
+      ])
 
     initial_batch = %{
       rows: [
@@ -228,12 +208,9 @@ defmodule DuckFeeder.Sink.DuckDBTest do
   end
 
   test "applies CDC batches after snapshot-created numeric columns", %{conn: conn} do
-    context = %{
-      meta_conn: self(),
-      meta_module: FakeMeta,
-      designated_table_by_target: %{{"raw", "users"} => "source-a:raw.users"},
-      designated_table_config_by_target: %{
-        {"raw", "users"} => %{
+    context =
+      sink_context(conn, [
+        %{
           checkpoint_key: "source-a:raw.users",
           source_schema: "public",
           source_table: "users",
@@ -241,9 +218,7 @@ defmodule DuckFeeder.Sink.DuckDBTest do
           target_table: "users",
           primary_keys: ["id"]
         }
-      },
-      duckdb: %{conn: conn}
-    }
+      ])
 
     snapshot_batch = %{
       rows: [
@@ -276,12 +251,9 @@ defmodule DuckFeeder.Sink.DuckDBTest do
   test "preserves numeric-looking strings in existing varchar columns during CDC merges", %{
     conn: conn
   } do
-    context = %{
-      meta_conn: self(),
-      meta_module: FakeMeta,
-      designated_table_by_target: %{{"raw", "users"} => "source-a:raw.users"},
-      designated_table_config_by_target: %{
-        {"raw", "users"} => %{
+    context =
+      sink_context(conn, [
+        %{
           checkpoint_key: "source-a:raw.users",
           source_schema: "public",
           source_table: "users",
@@ -289,9 +261,7 @@ defmodule DuckFeeder.Sink.DuckDBTest do
           target_table: "users",
           primary_keys: ["id"]
         }
-      },
-      duckdb: %{conn: conn}
-    }
+      ])
 
     snapshot_batch = %{
       rows: [
@@ -322,14 +292,14 @@ defmodule DuckFeeder.Sink.DuckDBTest do
     context = %{
       meta_conn: self(),
       meta_module: FakeMeta,
-      designated_table_by_target: %{{"raw", "events"} => "source-a:raw.events"},
-      designated_table_config_by_target: %{
-        {"raw", "events"} => %{
-          checkpoint_key: "source-a:raw.events",
-          target_schema: "raw",
-          target_table: "events"
-        }
-      },
+      designated_tables_by_target:
+        DesignatedTable.by_target([
+          %{
+            checkpoint_key: "source-a:raw.events",
+            target_schema: "raw",
+            target_table: "events"
+          }
+        ]),
       duckdb: %{}
     }
 
@@ -344,19 +314,14 @@ defmodule DuckFeeder.Sink.DuckDBTest do
   end
 
   test "fails closed on CDC updates without primary keys", %{conn: conn} do
-    context = %{
-      meta_conn: self(),
-      meta_module: FakeMeta,
-      designated_table_by_target: %{{"raw", "users"} => "source-a:raw.users"},
-      designated_table_config_by_target: %{
-        {"raw", "users"} => %{
+    context =
+      sink_context(conn, [
+        %{
           checkpoint_key: "source-a:raw.users",
           target_schema: "raw",
           target_table: "users"
         }
-      },
-      duckdb: %{conn: conn}
-    }
+      ])
 
     batch = %{
       rows: [
@@ -371,26 +336,24 @@ defmodule DuckFeeder.Sink.DuckDBTest do
   end
 
   test "runs setup hooks once per connection/config", %{conn: conn} do
-    context = %{
-      meta_conn: self(),
-      meta_module: FakeMeta,
-      designated_table_by_target: %{{"raw", "events"} => "source-a:raw.events"},
-      designated_table_config_by_target: %{
-        {"raw", "events"} => %{
-          checkpoint_key: "source-a:raw.events",
-          target_schema: "raw",
-          target_table: "events"
+    context =
+      sink_context(
+        conn,
+        [
+          %{
+            checkpoint_key: "source-a:raw.events",
+            target_schema: "raw",
+            target_table: "events"
+          }
+        ],
+        duckdb: %{
+          setup_sql: ["CREATE SCHEMA IF NOT EXISTS raw"],
+          setup_fun: fn _ ->
+            send(self(), :setup_fun_called)
+            :ok
+          end
         }
-      },
-      duckdb: %{
-        conn: conn,
-        setup_sql: ["CREATE SCHEMA IF NOT EXISTS raw"],
-        setup_fun: fn _ ->
-          send(self(), :setup_fun_called)
-          :ok
-        end
-      }
-    }
+      )
 
     batch = %{
       rows: [%{"id" => 1, "kind" => "page_view"}],
@@ -409,14 +372,14 @@ defmodule DuckFeeder.Sink.DuckDBTest do
     context_base = %{
       meta_conn: self(),
       meta_module: FakeMeta,
-      designated_table_by_target: %{{"raw", "events"} => "source-a:raw.events"},
-      designated_table_config_by_target: %{
-        {"raw", "events"} => %{
-          checkpoint_key: "source-a:raw.events",
-          target_schema: "raw",
-          target_table: "events"
-        }
-      }
+      designated_tables_by_target:
+        DesignatedTable.by_target([
+          %{
+            checkpoint_key: "source-a:raw.events",
+            target_schema: "raw",
+            target_table: "events"
+          }
+        ])
     }
 
     batch = %{
@@ -470,6 +433,15 @@ defmodule DuckFeeder.Sink.DuckDBTest do
       _op: op,
       _record: record,
       _old_record: old_record
+    }
+  end
+
+  defp sink_context(conn, designated_tables, opts \\ []) do
+    %{
+      meta_conn: Keyword.get(opts, :meta_conn, self()),
+      meta_module: Keyword.get(opts, :meta_module, FakeMeta),
+      designated_tables_by_target: DesignatedTable.by_target(designated_tables),
+      duckdb: Map.put(Keyword.get(opts, :duckdb, %{}), :conn, conn)
     }
   end
 

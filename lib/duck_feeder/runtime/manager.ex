@@ -7,7 +7,6 @@ defmodule DuckFeeder.Runtime.Manager do
 
   use GenServer
 
-  alias DuckFeeder.Runtime.Shared
   alias DuckFeeder.Runtime.Supervisor, as: RuntimeSupervisor
 
   defmodule State do
@@ -26,7 +25,6 @@ defmodule DuckFeeder.Runtime.Manager do
           {:name, GenServer.name()}
           | {:meta_conn, term()}
           | {:duckdb, map() | nil}
-          | {:duckdb_config, map() | nil}
           | {:runtime_supervisor_module, module()}
           | {:base_opts, keyword()}
 
@@ -55,7 +53,7 @@ defmodule DuckFeeder.Runtime.Manager do
     {:ok,
      %State{
        meta_conn: Keyword.fetch!(opts, :meta_conn),
-       duckdb: Shared.fetch_duckdb!(opts),
+       duckdb: Keyword.fetch!(opts, :duckdb),
        runtime_supervisor_module:
          Keyword.get(opts, :runtime_supervisor_module, RuntimeSupervisor),
        base_opts: Keyword.get(opts, :base_opts, [])

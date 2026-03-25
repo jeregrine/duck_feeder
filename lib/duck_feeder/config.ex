@@ -114,12 +114,6 @@ defmodule DuckFeeder.Config do
     |> Map.take([:path, :catalog, :setup_sql, :setup_fun])
   end
 
-  @doc """
-  Backward-compatible alias for `duckdb/1`.
-  """
-  @spec duckdb_config(t()) :: map()
-  def duckdb_config(validated_config), do: duckdb(validated_config)
-
   @doc false
   def schema, do: @schema
 

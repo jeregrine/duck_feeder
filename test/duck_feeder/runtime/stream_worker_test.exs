@@ -56,23 +56,6 @@ defmodule DuckFeeder.Runtime.StreamWorkerTest do
     refute Process.alive?(cdc_pid)
   end
 
-  test "accepts legacy duckdb_config option" do
-    {:ok, worker} =
-      StreamWorker.start_link(
-        meta_conn: :meta,
-        source_name: "source-a",
-        duckdb_config: %{path: "/tmp/source-a.duckdb"},
-        runtime_module: FakeRuntime,
-        runtime_opts: [test_pid: self()]
-      )
-
-    assert_receive {:fake_runtime_started, service_pid, cdc_pid}
-
-    GenServer.stop(worker)
-    refute Process.alive?(service_pid)
-    refute Process.alive?(cdc_pid)
-  end
-
   test "stops when child stream process dies" do
     {:ok, worker} =
       StreamWorker.start_link(
