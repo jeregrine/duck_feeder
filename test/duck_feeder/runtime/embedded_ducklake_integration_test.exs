@@ -106,8 +106,8 @@ defmodule DuckFeeder.Runtime.EmbeddedDuckLakeIntegrationTest do
       _ = drop_postgres_database!(meta_postgres_url, catalog_database)
       _ = File.rm_rf(root)
 
-      safe_stop(source_conn)
-      safe_stop(meta_conn)
+      GenServer.stop(source_conn)
+      GenServer.stop(meta_conn)
     end)
 
     {:ok,
@@ -140,7 +140,7 @@ defmodule DuckFeeder.Runtime.EmbeddedDuckLakeIntegrationTest do
     Process.unlink(runtime)
 
     on_exit(fn ->
-      safe_stop(runtime)
+      GenServer.stop(runtime)
     end)
 
     assert {:ok, info} = DuckFeeder.Runtime.Embedded.runtime_info(runtime)
@@ -295,7 +295,7 @@ defmodule DuckFeeder.Runtime.EmbeddedDuckLakeIntegrationTest do
         %{"id" => [4], "name" => ["dora"]}
     end)
 
-    safe_stop(runtime)
+    GenServer.stop(runtime)
 
     assert {:ok, _} =
              Postgrex.query(
@@ -308,7 +308,7 @@ defmodule DuckFeeder.Runtime.EmbeddedDuckLakeIntegrationTest do
     Process.unlink(restarted_runtime)
 
     on_exit(fn ->
-      safe_stop(restarted_runtime)
+      GenServer.stop(restarted_runtime)
     end)
 
     assert_batch_processed!({"raw", @source_table})
@@ -342,7 +342,7 @@ defmodule DuckFeeder.Runtime.EmbeddedDuckLakeIntegrationTest do
     Process.unlink(runtime)
 
     on_exit(fn ->
-      safe_stop(runtime)
+      GenServer.stop(runtime)
     end)
 
     assert_batch_processed!({"raw", @source_table})
@@ -401,7 +401,7 @@ defmodule DuckFeeder.Runtime.EmbeddedDuckLakeIntegrationTest do
     Process.unlink(runtime)
 
     on_exit(fn ->
-      safe_stop(runtime)
+      GenServer.stop(runtime)
     end)
 
     refute_receive {:duck_feeder_batch_processed, {"raw", @source_table}, {:ok, _result}, _batch},

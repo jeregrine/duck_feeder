@@ -15,7 +15,7 @@ defmodule DuckFeeder.DuckLake.AppendIntegrationTest do
     assert :ok = Meta.bootstrap(meta_conn)
 
     on_exit(fn ->
-      safe_stop(meta_conn)
+      GenServer.stop(meta_conn)
     end)
 
     {:ok, meta_conn: meta_conn}
@@ -42,7 +42,7 @@ defmodule DuckFeeder.DuckLake.AppendIntegrationTest do
       )
 
     on_exit(fn ->
-      safe_stop(stream)
+      GenServer.stop(stream)
     end)
 
     assert :ok = DuckFeeder.append_event(stream, "events", %{"id" => 1, "kind" => "page_view"})
@@ -70,7 +70,7 @@ defmodule DuckFeeder.DuckLake.AppendIntegrationTest do
     snapshot_count = query_duckdb!(duckdb, "SELECT count(*) AS n FROM lake.snapshots()")
     assert hd(snapshot_count["n"]) >= 2
 
-    safe_stop(stream)
+    GenServer.stop(stream)
     _ = flush_ducklake_inlined_data!(duckdb)
 
     assert duckdb.ducklake_metadata_path |> File.exists?()
@@ -102,7 +102,7 @@ defmodule DuckFeeder.DuckLake.AppendIntegrationTest do
       )
 
     on_exit(fn ->
-      safe_stop(stream)
+      GenServer.stop(stream)
     end)
 
     assert :ok = DuckFeeder.append_event(stream, "events", %{"id" => 1, "kind" => "telemetry"})
@@ -121,7 +121,7 @@ defmodule DuckFeeder.DuckLake.AppendIntegrationTest do
     assert %{"id" => [1, 2], "kind" => ["telemetry", "audit"]} =
              query_duckdb!(duckdb, "SELECT id, kind FROM lake.raw.events ORDER BY id")
 
-    safe_stop(stream)
+    GenServer.stop(stream)
     _ = flush_ducklake_inlined_data!(duckdb)
 
     catalog_conn = start_postgres_conn!(catalog_postgres_url)
@@ -136,7 +136,7 @@ defmodule DuckFeeder.DuckLake.AppendIntegrationTest do
 
       assert count > 0
     after
-      safe_stop(catalog_conn)
+      GenServer.stop(catalog_conn)
     end
 
     assert parquet_file_count(duckdb) > 0

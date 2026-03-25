@@ -91,7 +91,7 @@ defmodule DuckFeeder.TestSupport.IntegrationHelpers do
     try do
       {:ok, _} = Postgrex.query(admin_conn, ~s(CREATE DATABASE "#{database_name}"), [])
     after
-      safe_stop(admin_conn)
+      GenServer.stop(admin_conn)
     end
 
     replace_database(base_postgres_url, database_name)
@@ -112,7 +112,7 @@ defmodule DuckFeeder.TestSupport.IntegrationHelpers do
 
       {:ok, _} = Postgrex.query(admin_conn, ~s(DROP DATABASE IF EXISTS "#{database_name}"), [])
     after
-      safe_stop(admin_conn)
+      GenServer.stop(admin_conn)
     end
 
     :ok
@@ -144,15 +144,6 @@ defmodule DuckFeeder.TestSupport.IntegrationHelpers do
     |> Enum.sort()
   end
 
-  def safe_stop(pid) when is_pid(pid) do
-    _ = GenServer.stop(pid)
-    :ok
-  catch
-    :exit, _reason -> :ok
-  end
-
-  def safe_stop(_other), do: :ok
-
   defp with_duckdb_conn!(duckdb, fun) when is_map(duckdb) and is_function(fun, 1) do
     {:ok, server} = DuckDBConnection.start_link(name: nil, path: Map.get(duckdb, :path))
 
@@ -170,7 +161,7 @@ defmodule DuckFeeder.TestSupport.IntegrationHelpers do
 
       fun.(conn)
     after
-      safe_stop(server)
+      GenServer.stop(server)
     end
   end
 
