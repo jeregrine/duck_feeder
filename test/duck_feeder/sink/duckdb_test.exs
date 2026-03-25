@@ -5,6 +5,7 @@ defmodule DuckFeeder.Sink.DuckDBTest do
   alias DuckFeeder.DuckDB.Client, as: DuckDBClient
   alias DuckFeeder.DuckDB.Connection, as: DuckDBConnection
   alias DuckFeeder.Sink.DuckDB
+  alias DuckFeeder.TestSupport.ProcessHelpers
 
   defmodule FakeMeta do
     def upsert_checkpoint(conn, checkpoint_key, lsn) do
@@ -38,7 +39,7 @@ defmodule DuckFeeder.Sink.DuckDBTest do
     conn = DuckDBConnection.get_conn(server)
 
     on_exit(fn ->
-      safe_stop(server)
+      ProcessHelpers.safe_stop(server)
     end)
 
     {:ok, conn: conn}
@@ -403,7 +404,7 @@ defmodule DuckFeeder.Sink.DuckDBTest do
 
     assert {:ok, _} = DuckDB.process_batch(context_one, {"raw", "events"}, batch)
     assert_receive {:setup_fun_called, :one}
-    safe_stop(server_one)
+    ProcessHelpers.safe_stop(server_one)
 
     {:ok, server_two} = DuckDBConnection.start_link(name: nil)
     conn_two = DuckDBConnection.get_conn(server_two)
@@ -419,7 +420,7 @@ defmodule DuckFeeder.Sink.DuckDBTest do
       })
 
     on_exit(fn ->
-      safe_stop(server_two)
+      ProcessHelpers.safe_stop(server_two)
     end)
 
     assert {:ok, _} =
@@ -448,12 +449,5 @@ defmodule DuckFeeder.Sink.DuckDBTest do
   defp query_map(conn, sql) do
     {:ok, result} = DuckDBClient.query_map(conn, sql)
     result
-  end
-
-  defp safe_stop(pid) when is_pid(pid) do
-    _ = GenServer.stop(pid)
-    :ok
-  catch
-    :exit, _reason -> :ok
   end
 end

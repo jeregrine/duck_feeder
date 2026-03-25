@@ -114,7 +114,7 @@ defmodule DuckFeeder.Runtime.SnapshotSpool do
         end
 
         collect_rows = fn ->
-          _ = safe_close_snapshot_spool(io_device)
+          :ok = File.close(io_device)
           {:spooled_snapshot_rows, path, :atomics.get(counter, 1)}
         end
 
@@ -159,26 +159,11 @@ defmodule DuckFeeder.Runtime.SnapshotSpool do
       {:error, {:snapshot_collector_push_throw, kind, reason}}
   end
 
-  defp ignore_errors(fun) when is_function(fun, 0) do
-    fun.()
-  rescue
-    _ -> :ok
-  catch
-    _, _ -> :ok
-  end
-
-  defp safe_close_snapshot_spool(io_device) when is_pid(io_device) do
-    ignore_errors(fn ->
-      File.close(io_device)
-      :ok
-    end)
-  end
-
   defp safe_delete_snapshot_spool(path) when is_binary(path) do
     case File.rm(path) do
       :ok -> :ok
       {:error, :enoent} -> :ok
-      {:error, _reason} -> :ok
+      {:error, reason} -> {:error, {:snapshot_spool_delete_failed, reason}}
     end
   end
 

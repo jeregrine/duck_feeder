@@ -1,4 +1,7 @@
 Code.require_file("../test_support/integration_helpers.ex", __DIR__)
+Code.require_file("../test_support/process_helpers.ex", __DIR__)
+Code.require_file("../test_support/duckdb_helpers.ex", __DIR__)
+Code.require_file("../test_support/fake_meta.ex", __DIR__)
 
 integration_enabled? = System.get_env("RUN_INTEGRATION_TESTS") in ["1", "true"]
 

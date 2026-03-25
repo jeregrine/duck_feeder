@@ -4,16 +4,13 @@ defmodule DuckFeeder.ServiceTest do
   import ExUnit.CaptureLog
 
   alias DuckFeeder.CDC.Event
-  alias DuckFeeder.DuckDB.Client, as: DuckDBClient
-  alias DuckFeeder.DuckDB.Connection, as: DuckDBConnection
   alias DuckFeeder.Service
-
-  defmodule FakeMeta do
-    def upsert_checkpoint(_conn, _checkpoint_key, lsn), do: {:ok, lsn}
-  end
+  alias DuckFeeder.TestSupport.DuckDBHelpers
+  alias DuckFeeder.TestSupport.FakeMeta
+  alias DuckFeeder.TestSupport.ProcessHelpers
 
   test "runs end-to-end from CDC event to committed DuckDB batch" do
-    path = temp_duckdb_path("service_end_to_end")
+    path = DuckDBHelpers.temp_duckdb_path("service_end_to_end")
 
     designated_tables = [
       %{
@@ -36,7 +33,7 @@ defmodule DuckFeeder.ServiceTest do
       )
 
     on_exit(fn ->
-      safe_stop(service)
+      ProcessHelpers.safe_stop(service)
       _ = File.rm(path)
     end)
 
@@ -68,7 +65,7 @@ defmodule DuckFeeder.ServiceTest do
     assert batch.row_count == 1
 
     assert %{"id" => [1], "name" => ["duck"]} =
-             query_duckdb_file(path, "SELECT id, name FROM raw.users ORDER BY id")
+             DuckDBHelpers.query_duckdb_file(path, "SELECT id, name FROM raw.users ORDER BY id")
 
     refute Service.in_transaction?(service)
   end
@@ -81,7 +78,7 @@ defmodule DuckFeeder.ServiceTest do
       )
 
     on_exit(fn ->
-      safe_stop(service)
+      ProcessHelpers.safe_stop(service)
     end)
 
     state = :sys.get_state(service)
@@ -107,7 +104,7 @@ defmodule DuckFeeder.ServiceTest do
       )
 
     on_exit(fn ->
-      safe_stop(service)
+      ProcessHelpers.safe_stop(service)
     end)
 
     context = :sys.get_state(service).context
@@ -118,7 +115,7 @@ defmodule DuckFeeder.ServiceTest do
   end
 
   test "attach_cdc emits latest checkpoint ack after prior commits" do
-    path = temp_duckdb_path("service_attach_cdc")
+    path = DuckDBHelpers.temp_duckdb_path("service_attach_cdc")
 
     designated_tables = [
       %{
@@ -141,7 +138,7 @@ defmodule DuckFeeder.ServiceTest do
       )
 
     on_exit(fn ->
-      safe_stop(service)
+      ProcessHelpers.safe_stop(service)
       _ = File.rm(path)
     end)
 
@@ -165,7 +162,7 @@ defmodule DuckFeeder.ServiceTest do
   end
 
   test "ingests pre-tagged snapshot rows without re-wrapping metadata into _record" do
-    path = temp_duckdb_path("service_snapshot_tagged")
+    path = DuckDBHelpers.temp_duckdb_path("service_snapshot_tagged")
 
     designated_table = %{
       id: 1,
@@ -186,7 +183,7 @@ defmodule DuckFeeder.ServiceTest do
       )
 
     on_exit(fn ->
-      safe_stop(service)
+      ProcessHelpers.safe_stop(service)
       _ = File.rm(path)
     end)
 
@@ -215,7 +212,7 @@ defmodule DuckFeeder.ServiceTest do
   end
 
   test "ingests snapshot rows when designated table uses string keys" do
-    path = temp_duckdb_path("service_snapshot_string_keys")
+    path = DuckDBHelpers.temp_duckdb_path("service_snapshot_string_keys")
 
     start_table = %{
       source_schema: "public",
@@ -242,7 +239,7 @@ defmodule DuckFeeder.ServiceTest do
       )
 
     on_exit(fn ->
-      safe_stop(service)
+      ProcessHelpers.safe_stop(service)
       _ = File.rm(path)
     end)
 
@@ -285,7 +282,7 @@ defmodule DuckFeeder.ServiceTest do
       )
 
     on_exit(fn ->
-      safe_stop(service)
+      ProcessHelpers.safe_stop(service)
     end)
 
     assert :buffering =
@@ -293,35 +290,5 @@ defmodule DuckFeeder.ServiceTest do
 
     assert {:error, :change_outside_transaction} =
              Service.push_event(service, %Event.Insert{relation_id: 1, record: %{}})
-  end
-
-  defp temp_duckdb_path(prefix) do
-    path =
-      Path.join(
-        System.tmp_dir!(),
-        "#{prefix}_#{System.unique_integer([:positive])}.duckdb"
-      )
-
-    _ = File.rm(path)
-    path
-  end
-
-  defp query_duckdb_file(path, sql) do
-    {:ok, server} = DuckDBConnection.start_link(name: nil, path: path)
-    conn = DuckDBConnection.get_conn(server)
-
-    try do
-      {:ok, result} = DuckDBClient.query_map(conn, sql)
-      result
-    after
-      safe_stop(server)
-    end
-  end
-
-  defp safe_stop(pid) when is_pid(pid) do
-    _ = GenServer.stop(pid)
-    :ok
-  catch
-    :exit, _reason -> :ok
   end
 end

@@ -570,7 +570,7 @@ defmodule DuckFeeder.Runtime do
       start_stream_cdc_phase(phase)
     else
       {:error, reason} ->
-        _ = safe_stop_service(phase.service_pid)
+        :ok = stop_service(phase.service_pid)
         {:error, reason}
     end
   end
@@ -610,7 +610,7 @@ defmodule DuckFeeder.Runtime do
         complete_start_stream_phase(Map.put(phase, :cdc_pid, cdc_pid))
 
       {:error, reason} ->
-        _ = safe_stop_service(phase.service_pid)
+        :ok = stop_service(phase.service_pid)
         {:error, reason}
     end
   end
@@ -634,13 +634,13 @@ defmodule DuckFeeder.Runtime do
        }}
     else
       {:error, {:service_attach_cdc_failed, _} = reason} ->
-        _ = safe_stop_cdc(phase.cdc_pid)
-        _ = safe_stop_service(phase.service_pid)
+        true = Process.exit(phase.cdc_pid, :shutdown)
+        :ok = stop_service(phase.service_pid)
         {:error, reason}
 
       {:error, reason} ->
-        _ = safe_stop_cdc(phase.cdc_pid)
-        _ = safe_stop_service(phase.service_pid)
+        true = Process.exit(phase.cdc_pid, :shutdown)
+        :ok = stop_service(phase.service_pid)
         {:error, {:snapshot_handoff_mark_complete_failed, reason}}
     end
   end
@@ -733,7 +733,7 @@ defmodule DuckFeeder.Runtime do
               designated_tables
             )
 
-          _ = safe_disconnect_query_conn(query_disconnect_fun, query_conn)
+          :ok = query_disconnect_fun.(query_conn)
 
           case result do
             {:ok, %{slot: {:created, _slot}, start_lsn: start_lsn}} when is_binary(start_lsn) ->
@@ -797,24 +797,24 @@ defmodule DuckFeeder.Runtime do
               )
 
             rows_source = collect_rows.()
-            _ = safe_disconnect_query_conn(query_disconnect_fun, query_conn)
+            :ok = query_disconnect_fun.(query_conn)
 
             case result do
               {:ok, %{boundary_lsn: boundary_lsn}} ->
                 {:ok, %{boundary_lsn: boundary_lsn, rows: rows_source}}
 
               {:ok, other} ->
-                _ = cleanup_snapshot_rows_source(rows_source)
+                :ok = cleanup_snapshot_rows_source(rows_source)
                 {:error, {:initial_snapshot_failed, {:invalid_snapshot_result, other}}}
 
               {:error, reason} ->
-                _ = cleanup_snapshot_rows_source(rows_source)
+                :ok = cleanup_snapshot_rows_source(rows_source)
                 {:error, {:initial_snapshot_failed, reason}}
             end
 
           {:error, reason} ->
             rows_source = collect_rows.()
-            _ = cleanup_snapshot_rows_source(rows_source)
+            :ok = cleanup_snapshot_rows_source(rows_source)
             {:error, {:query_connection_failed, reason}}
         end
 
@@ -1088,17 +1088,15 @@ defmodule DuckFeeder.Runtime do
         :ok
 
       {:error, _reason} = error ->
-        _ = safe_stop_service(service_pid)
+        :ok = stop_service(service_pid)
         error
     end
   end
 
-  defp ignore_errors(fun) when is_function(fun, 0) do
-    fun.()
-  rescue
-    _ -> :ok
+  defp stop_service(service_pid) when is_pid(service_pid) do
+    GenServer.stop(service_pid)
   catch
-    _, _ -> :ok
+    :exit, {:noproc, _details} -> :ok
   end
 
   defp wrap_errors(label, fun) when is_atom(label) and is_function(fun, 0) do
@@ -1179,18 +1177,6 @@ defmodule DuckFeeder.Runtime do
   catch
     kind, reason ->
       {:error, {:service_attach_cdc_failed, {kind, reason}}}
-  end
-
-  defp safe_stop_service(service_pid) when is_pid(service_pid) do
-    ignore_errors(fn -> GenServer.stop(service_pid) end)
-  end
-
-  defp safe_stop_cdc(cdc_pid) when is_pid(cdc_pid) do
-    ignore_errors(fn -> Process.exit(cdc_pid, :shutdown) end)
-  end
-
-  defp safe_disconnect_query_conn(disconnect_fun, query_conn) do
-    ignore_errors(fn -> disconnect_fun.(query_conn) end)
   end
 
   defp normalize_reconnect_backoff(base_backoff, min_ms, max_ms, jitter_ms, jitter_fun)

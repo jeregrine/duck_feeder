@@ -2,6 +2,8 @@
 
 ## Project Overview
 
+- DO TDD, write a test and watch it fail before moving on to implementation. Clean simple tests focusing on boundaries and developing good APIS.
+-
 - DO NOT CARE ABOUT BACKAWARDS COMPATIBILITY OR LEGACY CONSIDERATIONS.
 - DO NOT add dependencies without justification. Every dep is a liability. Check if Erlang/OTP already provides it as a primitive.
 - DO NOT hedge for unexpected input types. Define typespecs properly, and let Elixir’s type system and Dialzyer do the job.
@@ -96,16 +98,6 @@ Bootstrap via `DuckFeeder.Meta.Store.bootstrap/1` or `DuckFeeder.Migration.up/1`
 - Move DuckDB access back behind `dux ~> 0.2` before expanding the broader integration matrix.
 - Prefer real DuckDB tables over warehouse-specific envelopes.
 - Preserve loud failure semantics over silent fallback behavior.
-
-## Known Technical Debt
-
-Current notable items:
-
-- `Sink.DuckDB` builds SQL via string interpolation with `validate_sql_type/1` allowlisting and `escape_sql_string/1` hardening; continue auditing validation/escaping paths.
-- DuckLake-backed end-to-end integration coverage is still too thin, especially for local filesystem-backed setups.
-- Append-stream restart semantics still rely on caller-provided synthetic LSN continuity.
-- `StreamSupport.maybe_start_duckdb_connection/2` starts a `Dux.Connection` process that is linked to the caller but not explicitly supervised; it will leak if the caller traps exits.
-- `snapshot_handoff_source_key/2` in `Runtime` has dead code branches for `source.id` (string/integer) that are never hit in the config-first model.
 
 ## Hex Publish Notes
 

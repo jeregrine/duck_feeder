@@ -4,15 +4,12 @@ defmodule DuckFeeder.AppendStreamTest do
   import ExUnit.CaptureLog
 
   alias DuckFeeder.AppendStream
-  alias DuckFeeder.DuckDB.Client, as: DuckDBClient
-  alias DuckFeeder.DuckDB.Connection, as: DuckDBConnection
-
-  defmodule FakeMeta do
-    def upsert_checkpoint(_conn, _checkpoint_key, lsn), do: {:ok, lsn}
-  end
+  alias DuckFeeder.TestSupport.DuckDBHelpers
+  alias DuckFeeder.TestSupport.FakeMeta
+  alias DuckFeeder.TestSupport.ProcessHelpers
 
   test "appends event rows and processes batch" do
-    path = temp_duckdb_path("append_stream")
+    path = DuckDBHelpers.temp_duckdb_path("append_stream")
 
     {:ok, stream} =
       AppendStream.start_link(
@@ -25,7 +22,7 @@ defmodule DuckFeeder.AppendStreamTest do
       )
 
     on_exit(fn ->
-      safe_stop(stream)
+      ProcessHelpers.safe_stop(stream)
       _ = File.rm(path)
     end)
 
@@ -40,7 +37,7 @@ defmodule DuckFeeder.AppendStreamTest do
     assert batch.row_count == 1
 
     assert %{"id" => [1], "kind" => ["telemetry"]} =
-             query_duckdb_file(path, "SELECT id, kind FROM raw.events ORDER BY id")
+             DuckDBHelpers.query_duckdb_file(path, "SELECT id, kind FROM raw.events ORDER BY id")
   end
 
   test "starts an internal DuckDB connection by default" do
@@ -52,7 +49,7 @@ defmodule DuckFeeder.AppendStreamTest do
       )
 
     on_exit(fn ->
-      safe_stop(stream)
+      ProcessHelpers.safe_stop(stream)
     end)
 
     state = :sys.get_state(stream)
@@ -71,7 +68,7 @@ defmodule DuckFeeder.AppendStreamTest do
       )
 
     on_exit(fn ->
-      safe_stop(stream)
+      ProcessHelpers.safe_stop(stream)
     end)
 
     state = :sys.get_state(stream)
@@ -94,7 +91,7 @@ defmodule DuckFeeder.AppendStreamTest do
       )
 
     on_exit(fn ->
-      safe_stop(stream)
+      ProcessHelpers.safe_stop(stream)
     end)
 
     assert {:error, {:unknown_target_table, {"raw", "missing"}}} =
@@ -110,7 +107,7 @@ defmodule DuckFeeder.AppendStreamTest do
       )
 
     on_exit(fn ->
-      safe_stop(stream)
+      ProcessHelpers.safe_stop(stream)
     end)
 
     assert {:error, {:invalid_lsn, {:invalid_lsn, "bad"}}} =
@@ -120,7 +117,7 @@ defmodule DuckFeeder.AppendStreamTest do
   end
 
   test "supports explicit flush for append stream table" do
-    path = temp_duckdb_path("append_stream_flush")
+    path = DuckDBHelpers.temp_duckdb_path("append_stream_flush")
 
     {:ok, stream} =
       AppendStream.start_link(
@@ -133,7 +130,7 @@ defmodule DuckFeeder.AppendStreamTest do
       )
 
     on_exit(fn ->
-      safe_stop(stream)
+      ProcessHelpers.safe_stop(stream)
       _ = File.rm(path)
     end)
 
@@ -253,7 +250,7 @@ defmodule DuckFeeder.AppendStreamTest do
     assert last_batch.lsn_end == "0/3"
     refute_received {:EXIT, ^stream, _}
 
-    safe_stop(stream)
+    ProcessHelpers.safe_stop(stream)
   end
 
   test "validates append stream queue options" do
@@ -283,35 +280,5 @@ defmodule DuckFeeder.AppendStreamTest do
                meta_conn: self(),
                overflow_strategy: :drop_latest
              )
-  end
-
-  defp temp_duckdb_path(prefix) do
-    path =
-      Path.join(
-        System.tmp_dir!(),
-        "#{prefix}_#{System.unique_integer([:positive])}.duckdb"
-      )
-
-    _ = File.rm(path)
-    path
-  end
-
-  defp query_duckdb_file(path, sql) do
-    {:ok, server} = DuckDBConnection.start_link(name: nil, path: path)
-    conn = DuckDBConnection.get_conn(server)
-
-    try do
-      {:ok, result} = DuckDBClient.query_map(conn, sql)
-      result
-    after
-      safe_stop(server)
-    end
-  end
-
-  defp safe_stop(pid) when is_pid(pid) do
-    _ = GenServer.stop(pid)
-    :ok
-  catch
-    :exit, _reason -> :ok
   end
 end
