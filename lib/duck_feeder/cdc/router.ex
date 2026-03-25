@@ -15,7 +15,18 @@ defmodule DuckFeeder.CDC.Router do
 
   @type route_key :: {String.t(), String.t()}
 
-  @spec route_transaction(map(), [designated_table()]) :: %{
+  @spec route_transaction(
+          map(),
+          [designated_table()]
+          | %{
+              optional(route_key()) => %{
+                checkpoint_key: String.t() | nil,
+                id: integer() | nil,
+                target: route_key(),
+                mode: String.t()
+              }
+            }
+        ) :: %{
           xid: non_neg_integer(),
           begin_lsn: String.t(),
           end_lsn: String.t(),
@@ -23,8 +34,10 @@ defmodule DuckFeeder.CDC.Router do
         }
   def route_transaction(transaction, designated_tables)
       when is_map(transaction) and is_list(designated_tables) do
-    mapping = build_mapping(designated_tables)
+    route_transaction(transaction, build_mapping(designated_tables))
+  end
 
+  def route_transaction(transaction, mapping) when is_map(transaction) and is_map(mapping) do
     routes =
       transaction
       |> Map.get(:changes, [])

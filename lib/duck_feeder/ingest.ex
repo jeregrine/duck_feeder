@@ -9,9 +9,8 @@ defmodule DuckFeeder.Ingest do
   alias DuckFeeder.TablePipeline
 
   defmodule State do
-    @enforce_keys [:designated_tables, :mapping, :pipeline_supervisor, :pipeline_opts, :sink_pid]
+    @enforce_keys [:mapping, :pipeline_supervisor, :pipeline_opts, :sink_pid]
     defstruct [
-      :designated_tables,
       :mapping,
       :pipeline_supervisor,
       :pipeline_opts,
@@ -20,7 +19,6 @@ defmodule DuckFeeder.Ingest do
     ]
 
     @type t :: %__MODULE__{
-            designated_tables: [map()],
             mapping: map(),
             pipeline_supervisor: pid(),
             pipeline_opts: map(),
@@ -72,7 +70,6 @@ defmodule DuckFeeder.Ingest do
 
     {:ok,
      %State{
-       designated_tables: designated_tables,
        mapping: mapping,
        sink_pid: sink_pid,
        pipeline_opts: pipeline_opts,
@@ -110,7 +107,7 @@ defmodule DuckFeeder.Ingest do
   end
 
   defp ingest_transaction_now(%State{} = state, transaction) when is_map(transaction) do
-    routed = Router.route_transaction(transaction, state.designated_tables)
+    routed = Router.route_transaction(transaction, state.mapping)
 
     Enum.reduce_while(routed.routes, {:ok, state}, fn {table, changes}, {:ok, acc_state} ->
       case ensure_pipeline(acc_state, table) do
