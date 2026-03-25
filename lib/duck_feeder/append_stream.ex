@@ -29,7 +29,7 @@ defmodule DuckFeeder.AppendStream do
 
   use GenServer
 
-  alias DuckFeeder.{RuntimeSupport, TablePipeline}
+  alias DuckFeeder.{RuntimeSupport, TablePipeline, TablePipelineManager}
   alias DuckFeeder.CDC.Lsn
 
   defmodule State do
@@ -206,39 +206,16 @@ defmodule DuckFeeder.AppendStream do
     )
   end
 
-  defp ensure_pipeline(%State{pipelines: pipelines} = state, table) do
-    case Map.get(pipelines, table) do
-      pid when is_pid(pid) ->
-        if Process.alive?(pid) do
-          {:ok, pid, state}
-        else
-          start_pipeline(state, table)
-        end
-
-      _ ->
-        start_pipeline(state, table)
-    end
-  end
-
-  defp start_pipeline(%State{} = state, table) do
-    opts =
-      [
-        table: table,
-        sink_pid: self(),
-        max_rows: Map.get(state.pipeline_opts, :max_rows, 10_000),
-        max_bytes: Map.get(state.pipeline_opts, :max_bytes, 128 * 1_024 * 1_024),
-        flush_interval_ms: Map.get(state.pipeline_opts, :flush_interval_ms, 5_000)
-      ]
-
-    case DynamicSupervisor.start_child(state.pipeline_supervisor, {TablePipeline, opts}) do
-      {:ok, pid} ->
-        {:ok, pid, %{state | pipelines: Map.put(state.pipelines, table, pid)}}
-
-      {:error, {:already_started, pid}} ->
-        {:ok, pid, %{state | pipelines: Map.put(state.pipelines, table, pid)}}
-
-      {:error, reason} ->
-        {:error, {:pipeline_start_failed, table, reason}}
+  defp ensure_pipeline(%State{} = state, table) do
+    case TablePipelineManager.ensure_started(
+           state.pipelines,
+           state.pipeline_supervisor,
+           table,
+           self(),
+           state.pipeline_opts
+         ) do
+      {:ok, pid, pipelines} -> {:ok, pid, %{state | pipelines: pipelines}}
+      {:error, reason} -> {:error, reason}
     end
   end
 

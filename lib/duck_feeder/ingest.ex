@@ -6,7 +6,7 @@ defmodule DuckFeeder.Ingest do
   use GenServer
 
   alias DuckFeeder.CDC.{ChangelogRow, Router}
-  alias DuckFeeder.TablePipeline
+  alias DuckFeeder.{TablePipeline, TablePipelineManager}
 
   defmodule State do
     @enforce_keys [:mapping, :pipeline_supervisor, :pipeline_opts, :sink_pid]
@@ -138,43 +138,17 @@ defmodule DuckFeeder.Ingest do
     end
   end
 
-  defp ensure_pipeline(%State{pipelines: pipelines} = state, table) do
-    case Map.get(pipelines, table) do
-      pid when is_pid(pid) ->
-        if Process.alive?(pid) do
-          {:ok, pid, state}
-        else
-          start_pipeline(state, table)
-        end
-
-      _ ->
-        start_pipeline(state, table)
+  defp ensure_pipeline(%State{} = state, table) do
+    case TablePipelineManager.ensure_started(
+           state.pipelines,
+           state.pipeline_supervisor,
+           table,
+           state.sink_pid,
+           state.pipeline_opts
+         ) do
+      {:ok, pid, pipelines} -> {:ok, pid, %{state | pipelines: pipelines}}
+      {:error, reason} -> {:error, reason}
     end
-  end
-
-  defp start_pipeline(%State{} = state, table) do
-    opts = pipeline_start_opts(state, table)
-
-    case DynamicSupervisor.start_child(state.pipeline_supervisor, {TablePipeline, opts}) do
-      {:ok, pid} ->
-        {:ok, pid, %{state | pipelines: Map.put(state.pipelines, table, pid)}}
-
-      {:error, {:already_started, pid}} ->
-        {:ok, pid, %{state | pipelines: Map.put(state.pipelines, table, pid)}}
-
-      {:error, reason} ->
-        {:error, {:pipeline_start_failed, table, reason}}
-    end
-  end
-
-  defp pipeline_start_opts(state, table) do
-    [
-      table: table,
-      sink_pid: state.sink_pid,
-      max_rows: Map.get(state.pipeline_opts, :max_rows, 10_000),
-      max_bytes: Map.get(state.pipeline_opts, :max_bytes, 128 * 1_024 * 1_024),
-      flush_interval_ms: Map.get(state.pipeline_opts, :flush_interval_ms, 5_000)
-    ]
   end
 
   defp enrich_change(change, transaction) do
