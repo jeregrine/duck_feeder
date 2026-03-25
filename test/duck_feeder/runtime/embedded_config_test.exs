@@ -109,6 +109,19 @@ defmodule DuckFeeder.Runtime.EmbeddedConfigTest do
     assert resolved.runtime_opts[:resume_incomplete_snapshot?] == false
   end
 
+  test "rejects non-keyword runtime_opts" do
+    config = %{
+      enabled: true,
+      repo: FakeRepo,
+      schemas: [Tenant],
+      duckdb: %{path: "/tmp/defaults.duckdb"},
+      runtime_opts: %{snapshot_before_stream?: false}
+    }
+
+    assert {:error, {:invalid_option, :runtime_opts, %{snapshot_before_stream?: false}}} =
+             Runtime.resolve_app_config(config)
+  end
+
   test "supports metadata_repo override" do
     config = %{
       enabled: true,

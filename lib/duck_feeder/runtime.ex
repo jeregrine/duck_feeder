@@ -87,16 +87,12 @@ defmodule DuckFeeder.Runtime do
       enabled? = truthy?(Map.get(cfg, :enabled, true))
 
       if enabled? do
-        runtime_opts =
-          cfg
-          |> Map.get(:runtime_opts, [])
-          |> List.wrap()
-          |> put_default_runtime_opt(:snapshot_before_stream?, true)
-          |> put_default_runtime_opt(:resume_incomplete_snapshot?, true)
-
-        source_name = normalize_source_name(Map.get(cfg, :source_name, "default"))
-
-        with {:ok, runtime_config} <- runtime_config(cfg, source_name),
+        with {:ok, runtime_opts} <- normalize_runtime_opts(Map.get(cfg, :runtime_opts, [])),
+             runtime_opts <- put_default_runtime_opt(runtime_opts, :snapshot_before_stream?, true),
+             runtime_opts <-
+               put_default_runtime_opt(runtime_opts, :resume_incomplete_snapshot?, true),
+             source_name = normalize_source_name(Map.get(cfg, :source_name, "default")),
+             {:ok, runtime_config} <- runtime_config(cfg, source_name),
              {:ok, validated} <- Config.validate(runtime_config) do
           designated_tables =
             put_runtime_checkpoint_keys(source_name, validated.source.designated_tables)
@@ -374,6 +370,16 @@ defmodule DuckFeeder.Runtime do
 
   defp normalize_optional_options_map(nil, _key), do: {:ok, %{}}
   defp normalize_optional_options_map(value, key), do: normalize_options_map(value, key)
+
+  defp normalize_runtime_opts(value) when is_list(value) do
+    if Keyword.keyword?(value) do
+      {:ok, value}
+    else
+      {:error, {:invalid_option, :runtime_opts, value}}
+    end
+  end
+
+  defp normalize_runtime_opts(value), do: {:error, {:invalid_option, :runtime_opts, value}}
 
   defp truthy?(value), do: value in [true, 1, "1", "true"]
 

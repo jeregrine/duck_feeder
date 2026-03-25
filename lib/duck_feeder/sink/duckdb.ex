@@ -93,8 +93,17 @@ defmodule DuckFeeder.Sink.DuckDB do
            }}
         else
           with {:ok, result} <-
-                 apply_batch_rows(conn, designated_table, table, batch, rows, batch_lsn_end, catalog),
-               :ok <- record_applied_batch(conn, checkpoint_key, batch_lsn, batch_lsn_end, catalog) do
+                 apply_batch_rows(
+                   conn,
+                   designated_table,
+                   table,
+                   batch,
+                   rows,
+                   batch_lsn_end,
+                   catalog
+                 ),
+               :ok <-
+                 record_applied_batch(conn, checkpoint_key, batch_lsn, batch_lsn_end, catalog) do
             {:ok, Map.put(result, :deduped?, false)}
           end
         end
