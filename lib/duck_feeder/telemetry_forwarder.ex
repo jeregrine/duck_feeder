@@ -9,6 +9,15 @@ defmodule DuckFeeder.TelemetryForwarder do
 
   This avoids high-cardinality/self-recursive telemetry ingestion while still
   retaining operational signal.
+
+  Normalized metadata/measurement payloads use a stable truncation shape when
+  nested lists or maps exceed configured limits:
+
+  - lists become `%{"__duck_feeder_type__" => "list", "__duck_feeder_items__" => [...],
+    "__duck_feeder_truncated__" => true, "__duck_feeder_original_count__" => n}`
+  - maps keep their sampled keys and add
+    `"__duck_feeder_truncated__" => true` and
+    `"__duck_feeder_original_count__" => n`
   """
 
   use GenServer
