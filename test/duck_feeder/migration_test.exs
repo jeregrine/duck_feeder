@@ -38,6 +38,24 @@ defmodule DuckFeeder.MigrationTest do
     end
   end
 
+  defmodule BrokenVersionRepo do
+    def query(sql, _params, _opts) do
+      cond do
+        String.starts_with?(String.trim(sql), "CREATE SCHEMA IF NOT EXISTS duckfeeder_meta") ->
+          {:ok, %{rows: []}}
+
+        String.contains?(sql, "CREATE TABLE IF NOT EXISTS duckfeeder_meta.migration_versions") ->
+          {:ok, %{rows: []}}
+
+        String.starts_with?(
+          String.trim(sql),
+          "SELECT version FROM duckfeeder_meta.migration_versions"
+        ) ->
+          {:error, RuntimeError.exception("db unavailable")}
+      end
+    end
+  end
+
   setup do
     Process.delete(:migration_version)
     Process.delete(:bootstrap_queries)
@@ -62,5 +80,11 @@ defmodule DuckFeeder.MigrationTest do
     assert :ok = Migrations.down(repo: FakeRepo)
 
     assert_received {:migration_query, :drop_duckfeeder}
+  end
+
+  test "migrated_version raises when the version query fails" do
+    assert_raise RuntimeError, ~r/duck_feeder migration query failed: db unavailable/, fn ->
+      Migrations.migrated_version(repo: BrokenVersionRepo)
+    end
   end
 end

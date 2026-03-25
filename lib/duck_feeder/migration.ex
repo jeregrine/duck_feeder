@@ -96,10 +96,9 @@ defmodule DuckFeeder.Migration do
            log: false
          ) do
       {:ok, %{rows: [[version]]}} when is_integer(version) -> version
-      _ -> 0
+      {:ok, _result} -> 0
+      {:error, reason} -> raise_query_error(reason)
     end
-  rescue
-    _ -> 0
   end
 
   defp run_bootstrap(repo) do
@@ -148,7 +147,11 @@ defmodule DuckFeeder.Migration do
   defp query!(repo, sql, params \\ []) do
     case repo.query(sql, params, log: false) do
       {:ok, _result} -> :ok
-      {:error, reason} -> raise "duck_feeder migration query failed: #{Exception.message(reason)}"
+      {:error, reason} -> raise_query_error(reason)
     end
+  end
+
+  defp raise_query_error(reason) do
+    raise "duck_feeder migration query failed: #{Exception.message(reason)}"
   end
 end
