@@ -1,178 +1,133 @@
 # DuckFeeder plan
 
-This document is intentionally short.
+README and `AGENTS.md` already cover the product and architecture.
+This file is only for the next concrete cleanup and refactor targets.
 
-README and `AGENTS.md` already cover the product story, architecture, and guiding principles.
-This file should stay focused on the next concrete work items for this branch.
+## Current priorities
 
-## Current branch direction
+### 1. Break up `Runtime.start_stream/4`
 
-Keep optimizing for:
+It still does too much in one function:
 
-- config-first runtime setup
-- real DuckDB-managed target tables
-- minimal DuckFeeder metadata in Postgres
-- strong restart/checkpoint correctness
-- simple defaults and copy-pasteable setup
+- source resolution
+- checkpoint/start LSN resolution
+- snapshot handoff planning
+- bootstrap
+- snapshot execution
+- snapshot replay
+- service startup
+- CDC startup
+- cleanup/error choreography
 
-Most important invariant:
+Goal:
 
-- **WAL ACK advances only after DuckDB table writes are committed and the checkpoint is durably persisted.**
+- split it into explicit phases
+- keep phase state small and obvious
+- reduce the amount of local error-handling/control-flow nesting
 
-## Important terminology
+### 2. Keep simplifying `Sink.DuckDB`
 
-There are two different metadata concerns here and we should keep them separate:
+It is still the main complexity hotspot.
 
-### DuckFeeder metadata
+Current responsibilities still mixed together:
 
-This remains the durable runtime metadata owned by DuckFeeder and stored in Postgres:
+- setup hook memoization
+- applied-batch tracking
+- append batching SQL generation
+- CDC apply logic
+- schema evolution checks
+- transaction handling
 
-- `checkpoints`
-- `snapshot_handoffs`
-- `migration_versions`
+Goal:
 
-### DuckLake metadata
+- separate internal concerns more clearly
+- make append path and CDC path easier to read in isolation
+- keep correctness logic obvious
 
-This is the catalog/storage metadata managed by DuckDB/DuckLake.
+### 3. Isolate snapshot spool / replay code
 
-The goal is to verify DuckFeeder works cleanly with DuckLake configured the way DuckDB expects, without reintroducing a DuckFeeder-specific storage layer.
+`Runtime` still owns too much of the snapshot spool lifecycle:
 
-## Recently completed on this branch
+- writing spool rows
+- reading spool rows
+- replay iteration
+- cleanup on failure
 
-- moved DuckDB access behind `dux ~> 0.2`
-- added env-gated DuckLake integration coverage for append ingestion
-  - DuckLake metadata in DuckDB
-  - DuckLake metadata in Postgres
-- added env-gated embedded runtime integration coverage using real `Ecto.Repo` + `Ecto.Schema`
-  - DuckLake metadata in DuckDB
-  - DuckLake metadata in Postgres
-- added snapshot handoff recovery coverage on the embedded runtime path
-- fixed sink issues found by the new integration tests
-  - append checkpoint-key fallback
-  - idempotent DuckLake attach setup in tests
-  - snapshot-created numeric columns followed by CDC string values
-- hardened `Sink.DuckDB` SQL construction:
-  - `validate_sql_type/1` allowlist for type names interpolated into SQL
-  - `escape_sql_string/1` now escapes backslashes and rejects null bytes
-  - `fetch_target_columns/3` replaced separate `relation_exists?` + `describe_columns` with single query
-  - `infer_columns/2` rewritten as single-pass with target column type overrides
-  - `rows_sources/2` chunks large batches instead of building one giant `VALUES` clause
-- added DuckDB-side batch dedup tracking (`duck_feeder_internal.applied_batches`) so retries after failed Postgres checkpoint writes are skipped
-- added `with_transaction` try/rescue/catch cleanup so DuckDB connection is always rolled back on crash
-- removed implicit global DuckDB connection fallback — `duckdb.conn` is now required
-- added ETS setup invalidation on connection death via monitor/watcher
-- removed `normalize_cdc_value` type coercion — CDC values are now passed through without string-to-integer/boolean guessing
-- extracted shared batch dispatch logic into `BatchDispatch` module
-- fixed `Runtime.Manager.stop_source/2` to actually stop the source supervisor process
-- fixed `Meta.Store.fetch_start_lsn/3` to fall back to default when any checkpoint key is missing
-- fixed `Meta.Store.lsn_param/1` to return error tuples instead of raising
-- fixed `Config` to accept map-shaped designated tables with string keys
-- fixed `Runtime.Shared.fetch_duckdb!/1` to raise a helpful error message
-- fixed `Runtime.Supervisor` to avoid injecting `duckdb: nil` when neither key was provided
-- fixed `StreamSupport.designated_table_config_mapping/1` to normalize tables before extracting target relations
-- added `DesignatedTable.normalize/1` for consistent atom-key handling of string-keyed maps
-- added `priv` to hex package `files`
-- removed `jason` optional dependency (uses Elixir 1.19+ built-in `JSON`)
-- added CI matrix testing against OTP 27 and OTP 28
-- widened `compatible_type?/2` to handle integer/float promotion paths
+Goal:
 
-## Highest-priority next steps
+- move spool-specific logic into a focused module
+- leave `Runtime` with orchestration, not file-format details
 
-### 1. Refresh docs around the tested DuckLake path
+### 4. Keep removing defensive interior polymorphism
 
-The biggest gap now is docs accuracy.
+We have already removed a lot of atom/string and nil/missing hedging.
+Keep pushing that pattern:
 
-Update README and `docs/runtime.md` to match what we actually verified:
+- normalize once at the boundary
+- trust normalized internal shapes
+- delete helper layers that only re-check already-normalized data
 
-- explain DuckFeeder metadata vs DuckLake metadata clearly
-- show the tested DuckDB-backed DuckLake setup
-- show the tested Postgres-backed DuckLake setup
-- document the exact `duckdb` config shape we now use (`setup_sql` + `setup_fun`)
-- explain when `ducklake_flush_inlined_data()` matters for local filesystem inspection
-- show how to inspect/query resulting tables and metadata
+### 5. Revisit telemetry forwarder payload shape
 
-README should show the recommended default, not a speculative one.
+We now make truncation explicit and configurable.
+Still decide whether the current marker format is the long-term shape we want:
 
-### 2. Define the recommended local default explicitly
+- `__duck_feeder_truncated__`
+- `__duck_feeder_original_count__`
+- list wrapper structure
 
-We now have enough tested coverage to pick a real default.
+Goal:
 
-Questions to answer explicitly:
+- either bless the format and document it
+- or replace it with a cleaner stable shape
 
-- should the golden path for local development be DuckLake metadata in DuckDB?
-- should Postgres-backed DuckLake metadata be documented as the multi-client / shared-catalog alternate?
-- what exact config snippet should users copy first?
-- what should we call the supported local development setup?
+Redundant tests:
 
-The likely shape should follow DuckLake's own guidance closely.
+- "builds service options from explicit runtime config" and "builds DuckDB service options from explicit runtime config without storage" in runtime_test.exs — the
+  second test name still references "without storage" (legacy concept). Both test service_options/4 with nearly identical setups. The "without storage" distinction no
+  longer exists.
+- "starts streaming runtime stack" and "starts streaming runtime stack without storage when DuckDB is configured" in runtime_test.exs — same thing. Two tests for a
+  distinction that was removed.
+- "starts an internal DuckDB connection by default" appears in both service_test.exs and append_stream_test.exs — both just assert is_pid(state.context.duckdb.conn)
+  and is_pid(state.context.duckdb.server). They're testing DuckDB.Connection.resolve_opts/1 through two different callers. The connection resolution is already
+  tested in duckdb/connection_test.exs.
+- "context stores designated table mappings" in service_test.exs and "context stores prefixed checkpoint keys" in append_stream_test.exs — both poke at
+  state.context via :sys.get_state to verify the context map shape. These test DesignatedTable.by_target/2 through the init path. That function is already tested in
+  designated_table_test.exs.
 
-### 3. Close the remaining integration-matrix gaps
+Bad patterns:
 
-The matrix is much better now, but not complete yet.
+- FakeMeta is defined identically in 3 test files (service_test.exs, append_stream_test.exs, sink/duckdb_test.exs). Same def upsert_checkpoint(\_conn,
+  \_checkpoint_key, lsn), do: {:ok, lsn}.
+- safe_stop/1, temp_duckdb_path/1, and query_duckdb_file/2 are copy-pasted across service_test.exs, append_stream_test.exs, and sink/duckdb_test.exs. These belong
+  in a shared test helper.
+- runtime_test.exs is 1236 lines with 29 tests, 12 fake modules, and a setup block that cleans up ETS entries by hardcoded source name strings. The fake modules
+  (FakeMeta, FakeService, FakeCDC, FakeConnectionOptions, FakeBootstrap, FakeBootstrapCreatedSlot, FakeSnapshotRunner, FakeSnapshotRunnerThreeRows,
+  FakeSnapshotRunnerRaises, FakeBootstrapRaises, FakeCDCFailStart) are 250+ lines of test infrastructure to avoid hitting real dependencies. This is testing
+  Runtime.start_stream — a 200-line with chain — by mocking every collaborator. The tests are tightly coupled to the internal wiring sequence rather than testing
+  observable behavior.
+- The sink/duckdb_test.exs tests that exercise CDC operations ("applies CDC batches as table operations", "applies CDC batches after snapshot-created numeric
+  columns", "preserves numeric-looking strings...") each set up their own context and run multi-step batch sequences. The CDC operations test is 50+ lines doing
+  insert → update/delete → truncate in one test. These are really integration tests wearing unit test clothes — they'd be clearer as separate focused tests or an
+  actual integration test against a real pipeline.
+- append_stream_test.exs overflow tests ("fails closed when append batch queue overflows", "can drop oldest pending batch when configured") bypass the public API by
+  sending raw {:duck_feeder_batch, ...} messages directly to the GenServer and using a setup_fun that sleeps 250ms to create backpressure. Fragile timing-dependent
+  tests.
+- async: false on sink/duckdb_test.exs — forced serial execution because of the module-level ETS tables (SetupRegistry, SetupConnRegistry,
+  AppliedBatchSetupRegistry). The global mutable state in the sink makes these tests non-parallelizable.
 
-Still add coverage for:
+## Secondary work
 
-- snapshot handoff recovery on the DuckDB-backed DuckLake metadata path
-- a more operational append-only path (telemetry/logger-backed flow, not just direct append calls)
-- broader restart/resume assertions after live CDC on both metadata backends
-- more explicit filesystem assertions around DuckLake data files after flush/materialization
+- sharpen docs after code shape settles
+- add more focused tests when logic moves into new modules
+- keep deleting dead compatibility shims as refactors land
 
-### 4. Broaden schema evolution coverage carefully
+## Rule of thumb
 
-We now cover additive-column behavior on the embedded runtime path.
+Prefer:
 
-Next steps here:
-
-- make sure additive-column coverage exists on both DuckLake metadata backends
-- add relation/update sequencing assertions around schema changes
-- document which schema changes are supported automatically vs fail closed
-
-### 5. Keep improving sink scalability and correctness
-
-After docs + matrix cleanup:
-
-- consider parameterized query paths for DuckDB writes instead of string interpolation
-- keep auditing dynamic SQL construction/validation
-- add more large-batch correctness coverage
-- consider whether the `applied_batches` dedup table needs periodic cleanup/compaction
-
-## Nice-to-have follow-ons
-
-After the items above:
-
-- sharpen append-stream restart semantics/docs
-- improve startup validation and error messages
-- add copy-pasteable examples for the tested DuckLake setups
-- consider a small helper/story for the tested DuckLake attach defaults if the config still feels too manual
-
-## Relevant files for the next session
-
-Start here:
-
-- `README.md`
-- `AGENTS.md`
-- `docs/plan.md`
-- `docs/runtime.md`
-- `lib/duck_feeder/runtime.ex`
-- `lib/duck_feeder/runtime/embedded.ex`
-- `lib/duck_feeder/sink/duckdb.ex`
-- `lib/duck_feeder/duckdb/connection.ex`
-- `test_support/integration_helpers.ex`
-- `test/duck_feeder/ducklake/append_integration_test.exs`
-- `test/duck_feeder/runtime/embedded_ducklake_integration_test.exs`
-- `test/duck_feeder/runtime/embedded_ducklake_duckdb_metadata_integration_test.exs`
-- `test/duck_feeder/sink/duckdb_test.exs`
-- `test/duck_feeder/cdc/connection_integration_test.exs`
-- `test/duck_feeder/meta/store_integration_test.exs`
-
-## Decision rules
-
-When in doubt, prefer:
-
-- simpler runtime shape
-- config-first setup
-- minimal DuckFeeder metadata
-- DuckDB/DuckLake-native defaults
-- real end-to-end verification
-- loud failures over silent fallback
-- beautiful DevUX
+- smaller orchestration functions
+- fewer helper layers
+- one normalized internal shape
+- fail-closed behavior
+- explicit data flow over flexible plumbing

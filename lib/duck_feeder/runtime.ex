@@ -482,6 +482,14 @@ defmodule DuckFeeder.Runtime do
           {:ok, %{service_pid: pid(), cdc_pid: pid(), start_lsn: String.t(), source: map()}}
           | {:error, term()}
   def start_stream(meta_conn, source_name, duckdb, opts \\ []) do
+    with {:ok, phase} <- resolve_start_stream_phase(meta_conn, source_name, duckdb, opts),
+         {:ok, started_phase} <- start_stream_service_phase(phase) do
+      finish_start_stream_phase(started_phase)
+    end
+  end
+
+  defp resolve_start_stream_phase(meta_conn, source_name, duckdb, opts)
+       when is_binary(source_name) and is_list(opts) do
     meta_module = Keyword.get(opts, :meta_module, Meta)
     service_module = Keyword.get(opts, :service_module, Service)
     cdc_module = Keyword.get(opts, :cdc_module, Connection)
@@ -515,77 +523,124 @@ defmodule DuckFeeder.Runtime do
            ),
          {:ok, start_lsn} <-
            resolve_start_lsn(meta_start_lsn, [bootstrap_start_lsn, snapshot_result.boundary_lsn]),
-         {:ok, snapshot_replay_plan} <-
-           snapshot_replay_plan(meta_start_lsn, snapshot_result),
-         {:ok, service_pid} <-
-           service_module.start_link(
-             build_service_opts(
-               meta_conn,
-               designated_tables,
-               duckdb,
-               meta_module,
-               with_snapshot_lsn_start(opts, snapshot_replay_plan.snapshot_lsn_start)
-             )
+         {:ok, snapshot_replay_plan} <- snapshot_replay_plan(meta_start_lsn, snapshot_result) do
+      {:ok,
+       %{
+         meta_conn: meta_conn,
+         source_name: source_name,
+         duckdb: duckdb,
+         opts: opts,
+         meta_module: meta_module,
+         service_module: service_module,
+         cdc_module: cdc_module,
+         source: source,
+         designated_tables: designated_tables,
+         slot_name: slot_name,
+         publication_name: publication_name,
+         connection_opts: connection_opts,
+         snapshot_plan: snapshot_plan,
+         snapshot_result: snapshot_result,
+         snapshot_replay_plan: snapshot_replay_plan,
+         start_lsn: start_lsn
+       }}
+    end
+  end
+
+  defp start_stream_service_phase(phase) when is_map(phase) do
+    service_opts =
+      build_service_opts(
+        phase.meta_conn,
+        phase.designated_tables,
+        phase.duckdb,
+        phase.meta_module,
+        with_snapshot_lsn_start(phase.opts, phase.snapshot_replay_plan.snapshot_lsn_start)
+      )
+
+    case phase.service_module.start_link(service_opts) do
+      {:ok, service_pid} -> {:ok, Map.put(phase, :service_pid, service_pid)}
+      {:error, _reason} = error -> error
+      other -> other
+    end
+  end
+
+  defp finish_start_stream_phase(phase) when is_map(phase) do
+    with :ok <- mark_snapshot_handoff_pending_for_stream(phase),
+         :ok <- replay_snapshot_rows_for_stream(phase) do
+      start_stream_cdc_phase(phase)
+    else
+      {:error, reason} ->
+        _ = safe_stop_service(phase.service_pid)
+        {:error, reason}
+    end
+  end
+
+  defp mark_snapshot_handoff_pending_for_stream(phase) when is_map(phase) do
+    maybe_mark_snapshot_handoff_pending(
+      phase.meta_module,
+      phase.meta_conn,
+      phase.source_name,
+      phase.snapshot_plan,
+      phase.snapshot_result,
+      phase.opts
+    )
+  end
+
+  defp replay_snapshot_rows_for_stream(phase) when is_map(phase) do
+    maybe_replay_snapshot_rows(
+      phase.service_module,
+      phase.service_pid,
+      phase.snapshot_replay_plan.rows
+    )
+  end
+
+  defp start_stream_cdc_phase(phase) when is_map(phase) do
+    cdc_opts =
+      build_cdc_opts(
+        phase.connection_opts,
+        phase.slot_name,
+        phase.publication_name,
+        phase.start_lsn,
+        phase.service_pid,
+        phase.opts
+      )
+
+    case phase.cdc_module.start_link(cdc_opts) do
+      {:ok, cdc_pid} ->
+        complete_start_stream_phase(Map.put(phase, :cdc_pid, cdc_pid))
+
+      {:error, reason} ->
+        _ = safe_stop_service(phase.service_pid)
+        {:error, reason}
+    end
+  end
+
+  defp complete_start_stream_phase(phase) when is_map(phase) do
+    with :ok <- attach_cdc_to_service(phase.service_module, phase.service_pid, phase.cdc_pid),
+         :ok <-
+           maybe_mark_snapshot_handoff_complete(
+             phase.meta_module,
+             phase.meta_conn,
+             phase.source_name,
+             phase.snapshot_result,
+             phase.opts
            ) do
-      with :ok <-
-             maybe_mark_snapshot_handoff_pending(
-               meta_module,
-               meta_conn,
-               source_name,
-               snapshot_plan,
-               snapshot_result,
-               opts
-             ),
-           :ok <-
-             maybe_replay_snapshot_rows(service_module, service_pid, snapshot_replay_plan.rows) do
-        case cdc_module.start_link(
-               build_cdc_opts(
-                 connection_opts,
-                 slot_name,
-                 publication_name,
-                 start_lsn,
-                 service_pid,
-                 opts
-               )
-             ) do
-          {:ok, cdc_pid} ->
-            with :ok <- attach_cdc_to_service(service_module, service_pid, cdc_pid),
-                 :ok <-
-                   maybe_mark_snapshot_handoff_complete(
-                     meta_module,
-                     meta_conn,
-                     source_name,
-                     snapshot_result,
-                     opts
-                   ) do
-              {:ok,
-               %{
-                 service_pid: service_pid,
-                 cdc_pid: cdc_pid,
-                 start_lsn: start_lsn,
-                 source: source
-               }}
-            else
-              {:error, {:service_attach_cdc_failed, _} = reason} ->
-                _ = safe_stop_cdc(cdc_pid)
-                _ = safe_stop_service(service_pid)
-                {:error, reason}
+      {:ok,
+       %{
+         service_pid: phase.service_pid,
+         cdc_pid: phase.cdc_pid,
+         start_lsn: phase.start_lsn,
+         source: phase.source
+       }}
+    else
+      {:error, {:service_attach_cdc_failed, _} = reason} ->
+        _ = safe_stop_cdc(phase.cdc_pid)
+        _ = safe_stop_service(phase.service_pid)
+        {:error, reason}
 
-              {:error, reason} ->
-                _ = safe_stop_cdc(cdc_pid)
-                _ = safe_stop_service(service_pid)
-                {:error, {:snapshot_handoff_mark_complete_failed, reason}}
-            end
-
-          {:error, reason} ->
-            _ = safe_stop_service(service_pid)
-            {:error, reason}
-        end
-      else
-        {:error, reason} ->
-          _ = safe_stop_service(service_pid)
-          {:error, reason}
-      end
+      {:error, reason} ->
+        _ = safe_stop_cdc(phase.cdc_pid)
+        _ = safe_stop_service(phase.service_pid)
+        {:error, {:snapshot_handoff_mark_complete_failed, reason}}
     end
   end
 
