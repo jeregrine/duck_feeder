@@ -74,6 +74,53 @@ defmodule DuckFeeder.AppendStreamTest do
     assert Process.alive?(stream)
   end
 
+  test "runs DuckDB setup during startup" do
+    path = DuckDBHelpers.temp_duckdb_path("append_stream_startup_setup")
+    caller = self()
+
+    {:ok, stream} =
+      AppendStream.start_link(
+        designated_tables: [%{id: 1, target_schema: "raw", target_table: "events"}],
+        meta_module: FakeMeta,
+        meta_conn: self(),
+        duckdb: %{
+          path: path,
+          setup_sql: ["CREATE SCHEMA IF NOT EXISTS raw"],
+          setup_fun: fn _conn ->
+            send(caller, :append_stream_duckdb_setup_ran)
+            :ok
+          end
+        },
+        observer_pid: self()
+      )
+
+    on_exit(fn ->
+      ProcessHelpers.safe_stop(stream)
+      _ = File.rm(path)
+    end)
+
+    assert_receive :append_stream_duckdb_setup_ran, 1_000
+  end
+
+  test "fails startup when DuckDB setup fails" do
+    path = DuckDBHelpers.temp_duckdb_path("append_stream_startup_setup_fail")
+
+    assert {:error, :append_stream_setup_failed} =
+             GenServer.start(
+               AppendStream,
+               designated_tables: [%{id: 1, target_schema: "raw", target_table: "events"}],
+               meta_module: FakeMeta,
+               meta_conn: self(),
+               duckdb: %{
+                 path: path,
+                 setup_fun: fn _conn -> {:error, :append_stream_setup_failed} end
+               },
+               observer_pid: self()
+             )
+
+    _ = File.rm(path)
+  end
+
   test "supports explicit flush for append stream table" do
     path = DuckDBHelpers.temp_duckdb_path("append_stream_flush")
 
@@ -113,15 +160,19 @@ defmodule DuckFeeder.AppendStreamTest do
         designated_tables: [%{id: 1, target_schema: "raw", target_table: "events"}],
         meta_module: FakeMeta,
         meta_conn: self(),
-        duckdb: %{
-          setup_fun: fn _conn ->
-            Process.sleep(250)
-            :ok
-          end
-        },
         observer_pid: self(),
         max_inflight_batches: 1,
-        max_pending_batches: 1
+        max_pending_batches: 1,
+        batch_processor: fn _context, _table, _batch ->
+          Process.sleep(250)
+
+          {:ok,
+           %{
+             status: :committed,
+             checkpoint_key: "duck_feeder_append:raw.events",
+             checkpoint_lsn: "0/1"
+           }}
+        end
       )
 
     batch = %{
@@ -164,16 +215,20 @@ defmodule DuckFeeder.AppendStreamTest do
         designated_tables: [%{id: 1, target_schema: "raw", target_table: "events"}],
         meta_module: FakeMeta,
         meta_conn: self(),
-        duckdb: %{
-          setup_fun: fn _conn ->
-            Process.sleep(250)
-            :ok
-          end
-        },
         observer_pid: self(),
         max_inflight_batches: 1,
         max_pending_batches: 1,
-        overflow_strategy: :drop_oldest
+        overflow_strategy: :drop_oldest,
+        batch_processor: fn _context, _table, _batch ->
+          Process.sleep(250)
+
+          {:ok,
+           %{
+             status: :committed,
+             checkpoint_key: "duck_feeder_append:raw.events",
+             checkpoint_lsn: "0/1"
+           }}
+        end
       )
 
     batch = %{rows: [%{"kind" => "telemetry"}], row_count: 1, lsn_start: "0/1", lsn_end: "0/1"}

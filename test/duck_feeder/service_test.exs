@@ -70,6 +70,69 @@ defmodule DuckFeeder.ServiceTest do
     refute Service.in_transaction?(service)
   end
 
+  test "runs DuckDB setup during startup" do
+    path = DuckDBHelpers.temp_duckdb_path("service_startup_setup")
+    caller = self()
+
+    {:ok, service} =
+      Service.start_link(
+        designated_tables: [
+          %{
+            id: 1,
+            source_schema: "public",
+            source_table: "users",
+            target_schema: "raw",
+            target_table: "users"
+          }
+        ],
+        meta_conn: self(),
+        meta_module: FakeMeta,
+        duckdb: %{
+          path: path,
+          setup_sql: ["CREATE SCHEMA IF NOT EXISTS raw"],
+          setup_fun: fn _conn ->
+            send(caller, :service_duckdb_setup_ran)
+            :ok
+          end
+        },
+        observer_pid: self()
+      )
+
+    on_exit(fn ->
+      ProcessHelpers.safe_stop(service)
+      _ = File.rm(path)
+    end)
+
+    assert_receive :service_duckdb_setup_ran, 1_000
+  end
+
+  test "fails startup when DuckDB setup fails" do
+    path = DuckDBHelpers.temp_duckdb_path("service_startup_setup_fail")
+
+    assert {:error, :service_setup_failed} =
+             GenServer.start(
+               Service,
+               designated_tables: [
+                 %{
+                   id: 1,
+                   source_schema: "public",
+                   source_table: "users",
+                   target_schema: "raw",
+                   target_table: "users"
+                 }
+               ],
+               meta_conn: self(),
+               meta_module: FakeMeta,
+               duckdb: %{
+                 path: path,
+                 setup_fun: fn _conn -> {:error, :service_setup_failed} end
+               },
+               observer_pid: self()
+             )
+
+    _ = File.rm(path)
+  end
+
   test "attach_cdc emits latest checkpoint ack after prior commits" do
     path = DuckDBHelpers.temp_duckdb_path("service_attach_cdc")
 

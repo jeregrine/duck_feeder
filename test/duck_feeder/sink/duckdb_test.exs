@@ -4,6 +4,7 @@ defmodule DuckFeeder.Sink.DuckDBTest do
   alias DuckFeeder.DesignatedTable
   alias DuckFeeder.DuckDB.Client, as: DuckDBClient
   alias DuckFeeder.DuckDB.Connection, as: DuckDBConnection
+  alias DuckFeeder.DuckDB.Init, as: DuckDBInit
   alias DuckFeeder.Sink.DuckDB
   alias DuckFeeder.TestSupport.ProcessHelpers
 
@@ -37,6 +38,7 @@ defmodule DuckFeeder.Sink.DuckDBTest do
   setup do
     {:ok, server} = DuckDBConnection.start_link(name: nil)
     conn = DuckDBConnection.get_conn(server)
+    :ok = DuckDBInit.initialize(%{server: server, conn: conn})
 
     on_exit(fn ->
       ProcessHelpers.safe_stop(server)
@@ -333,99 +335,6 @@ defmodule DuckFeeder.Sink.DuckDBTest do
 
     assert {:error, {:missing_primary_keys, {"raw", "users"}}} =
              DuckDB.process_batch(context, {"raw", "users"}, batch)
-  end
-
-  test "runs setup hooks once per connection/config", %{conn: conn} do
-    context =
-      sink_context(
-        conn,
-        [
-          %{
-            checkpoint_key: "source-a:raw.events",
-            target_schema: "raw",
-            target_table: "events"
-          }
-        ],
-        duckdb: %{
-          setup_sql: ["CREATE SCHEMA IF NOT EXISTS raw"],
-          setup_fun: fn _ ->
-            send(self(), :setup_fun_called)
-            :ok
-          end
-        }
-      )
-
-    batch = %{
-      rows: [%{"id" => 1, "kind" => "page_view"}],
-      lsn_start: "0/40",
-      lsn_end: "0/41"
-    }
-
-    assert {:ok, _} = DuckDB.process_batch(context, {"raw", "events"}, batch)
-    assert {:ok, _} = DuckDB.process_batch(context, {"raw", "events"}, %{batch | lsn_end: "0/42"})
-
-    assert_receive :setup_fun_called
-    refute_receive :setup_fun_called
-  end
-
-  test "reruns setup hooks after the duckdb connection dies" do
-    context_base = %{
-      meta_conn: self(),
-      meta_module: FakeMeta,
-      designated_tables_by_target:
-        DesignatedTable.by_target([
-          %{
-            checkpoint_key: "source-a:raw.events",
-            target_schema: "raw",
-            target_table: "events"
-          }
-        ])
-    }
-
-    batch = %{
-      rows: [%{"id" => 1, "kind" => "page_view"}],
-      lsn_start: "0/42",
-      lsn_end: "0/43"
-    }
-
-    {:ok, server_one} = DuckDBConnection.start_link(name: nil)
-    conn_one = DuckDBConnection.get_conn(server_one)
-
-    context_one =
-      Map.put(context_base, :duckdb, %{
-        conn: conn_one,
-        setup_sql: ["CREATE SCHEMA IF NOT EXISTS raw"],
-        setup_fun: fn _ ->
-          send(self(), {:setup_fun_called, :one})
-          :ok
-        end
-      })
-
-    assert {:ok, _} = DuckDB.process_batch(context_one, {"raw", "events"}, batch)
-    assert_receive {:setup_fun_called, :one}
-    ProcessHelpers.safe_stop(server_one)
-
-    {:ok, server_two} = DuckDBConnection.start_link(name: nil)
-    conn_two = DuckDBConnection.get_conn(server_two)
-
-    context_two =
-      Map.put(context_base, :duckdb, %{
-        conn: conn_two,
-        setup_sql: ["CREATE SCHEMA IF NOT EXISTS raw"],
-        setup_fun: fn _ ->
-          send(self(), {:setup_fun_called, :two})
-          :ok
-        end
-      })
-
-    on_exit(fn ->
-      ProcessHelpers.safe_stop(server_two)
-    end)
-
-    assert {:ok, _} =
-             DuckDB.process_batch(context_two, {"raw", "events"}, %{batch | lsn_end: "0/44"})
-
-    assert_receive {:setup_fun_called, :two}
   end
 
   defp cdc_row(op, record, old_record \\ %{}) do

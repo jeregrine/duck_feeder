@@ -96,6 +96,7 @@ defmodule DuckFeeder.AppendStream do
           | {:max_inflight_batches, pos_integer()}
           | {:max_pending_batches, pos_integer()}
           | {:overflow_strategy, :fail | :drop_oldest}
+          | {:batch_processor, (map(), {String.t(), String.t()}, map() -> term())}
 
   @spec start_link([option()]) :: GenServer.on_start()
   def start_link(opts) do

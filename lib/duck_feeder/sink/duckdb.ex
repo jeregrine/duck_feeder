@@ -26,7 +26,6 @@ defmodule DuckFeeder.Sink.DuckDB do
   alias DuckFeeder.{DesignatedTable, Meta}
   alias DuckFeeder.CDC.Lsn
   alias DuckFeeder.DuckDB.Client, as: DuckDBClient
-  alias DuckFeeder.Sink.DuckDB.{AppliedBatchTable, Setup}
 
   @rows_source_chunk_size 500
   @applied_batch_schema "duck_feeder_internal"
@@ -38,8 +37,6 @@ defmodule DuckFeeder.Sink.DuckDB do
     catalog = context_catalog(context)
 
     with {:ok, conn} <- duckdb_conn(context),
-         :ok <- ensure_setup(conn, context),
-         :ok <- ensure_applied_batch_table(conn, catalog),
          {:ok, designated_table} <- designated_table(context, table),
          {:ok, batch_lsn} <- batch_lsn_end_int(batch),
          {:ok, result} <-
@@ -620,31 +617,6 @@ defmodule DuckFeeder.Sink.DuckDB do
       other ->
         {:error, {:invalid_duckdb_conn, other}}
     end
-  end
-
-  defp ensure_setup(conn, context) do
-    duckdb = Map.get(context, :duckdb, %{}) |> Map.new()
-    Setup.ensure(conn, duckdb, &execute(conn, &1))
-  end
-
-  defp ensure_applied_batch_table(conn, catalog) do
-    AppliedBatchTable.ensure(conn, catalog, fn ->
-      with :ok <-
-             execute(
-               conn,
-               "CREATE SCHEMA IF NOT EXISTS #{qualified_schema(@applied_batch_schema, catalog)}"
-             ),
-           :ok <-
-             execute(
-               conn,
-               "CREATE TABLE IF NOT EXISTS #{applied_batch_relation(catalog)} (" <>
-                 "checkpoint_key VARCHAR PRIMARY KEY, " <>
-                 "last_applied_lsn HUGEINT NOT NULL, " <>
-                 "last_applied_lsn_text VARCHAR NOT NULL)"
-             ) do
-        :ok
-      end
-    end)
   end
 
   defp batch_already_applied?(conn, checkpoint_key, batch_lsn, catalog)
