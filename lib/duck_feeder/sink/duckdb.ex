@@ -26,10 +26,8 @@ defmodule DuckFeeder.Sink.DuckDB do
   alias DuckFeeder.{DesignatedTable, Meta}
   alias DuckFeeder.CDC.Lsn
   alias DuckFeeder.DuckDB.Client, as: DuckDBClient
-  alias DuckFeeder.Sink.DuckDB.Setup
+  alias DuckFeeder.Sink.DuckDB.{AppliedBatchTable, Setup}
 
-  @applied_batch_registry __MODULE__.AppliedBatchRegistry
-  @applied_batch_conn_registry __MODULE__.AppliedBatchConnRegistry
   @rows_source_chunk_size 500
   @applied_batch_schema "duck_feeder_internal"
   @applied_batch_table "applied_batches"
@@ -629,110 +627,8 @@ defmodule DuckFeeder.Sink.DuckDB do
     Setup.ensure(conn, duckdb, &execute(conn, &1))
   end
 
-  defp applied_batch_table_ready?(key) do
-    registry = ensure_applied_batch_registry()
-    match?([{^key, true}], :ets.lookup(registry, key))
-  end
-
-  defp remember_applied_batch_table(key) do
-    registry = ensure_applied_batch_registry()
-    true = :ets.insert(registry, {key, true})
-    :ok
-  end
-
-  defp ensure_applied_batch_conn_monitor(conn) when is_pid(conn) do
-    registry = ensure_applied_batch_conn_registry()
-
-    case :ets.lookup(registry, conn) do
-      [{^conn, watcher}] when is_pid(watcher) ->
-        if Process.alive?(watcher) do
-          :ok
-        else
-          watcher = spawn(fn -> monitor_applied_batch_conn(conn) end)
-          true = :ets.insert(registry, {conn, watcher})
-          :ok
-        end
-
-      _ ->
-        watcher = spawn(fn -> monitor_applied_batch_conn(conn) end)
-        true = :ets.insert(registry, {conn, watcher})
-        :ok
-    end
-  end
-
-  defp monitor_applied_batch_conn(conn) do
-    ref = Process.monitor(conn)
-
-    receive do
-      {:DOWN, ^ref, :process, ^conn, _reason} ->
-        clear_applied_batch_entries(conn)
-        clear_applied_batch_conn_monitor(conn)
-    end
-  end
-
-  defp clear_applied_batch_entries(conn) when is_pid(conn) do
-    case :ets.whereis(@applied_batch_registry) do
-      :undefined ->
-        :ok
-
-      registry ->
-        true = :ets.match_delete(registry, {{conn, :_}, :_})
-        :ok
-    end
-  end
-
-  defp clear_applied_batch_conn_monitor(conn) when is_pid(conn) do
-    case :ets.whereis(@applied_batch_conn_registry) do
-      :undefined ->
-        :ok
-
-      registry ->
-        true = :ets.delete(registry, conn)
-        :ok
-    end
-  end
-
-  defp ensure_applied_batch_registry do
-    case :ets.whereis(@applied_batch_registry) do
-      :undefined ->
-        try do
-          :ets.new(@applied_batch_registry, [:named_table, :public, :set, read_concurrency: true])
-        catch
-          :error, :badarg -> @applied_batch_registry
-        end
-
-      registry ->
-        registry
-    end
-  end
-
-  defp ensure_applied_batch_conn_registry do
-    case :ets.whereis(@applied_batch_conn_registry) do
-      :undefined ->
-        try do
-          :ets.new(@applied_batch_conn_registry, [
-            :named_table,
-            :public,
-            :set,
-            read_concurrency: true
-          ])
-        catch
-          :error, :badarg -> @applied_batch_conn_registry
-        end
-
-      registry ->
-        registry
-    end
-  end
-
   defp ensure_applied_batch_table(conn, catalog) do
-    key = {conn, catalog}
-
-    :ok = ensure_applied_batch_conn_monitor(conn)
-
-    if applied_batch_table_ready?(key) do
-      :ok
-    else
+    AppliedBatchTable.ensure(conn, catalog, fn ->
       with :ok <-
              execute(
                conn,
@@ -746,9 +642,9 @@ defmodule DuckFeeder.Sink.DuckDB do
                  "last_applied_lsn HUGEINT NOT NULL, " <>
                  "last_applied_lsn_text VARCHAR NOT NULL)"
              ) do
-        remember_applied_batch_table(key)
+        :ok
       end
-    end
+    end)
   end
 
   defp batch_already_applied?(conn, checkpoint_key, batch_lsn, catalog)
