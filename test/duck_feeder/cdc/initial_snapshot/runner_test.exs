@@ -57,8 +57,17 @@ defmodule DuckFeeder.CDC.InitialSnapshot.RunnerTest do
   end
 
   defp fake_query_fun(responses) do
-    {:ok, calls_agent} = Agent.start_link(fn -> [] end)
-    {:ok, responses_agent} = Agent.start_link(fn -> responses end)
+    calls_agent =
+      start_supervised!(%{
+        id: {:calls_agent, System.unique_integer([:positive])},
+        start: {Agent, :start_link, [fn -> [] end]}
+      })
+
+    responses_agent =
+      start_supervised!(%{
+        id: {:responses_agent, System.unique_integer([:positive])},
+        start: {Agent, :start_link, [fn -> responses end]}
+      })
 
     query_fun = fn _conn, sql, params ->
       Agent.update(calls_agent, &[{sql, params} | &1])
@@ -68,11 +77,6 @@ defmodule DuckFeeder.CDC.InitialSnapshot.RunnerTest do
         [] -> {{:error, :no_more_fake_responses}, []}
       end)
     end
-
-    on_exit(fn ->
-      if Process.alive?(calls_agent), do: Agent.stop(calls_agent)
-      if Process.alive?(responses_agent), do: Agent.stop(responses_agent)
-    end)
 
     {:ok, calls_agent, query_fun}
   end

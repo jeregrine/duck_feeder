@@ -45,7 +45,11 @@ defmodule DuckFeeder.DuckDB.Init do
   defp execute_setup_fun(_conn, other), do: {:error, {:invalid_duckdb_setup_fun, other}}
 
   defp ensure_applied_batch_table(conn, catalog) do
-    with :ok <- execute(conn, "CREATE SCHEMA IF NOT EXISTS #{qualified_schema(@applied_batch_schema, catalog)}"),
+    with :ok <-
+           execute(
+             conn,
+             "CREATE SCHEMA IF NOT EXISTS #{qualified_schema(@applied_batch_schema, catalog)}"
+           ),
          :ok <-
            execute(
              conn,
