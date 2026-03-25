@@ -36,6 +36,7 @@ defmodule DuckFeeder.Runtime do
   """
 
   alias DuckFeeder.{Config, DesignatedTable, Meta, RuntimeSupport, Service}
+  alias DuckFeeder.Runtime.SnapshotSpool
   alias DuckFeeder.CDC.{Bootstrap, Connection, ConnectionOptions, Lsn}
 
   @default_reconnect_backoff 1_000
@@ -1054,191 +1055,20 @@ defmodule DuckFeeder.Runtime do
 
       _ ->
         if Keyword.get(opts, :snapshot_ingest?, true) do
-          build_snapshot_spool_collector()
+          SnapshotSpool.collector()
         else
           {:error, :missing_snapshot_row_handler}
         end
     end
   end
 
-  defp build_snapshot_spool_collector do
-    open_snapshot_spool_file(5)
-  end
-
-  defp open_snapshot_spool_file(remaining_attempts) when is_integer(remaining_attempts) do
-    path = snapshot_spool_path()
-
-    case File.open(path, [:write, :binary, :exclusive]) do
-      {:ok, io_device} ->
-        counter = :atomics.new(1, [])
-
-        row_handler = fn designated_table, row ->
-          snapshot_spool_push(io_device, counter, designated_table, row)
-        end
-
-        collect_rows = fn ->
-          _ = safe_close_snapshot_spool(io_device)
-          {:spooled_snapshot_rows, path, :atomics.get(counter, 1)}
-        end
-
-        {:ok, row_handler, collect_rows}
-
-      {:error, :eexist} when remaining_attempts > 1 ->
-        open_snapshot_spool_file(remaining_attempts - 1)
-
-      {:error, reason} ->
-        {:error, {:snapshot_collector_start_failed, reason}}
-    end
-  end
-
-  defp snapshot_spool_path do
-    suffix = Base.url_encode64(:crypto.strong_rand_bytes(16), padding: false)
-    Path.join(System.tmp_dir!(), "duck_feeder_snapshot_rows_#{suffix}.spool")
-  end
-
-  defp snapshot_spool_push(io_device, counter, designated_table, row)
-       when is_pid(io_device) and is_reference(counter) do
-    encoded =
-      {designated_table, row}
-      |> :erlang.term_to_binary()
-      |> Base.encode64()
-
-    case IO.binwrite(io_device, encoded <> "\n") do
-      :ok ->
-        _ = :atomics.add_get(counter, 1, 1)
-        :ok
-
-      {:error, reason} ->
-        {:error, {:snapshot_collector_push_failed, reason}}
-    end
-  rescue
-    exception ->
-      {:error, {:snapshot_collector_push_exception, exception}}
-  catch
-    :exit, reason ->
-      {:error, {:snapshot_collector_push_exit, reason}}
-
-    kind, reason ->
-      {:error, {:snapshot_collector_push_throw, kind, reason}}
-  end
-
-  defp ignore_errors(fun) when is_function(fun, 0) do
-    fun.()
-  rescue
-    _ -> :ok
-  catch
-    _, _ -> :ok
-  end
-
-  defp safe_close_snapshot_spool(io_device) when is_pid(io_device) do
-    ignore_errors(fn ->
-      File.close(io_device)
-      :ok
-    end)
-  end
-
-  defp cleanup_snapshot_rows_source([]), do: :ok
-
-  defp cleanup_snapshot_rows_source({:spooled_snapshot_rows, path, _row_count})
-       when is_binary(path),
-       do: safe_delete_snapshot_spool(path)
-
-  defp cleanup_snapshot_rows_source({:spooled_snapshot_rows, path, _skip_count, _row_count})
-       when is_binary(path),
-       do: safe_delete_snapshot_spool(path)
-
-  defp cleanup_snapshot_rows_source(_other), do: :ok
-
-  defp safe_delete_snapshot_spool(path) when is_binary(path) do
-    case File.rm(path) do
-      :ok -> :ok
-      {:error, :enoent} -> :ok
-      {:error, _reason} -> :ok
-    end
-  end
-
-  defp snapshot_replay_plan(meta_start_lsn, %{boundary_lsn: nil, rows: rows_source})
-       when is_binary(meta_start_lsn) do
-    _ = cleanup_snapshot_rows_source(rows_source)
-    {:ok, %{rows: [], snapshot_lsn_start: nil}}
-  end
-
   defp snapshot_replay_plan(meta_start_lsn, %{boundary_lsn: boundary_lsn, rows: rows_source})
-       when is_binary(meta_start_lsn) and is_binary(boundary_lsn) do
-    row_count = snapshot_row_source_count(rows_source)
-
-    case Lsn.compare(meta_start_lsn, boundary_lsn) do
-      :lt ->
-        with {:ok, snapshot_lsn_start_counter} <-
-               snapshot_lsn_start_counter(boundary_lsn, row_count),
-             {:ok, replayed_count} <-
-               replayed_snapshot_row_count(meta_start_lsn, snapshot_lsn_start_counter, row_count),
-             {:ok, remaining_rows_source} <-
-               snapshot_remaining_rows_source(rows_source, replayed_count) do
-          snapshot_lsn_start = Lsn.to_string(snapshot_lsn_start_counter + replayed_count)
-
-          {:ok, %{rows: remaining_rows_source, snapshot_lsn_start: snapshot_lsn_start}}
-        end
-
-      :eq ->
-        _ = cleanup_snapshot_rows_source(rows_source)
-        {:ok, %{rows: [], snapshot_lsn_start: nil}}
-
-      :gt ->
-        _ = cleanup_snapshot_rows_source(rows_source)
-        {:ok, %{rows: [], snapshot_lsn_start: nil}}
-
-      {:error, reason} ->
-        _ = cleanup_snapshot_rows_source(rows_source)
-        {:error, {:invalid_snapshot_handoff_lsn, reason}}
-    end
+       when is_binary(meta_start_lsn) do
+    SnapshotSpool.replay_plan(meta_start_lsn, boundary_lsn, rows_source)
   end
 
-  defp snapshot_row_source_count(rows) when is_list(rows), do: length(rows)
-
-  defp snapshot_row_source_count({:spooled_snapshot_rows, _path, row_count})
-       when is_integer(row_count) and row_count >= 0,
-       do: row_count
-
-  defp snapshot_row_source_count(_rows_source), do: 0
-
-  defp snapshot_remaining_rows_source(rows, replayed_count)
-       when is_list(rows) and is_integer(replayed_count) and replayed_count >= 0 do
-    {:ok, Enum.drop(rows, replayed_count)}
-  end
-
-  defp snapshot_remaining_rows_source(
-         {:spooled_snapshot_rows, path, row_count},
-         replayed_count
-       )
-       when is_binary(path) and is_integer(row_count) and row_count >= 0 and
-              is_integer(replayed_count) and replayed_count >= 0 do
-    if replayed_count >= row_count do
-      _ = safe_delete_snapshot_spool(path)
-      {:ok, []}
-    else
-      {:ok, {:spooled_snapshot_rows, path, replayed_count, row_count}}
-    end
-  end
-
-  defp snapshot_remaining_rows_source(rows_source, _replayed_count),
-    do: {:error, {:invalid_snapshot_rows_source, rows_source}}
-
-  defp snapshot_lsn_start_counter(boundary_lsn, row_count)
-       when is_binary(boundary_lsn) and is_integer(row_count) and row_count >= 0 do
-    with {:ok, boundary} <- Lsn.parse(boundary_lsn) do
-      {:ok, max(boundary - row_count, 0)}
-    end
-  end
-
-  defp replayed_snapshot_row_count(meta_start_lsn, snapshot_lsn_start_counter, row_count)
-       when is_binary(meta_start_lsn) and is_integer(snapshot_lsn_start_counter) and
-              is_integer(row_count) and row_count >= 0 do
-    with {:ok, meta_counter} <- Lsn.parse(meta_start_lsn) do
-      replayed = max(meta_counter - snapshot_lsn_start_counter, 0)
-      {:ok, min(replayed, row_count)}
-    end
-  end
+  defp cleanup_snapshot_rows_source(rows_source),
+    do: SnapshotSpool.cleanup_rows_source(rows_source)
 
   defp with_snapshot_lsn_start(opts, nil) when is_list(opts), do: opts
 
@@ -1248,13 +1078,10 @@ defmodule DuckFeeder.Runtime do
 
   defp maybe_replay_snapshot_rows(_service_module, _service_pid, []), do: :ok
 
-  defp maybe_replay_snapshot_rows(service_module, service_pid, rows)
-       when is_list(rows) do
-    Enum.reduce_while(rows, :ok, fn {designated_table, row}, :ok ->
-      case safe_snapshot_ingest(service_module, service_pid, designated_table, row) do
-        :ok -> {:cont, :ok}
-        {:error, reason} -> {:halt, {:error, {:snapshot_replay_failed, reason}}}
-      end
+  defp maybe_replay_snapshot_rows(service_module, service_pid, rows) do
+    rows
+    |> SnapshotSpool.replay_rows(fn designated_table, row ->
+      safe_snapshot_ingest(service_module, service_pid, designated_table, row)
     end)
     |> case do
       :ok ->
@@ -1266,61 +1093,12 @@ defmodule DuckFeeder.Runtime do
     end
   end
 
-  defp maybe_replay_snapshot_rows(
-         service_module,
-         service_pid,
-         {:spooled_snapshot_rows, path, skip_count, row_count}
-       )
-       when is_binary(path) and is_integer(skip_count) and skip_count >= 0 and
-              is_integer(row_count) and row_count >= 0 do
-    replay_result =
-      path
-      |> File.stream!([], :line)
-      |> Stream.drop(skip_count)
-      |> Enum.reduce_while(:ok, fn line, :ok ->
-        with {:ok, {designated_table, row}} <- decode_snapshot_spooled_row(line),
-             :ok <- safe_snapshot_ingest(service_module, service_pid, designated_table, row) do
-          {:cont, :ok}
-        else
-          {:error, reason} -> {:halt, {:error, {:snapshot_replay_failed, reason}}}
-        end
-      end)
-
-    _ = safe_delete_snapshot_spool(path)
-
-    case replay_result do
-      :ok ->
-        :ok
-
-      {:error, _reason} = error ->
-        _ = safe_stop_service(service_pid)
-        error
-    end
+  defp ignore_errors(fun) when is_function(fun, 0) do
+    fun.()
   rescue
-    exception ->
-      _ = safe_delete_snapshot_spool(path)
-      _ = safe_stop_service(service_pid)
-      {:error, {:snapshot_replay_failed, {:snapshot_spool_exception, exception}}}
+    _ -> :ok
   catch
-    kind, reason ->
-      _ = safe_delete_snapshot_spool(path)
-      _ = safe_stop_service(service_pid)
-      {:error, {:snapshot_replay_failed, {:snapshot_spool_throw, kind, reason}}}
-  end
-
-  defp decode_snapshot_spooled_row(line) when is_binary(line) do
-    trimmed = String.trim(line)
-
-    with {:ok, binary} <- Base.decode64(trimmed),
-         {designated_table, row} <- :erlang.binary_to_term(binary, [:safe]) do
-      {:ok, {designated_table, row}}
-    else
-      :error -> {:error, {:invalid_snapshot_spool_row, trimmed}}
-      other -> {:error, {:invalid_snapshot_spool_row, other}}
-    end
-  rescue
-    exception ->
-      {:error, {:invalid_snapshot_spool_row, exception}}
+    _, _ -> :ok
   end
 
   defp wrap_errors(label, fun) when is_atom(label) and is_function(fun, 0) do
