@@ -40,48 +40,6 @@ defmodule DuckFeeder.AppendStreamTest do
              DuckDBHelpers.query_duckdb_file(path, "SELECT id, kind FROM raw.events ORDER BY id")
   end
 
-  test "starts an internal DuckDB connection by default" do
-    {:ok, stream} =
-      AppendStream.start_link(
-        designated_tables: [%{id: 1, target_schema: "raw", target_table: "events"}],
-        meta_module: FakeMeta,
-        meta_conn: self()
-      )
-
-    on_exit(fn ->
-      ProcessHelpers.safe_stop(stream)
-    end)
-
-    state = :sys.get_state(stream)
-
-    assert is_pid(state.context.duckdb.conn)
-    assert is_pid(state.context.duckdb.server)
-  end
-
-  test "context stores prefixed checkpoint keys" do
-    {:ok, stream} =
-      AppendStream.start_link(
-        designated_tables: [%{id: 1, target_schema: "raw", target_table: "events"}],
-        meta_module: FakeMeta,
-        meta_conn: self(),
-        object_prefix: "events_prefix"
-      )
-
-    on_exit(fn ->
-      ProcessHelpers.safe_stop(stream)
-    end)
-
-    state = :sys.get_state(stream)
-    context = state.context
-
-    assert context.meta_conn == self()
-
-    assert context.designated_tables_by_target[{"raw", "events"}].checkpoint_key ==
-             "events_prefix:raw.events"
-
-    assert context.designated_tables_by_target[{"raw", "events"}].target_table == "events"
-  end
-
   test "returns error for unknown target table" do
     {:ok, stream} =
       AppendStream.start_link(

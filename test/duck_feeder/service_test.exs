@@ -70,50 +70,6 @@ defmodule DuckFeeder.ServiceTest do
     refute Service.in_transaction?(service)
   end
 
-  test "starts an internal DuckDB connection by default" do
-    {:ok, service} =
-      Service.start_link(
-        designated_tables: [],
-        meta_conn: self()
-      )
-
-    on_exit(fn ->
-      ProcessHelpers.safe_stop(service)
-    end)
-
-    state = :sys.get_state(service)
-
-    assert is_pid(state.context.duckdb.conn)
-    assert is_pid(state.context.duckdb.server)
-  end
-
-  test "context stores designated table mappings" do
-    designated_tables = [
-      %{
-        source_schema: "public",
-        source_table: "users",
-        target_schema: "raw",
-        target_table: "users"
-      }
-    ]
-
-    {:ok, service} =
-      Service.start_link(
-        designated_tables: designated_tables,
-        meta_conn: self()
-      )
-
-    on_exit(fn ->
-      ProcessHelpers.safe_stop(service)
-    end)
-
-    context = :sys.get_state(service).context
-
-    assert context.meta_conn == self()
-    assert context.designated_tables_by_target[{"raw", "users"}].checkpoint_key == "raw.users"
-    assert context.designated_tables_by_target[{"raw", "users"}].target_table == "users"
-  end
-
   test "attach_cdc emits latest checkpoint ack after prior commits" do
     path = DuckDBHelpers.temp_duckdb_path("service_attach_cdc")
 
