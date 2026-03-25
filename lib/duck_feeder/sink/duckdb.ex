@@ -704,7 +704,7 @@ defmodule DuckFeeder.Sink.DuckDB do
 
   defp cdc_batch?(rows) do
     Enum.all?(rows, fn row ->
-      is_map(row) and (Map.has_key?(row, :_op) or Map.has_key?(row, "_op"))
+      is_map(row) and Map.has_key?(row, :_op)
     end)
   end
 

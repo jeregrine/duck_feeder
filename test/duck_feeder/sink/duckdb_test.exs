@@ -315,6 +315,29 @@ defmodule DuckFeeder.Sink.DuckDBTest do
              DuckDB.process_batch(context, {"raw", "events"}, batch)
   end
 
+  test "treats string _op keys in append rows as regular user data", %{conn: conn} do
+    context =
+      sink_context(conn, [
+        %{
+          checkpoint_key: "source-a:raw.events",
+          target_schema: "raw",
+          target_table: "events"
+        }
+      ])
+
+    batch = %{
+      rows: [%{"id" => 1, "_op" => "user_value", "kind" => "page_view"}],
+      lsn_start: "0/30",
+      lsn_end: "0/31"
+    }
+
+    assert {:ok, result} = DuckDB.process_batch(context, {"raw", "events"}, batch)
+    assert result.row_count == 1
+
+    assert %{"_op" => ["user_value"], "id" => [1], "kind" => ["page_view"]} =
+             query_map(conn, "SELECT \"_op\", id, kind FROM raw.events ORDER BY id")
+  end
+
   test "rejects batches without rows", %{conn: conn} do
     context =
       sink_context(conn, [
